@@ -65,6 +65,10 @@ class Settings(BaseSettings):
         default=".local/browser-profiles",
         alias="BROWSER_PROFILE_DIR",
     )
+    platform_session_dir: str = Field(
+        default=".local/platform-sessions",
+        alias="PLATFORM_SESSION_DIR",
+    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
     api_port: int = Field(default=8200, alias="API_PORT", ge=1, le=65535)

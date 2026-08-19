@@ -1,7 +1,8 @@
 # 八个平台 16 项协议能力矩阵
 
-最后验证：2026-08-20，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先，协议被拦或
-缺字段时使用按平台隔离的 Camoufox 浏览器 Profile 兜底；不硬编码浏览器 Cookie/签名。
+最后验证：2026-08-20，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先；需要账号的
+平台通过本机一次性登录保存 storage-state，业务请求随后只使用本地会话和动态协议签名，
+不硬编码浏览器 Cookie/签名。
 
 状态含义：
 
@@ -15,14 +16,14 @@
 | 抖音 | 评论 | 浏览器按响应判定 | `/aweme/v1/web/comment/list/`；浏览器请求带动态设备风控状态 | 当前样例无会话时 HTTP 200 空包，结果明确说明评论未返回 |
 | 头条 | 互动量 | 受 SSR/挑战影响 | 文章 SSR 中的 `itemCounter`/`likeData`；无 `_signature` 的评论接口可用 | 直接协议首包可能是 JSVM 挑战，统计字段可能为空 |
 | 头条 | 评论 | 可用（部分覆盖） | `/article/v4/tab_comments/`，参数 `aid/app_name/offset/count/group_id/item_id` | 只能说明指定公开页，不保证评论全集 |
-| 公众号 | 互动量 | 浏览器尝试，受文章会话影响 | `/mp/getappmsgext`、文章 SSR | 需要 `__biz/mid/idx/sn/chksm/pass_ticket/appmsg_token` 等文章会话参数 |
-| 公众号 | 评论 | 浏览器尝试，受文章会话影响 | `/mp/appmsg_comment?action=getcomment` | `ret=-3, errmsg=no session` 时明确 blocked |
-| 小红书 | 互动量 | 可用（部分覆盖） | 详情页 SSR `noteDetailMap.interactInfo` | 部分旧/失效 URL 的 SSR 统计为空，需有效笔记页 |
-| 小红书 | 评论 | 浏览器尝试，受登录/签名影响 | `edith.xiaohongshu.com/api/sns/web/v2/comment/page` | 协议签名被 406 时转浏览器；页面仍可能要求登录 |
+| 公众号 | 互动量 | 可用（部分覆盖） | 文章 SSR `appmsgstat`，会话有效时尝试 `/mp/getappmsgext` | 文章会话参数可能只在微信客户端链路出现，匿名页可能没有计数 |
+| 公众号 | 评论 | 受文章会话影响 | `/mp/appmsg_comment?action=getcomment` | `show_comment=0` 表示作者关闭评论；`ret=-3, errmsg=no session` 明确 blocked |
+| 小红书 | 互动量 | 可用（部分覆盖） | 登录态 + `xhshow` 签名调用 `/api/sns/web/v1/feed`，无会话回退详情 SSR | URL 必须包含有效笔记 ID；旧链接可能已失效 |
+| 小红书 | 评论 | 可用（登录态、部分覆盖） | `edith.xiaohongshu.com/api/sns/web/v2/comment/page` + `x-s/x-t/x-s-common` | 需要有效 cookie 和 URL 中的 `xsec_token`，只保证指定页 |
 | 好看 | 互动量 | 可用（字段不完整） | `/haokan/ui-web/v2/comment/get` 可取 `comment_count` | 点赞、播放、分享等详情接口尚未确认稳定参数 |
 | 好看 | 评论 | 可用（部分覆盖） | `/haokan/ui-web/v2/comment/get`，`rn/url_key/pn/child_rn` | 只能说明指定页，不保证评论全集 |
-| 快手 | 互动量 | 浏览器尝试，先校验目标 ID | `visionShortVideoReco`、`visionVideoDetail` | 匿名协议可能返回无关推荐流；浏览器必须匹配目标 `photo.id` |
-| 快手 | 评论 | 浏览器尝试，受验证码影响 | `visionCommentList` | `Need captcha` 时明确 blocked，依赖短期 `kww/kwfv1/kwssectoken` |
+| 快手 | 互动量 | 可用（登录态、部分覆盖） | `POST /graphql` 的 `visionVideoDetail` | 需要登录态；严格校验响应 `photo.id`，不接受推荐流冒充目标 |
+| 快手 | 评论 | 可用（登录态、部分覆盖） | `POST /rest/v/photo/comment/list`，失败时回退 `visionCommentList` | `Need captcha` 时明确 blocked；只返回一级评论 |
 | B 站 | 互动量 | 可用（部分覆盖） | `/x/web-interface/view` | 返回当前公开计数，平台变化或限流仍可能影响结果 |
 | B 站 | 评论 | 可用（部分覆盖） | `/x/v2/reply/wbi/main`；WBI 密钥从 `/x/web-interface/nav` 动态提取并签名 | WBI 是游标接口，项目将公开 `page` 转换为游标遍历；只保证当前页 |
 | 微博 | 互动量 | 可用（部分覆盖） | `m.weibo.cn/statuses/show?id=...` | 访客态字段受限流和可见性影响 |
@@ -30,15 +31,15 @@
 
 ## 结论
 
-当前纯协议稳定范围仍是：B 站 2 项、微博 2 项、头条评论、好看评论；启用浏览器兜底后，抖音互动量已验证可通过动态页面会话获取，头条/小红书/公众号/快手进入页面后按实际响应继续尝试。
+当前无需登录即可验证的纯协议范围仍是：B 站 2 项、微博 2 项、头条评论、好看评论；建立本地会话后，快手互动量/一级评论和小红书签名互动量/一级评论进入协议适配器。公众号仍受文章是否开启评论以及微信文章会话类型限制，接口会区分关闭评论和 `no session`。
 
-仍不应硬编码或伪造的内容是：公众号文章会话参数、小红书动态签名、快手 `kww`/验证码状态和抖音临时 Cookie。遇到登录、验证码或空响应时，接口返回 `blocked`/`unsupported` 与原因。
+仍不应硬编码或伪造的内容是：公众号文章会话参数、小红书动态签名、快手 `kww`/验证码状态和抖音临时 Cookie。首次登录使用 `creator-engagement-login <platform>`，后续请求读取 `.local/platform-sessions/<platform>.json`；遇到登录、验证码或空响应时，接口返回 `blocked`/`unsupported` 与原因。
 
 运行时使用 `--direct` 可排除代理池质量对协议验证的干扰；生产环境仍可使用 Stock 项目同源的 51 代理池，但应把代理失败和平台返回分开记录。
 
 ## 公开资料交叉验证
 
-联网检索到的小红书评论工具 `mashukui/xhs_search_comment_tool` 明确要求用户手工填写自己的 Cookie，且不公开签名源码；`shuicici/xiaohongshu-scraper` 使用 Apify/代理并提示部分数据需要认证。抖音公开项目 `intAV/Douyin_live_like` 同样要求手工复制 Cookie。它们能证明“带用户会话的协议采集可行”，但不能提供本项目要求的匿名、无浏览器、可长期部署的签名实现，因此没有把这些项目的一次性 Cookie 方案复制进业务代码。
+联网检索到的小红书评论工具 `mashukui/xhs_search_comment_tool` 明确要求用户手工填写自己的 Cookie；项目实际采用独立 MIT 包 `xhshow==0.2.0` 生成动态签名，不复制 MediaCrawler 的非商业代码。快手 GraphQL 结构参考公开 `kuaishou-comment-scraper` 和 MediaCrawler 文档，只实现本项目需要的详情、一级评论和目标 ID 校验。
 
 - <https://github.com/mashukui/xhs_search_comment_tool>
 - <https://github.com/shuicici/xiaohongshu-scraper>

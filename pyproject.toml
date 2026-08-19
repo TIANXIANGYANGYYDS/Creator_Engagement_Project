@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings",
     "requests",
     "uvicorn[standard]",
+    "xhshow==0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,7 @@ browser = ["camoufox==0.5.4", "playwright==1.60.0"]
 
 [project.scripts]
 creator-engagement = "app.manually_execute_script.fetch_url_engagement:main"
+creator-engagement-login = "app.manually_execute_script.login_platform:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

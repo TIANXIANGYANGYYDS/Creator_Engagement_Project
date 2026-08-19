@@ -25,6 +25,7 @@ BROWSER_TIMEOUT_SECONDS=35
 BROWSER_CHALLENGE_WAIT_SECONDS=5
 BROWSER_HEADLESS=true
 BROWSER_PROFILE_DIR=".local/browser-profiles"
+PLATFORM_SESSION_DIR=".local/platform-sessions"
 ```
 
 `MyAgent` 环境需要同时具备 `camoufox` Python 包和匹配版本的 Camoufox 浏览器二进制。
@@ -37,3 +38,7 @@ Xvfb 的运行环境单独配置，不要把人工验证码结果提交到仓库
 直接解析；同一页面的 `/aweme/v1/web/comment/list/` 在无会话时可能 HTTP 200 空包。
 这类结果会保留统计并明确说明评论未返回。公众号、快手和部分小红书页面可能停在登录、
 安全验证或验证码页，兜底层会报告阻断，不会把推荐流或页面文案当成目标作品数据。
+
+快手和小红书已有协议适配器：登录态建立后优先走 GraphQL/REST 或 `xhshow` 签名请求；
+浏览器兜底只作为运行环境允许时的最后诊断路径。公众号文章的 `show_comment=0` 会直接
+判定为作者关闭评论，不会启动浏览器伪造结果。

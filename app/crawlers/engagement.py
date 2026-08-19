@@ -14,7 +14,7 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 from app.crawlers.http_client import (
@@ -35,6 +35,7 @@ from app.models.engagement import (
 
 if TYPE_CHECKING:
     from app.crawlers.browser_fallback import BrowserFallback
+    from app.crawlers.platform_session import PlatformSessionStore
 
 
 DOUYIN_DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
@@ -54,6 +55,39 @@ BILIBILI_WBI_MIXIN_KEY_ENC_TAB = (
     37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
     22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 )
+KUAISHOU_GRAPHQL_URL = "https://www.kuaishou.com/graphql"
+KUAISHOU_COMMENT_URL = "https://www.kuaishou.com/rest/v/photo/comment/list"
+KUAISHOU_DETAIL_QUERY = """
+query visionVideoDetail($photoId: String) {
+  visionVideoDetail(photoId: $photoId) {
+    status
+    photo {
+      id
+      viewCount
+      likeCount
+      realLikeCount
+      commentCount
+    }
+  }
+}
+"""
+KUAISHOU_COMMENT_QUERY = """
+query commentListQuery($photoId: String, $pcursor: String) {
+  visionCommentList(photoId: $photoId, pcursor: $pcursor) {
+    commentCountV2
+    pcursorV2
+    rootCommentsV2 {
+      commentId
+      authorId
+      authorName
+      content
+      timestamp
+      likedCount
+      subCommentCount
+    }
+  }
+}
+"""
 
 
 class EngagementCrawler:
@@ -68,6 +102,8 @@ class EngagementCrawler:
         proxy_provider: Any | None = None,
         proxy_mode: str = "direct",
         browser_fallback: "BrowserFallback | None" = None,
+        session_store: "PlatformSessionStore | None" = None,
+        platform_cookies: dict[EngagementPlatform, str] | None = None,
     ) -> None:
         self._owns_client = client is None
         self.client = client or CurlAsyncHttpClient(
@@ -84,6 +120,8 @@ class EngagementCrawler:
         )
         self.cookies = cookies
         self.browser_fallback = browser_fallback
+        self.session_store = session_store
+        self.platform_cookies = platform_cookies or {}
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -166,11 +204,21 @@ class EngagementCrawler:
             )
         elif platform == "xiaohongshu":
             result = await self._xiaohongshu(
-                url, work_id,
+                url, work_id, page=page,
                 include_stats=include_stats, include_comments=include_comments,
             )
         elif platform == "toutiao":
             result = await self._toutiao(
+                url, work_id, limit, page=page,
+                include_stats=include_stats, include_comments=include_comments,
+            )
+        elif platform == "kuaishou":
+            result = await self._kuaishou(
+                url, work_id, limit, page=page,
+                include_stats=include_stats, include_comments=include_comments,
+            )
+        elif platform == "wechat":
+            result = await self._wechat(
                 url, work_id, limit, page=page,
                 include_stats=include_stats, include_comments=include_comments,
             )
@@ -264,6 +312,30 @@ class EngagementCrawler:
             raise PlatformCrawlerError("engagement endpoint returned invalid JSON")
         return payload
 
+    async def _post_json(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        data: str | bytes | dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = await self._post_response(
+            url,
+            params=params,
+            headers=headers,
+            data=data,
+            json_body=json_body,
+        )
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise PlatformCrawlerError("engagement endpoint returned non-JSON") from exc
+        if not isinstance(payload, dict):
+            raise PlatformCrawlerError("engagement endpoint returned invalid JSON")
+        return payload
+
     async def _get_response(
         self,
         url: str,
@@ -280,11 +352,50 @@ class EngagementCrawler:
         except Exception as exc:
             raise PlatformCrawlerError("engagement request failed") from exc
         status = int(getattr(response, "status_code", 0))
-        if status in {403, 412, 418, 429, 432, 471}:
+        if status in {401, 403, 406, 412, 418, 429, 432, 461, 471}:
             raise PlatformBlockedError(f"engagement endpoint blocked with HTTP {status}")
         if status < 200 or status >= 300:
             raise PlatformCrawlerError(f"engagement endpoint returned HTTP {status}")
         return response
+
+    async def _post_response(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        data: str | bytes | dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
+        post = getattr(self.client, "post", None)
+        if post is None:
+            raise PlatformCrawlerError("HTTP client does not support POST")
+        try:
+            response = await post(
+                url,
+                params=params,
+                headers=dict(headers or {}),
+                data=data,
+                json=json_body,
+            )
+        except Exception as exc:
+            raise PlatformCrawlerError("engagement request failed") from exc
+        status = int(getattr(response, "status_code", 0))
+        if status in {401, 403, 406, 412, 418, 429, 432, 461, 471}:
+            raise PlatformBlockedError(f"engagement endpoint blocked with HTTP {status}")
+        if status < 200 or status >= 300:
+            raise PlatformCrawlerError(f"engagement endpoint returned HTTP {status}")
+        return response
+
+    def _platform_cookie(self, platform: EngagementPlatform) -> str:
+        configured = self.platform_cookies.get(platform, "").strip()
+        if configured:
+            return configured
+        if self.session_store is not None:
+            stored = self.session_store.cookie_header(platform).strip()
+            if stored:
+                return stored
+        return self.cookies.strip() if platform == "douyin" else ""
 
     async def _douyin(
         self,
@@ -710,47 +821,493 @@ class EngagementCrawler:
         url: str,
         work_id: str,
         *,
+        page: int = 1,
         include_stats: bool,
         include_comments: bool,
     ) -> EngagementResult:
         parsed = urlparse(url)
         token = parse_qs(parsed.query).get("xsec_token", [""])[0]
-        if include_comments and not include_stats:
-            return EngagementResult(
-                platform="xiaohongshu",
-                canonical_url=f"https://www.xiaohongshu.com/explore/{work_id}",
-                work_id=work_id,
-                coverage="unsupported",
-                reason="小红书评论接口需要每次生成 x-s/x-t 签名，当前尚未达到可部署标准",
-                source="api/sns/web/v2/comment/page",
-                xsec_token=token,
-                comment_endpoint="https://edith.xiaohongshu.com/api/sns/web/v2/comment/page",
-            )
+        source = parse_qs(parsed.query).get("xsec_source", ["pc_search"])[0] or "pc_search"
+        cookie = self._platform_cookie("xiaohongshu")
+        canonical_url = f"https://www.xiaohongshu.com/explore/{work_id}"
         try:
-            response = await self._get_response(
-                url,
-                headers={"Referer": "https://www.xiaohongshu.com/explore"},
-            )
-            text = str(getattr(response, "text", ""))
-            stats = _parse_xhs_stats(text, work_id)
-            reason = "SSR 已提供互动统计；评论接口需要每次生成 x-s/x-t 签名，未硬编码临时签名"
+            stats = EngagementStats()
+            comments: list[EngagementComment] = []
+            next_cursor: str | None = None
+            sources: list[str] = []
+
+            if include_stats:
+                if cookie and token:
+                    feed_payload = {
+                        "source_note_id": work_id,
+                        "image_formats": ["jpg", "webp", "avif"],
+                        "extra": {"need_body_topic": 1},
+                        "xsec_source": source,
+                        "xsec_token": token,
+                    }
+                    try:
+                        feed = await self._xhs_post("/api/sns/web/v1/feed", feed_payload, cookie, url)
+                        note = _xhs_note_card(feed)
+                        stats = _xhs_stats_from_note(note)
+                        if any(value is not None for value in stats.model_dump().values()):
+                            sources.append("api/sns/web/v1/feed")
+                    except PlatformCrawlerError:
+                        pass
+                if not any(value is not None for value in stats.model_dump().values()):
+                    response = await self._get_response(
+                        url,
+                        headers={"Referer": "https://www.xiaohongshu.com/explore"},
+                    )
+                    stats = _parse_xhs_stats(str(getattr(response, "text", "")), work_id)
+                    sources.append("note SSR noteDetailMap")
+
+            if include_comments:
+                if not cookie:
+                    if include_stats:
+                        return EngagementResult(
+                            platform="xiaohongshu",
+                            canonical_url=canonical_url,
+                            work_id=work_id,
+                            coverage="partial",
+                            reason="小红书 SSR 已返回互动统计；评论需要登录态和 xsec_token",
+                            source="note SSR noteDetailMap",
+                            stats=stats,
+                        )
+                    return _result_error(
+                        "xiaohongshu",
+                        url,
+                        work_id,
+                        "unsupported",
+                        "小红书评论需要登录态；请在本机运行 login_platform xiaohongshu 建立会话",
+                    )
+                if not token:
+                    if include_stats:
+                        return EngagementResult(
+                            platform="xiaohongshu",
+                            canonical_url=canonical_url,
+                            work_id=work_id,
+                            coverage="partial",
+                            reason="小红书 SSR 已返回互动统计；评论 URL 缺少 xsec_token",
+                            source="note SSR noteDetailMap",
+                            stats=stats,
+                        )
+                    return _result_error(
+                        "xiaohongshu",
+                        url,
+                        work_id,
+                        "unsupported",
+                        "小红书评论需要 URL 中的 xsec_token；请使用搜索或推荐流生成的完整笔记链接",
+                    )
+                cursor = ""
+                total: int | None = None
+                for current_page in range(1, page + 1):
+                    params = {
+                        "note_id": work_id,
+                        "cursor": cursor,
+                        "top_comment_id": "",
+                        "image_formats": "jpg,webp,avif",
+                        "xsec_token": token,
+                    }
+                    comment_payload = await self._xhs_get(
+                        "/api/sns/web/v2/comment/page",
+                        params,
+                        cookie,
+                        url,
+                    )
+                    comments = _parse_xhs_comments(comment_payload)
+                    total = _int(
+                        comment_payload.get("total_count")
+                        or comment_payload.get("comment_count")
+                        or comment_payload.get("comments_count")
+                    )
+                    next_cursor = (
+                        str(comment_payload.get("cursor"))
+                        if comment_payload.get("has_more") and comment_payload.get("cursor")
+                        else None
+                    )
+                    if current_page == page:
+                        break
+                    if next_cursor is None:
+                        comments = []
+                        break
+                    cursor = next_cursor
+                if not include_stats and total is not None:
+                    stats = EngagementStats(comments=total)
+                sources.append("api/sns/web/v2/comment/page")
+
+            if not comments and not any(value is not None for value in stats.model_dump().values()):
+                return _result_error(
+                    "xiaohongshu",
+                    url,
+                    work_id,
+                    "unsupported",
+                    "小红书笔记页面未返回可验证互动或评论数据，URL 可能已失效或需要登录验证",
+                )
+
             return EngagementResult(
                 platform="xiaohongshu",
-                canonical_url=f"https://www.xiaohongshu.com/explore/{work_id}",
+                canonical_url=canonical_url,
                 work_id=work_id,
                 coverage="partial",
-                reason=reason,
-                source="note SSR noteDetailMap",
+                reason=(
+                    "小红书登录会话和纯算法动态签名已生效；评论仅返回指定公开页"
+                    if include_comments
+                    else "小红书互动量来自签名详情接口或笔记 SSR"
+                ),
+                source=" + ".join(sources),
                 stats=stats,
-                comments=[],
-                next_cursor=None,
-                xsec_token=token,
-                comment_endpoint="https://edith.xiaohongshu.com/api/sns/web/v2/comment/page",
+                comments=comments,
+                next_cursor=next_cursor,
             )
         except PlatformBlockedError as exc:
             return _result_error("xiaohongshu", url, work_id, "blocked", str(exc))
         except Exception as exc:
             return _result_error("xiaohongshu", url, work_id, "failed", str(exc))
+
+    async def _xhs_get(
+        self,
+        uri: str,
+        params: dict[str, Any],
+        cookie: str,
+        referer: str,
+    ) -> dict[str, Any]:
+        headers = _xhs_signed_headers(uri, cookie, params=params)
+        headers.update(_authenticated_headers(cookie, referer))
+        query = "&".join(
+            f"{quote(str(key), safe='')}={quote(str(value), safe=',')}"
+            for key, value in params.items()
+        )
+        payload = await self._get_json(
+            f"https://edith.xiaohongshu.com{uri}?{query}",
+            headers=headers,
+        )
+        return _unwrap_platform_data(payload, "小红书")
+
+    async def _xhs_post(
+        self,
+        uri: str,
+        payload: dict[str, Any],
+        cookie: str,
+        referer: str,
+    ) -> dict[str, Any]:
+        headers = _xhs_signed_headers(uri, cookie, payload=payload)
+        headers.update(_authenticated_headers(cookie, referer))
+        headers["Content-Type"] = "application/json;charset=UTF-8"
+        response = await self._post_json(
+            f"https://edith.xiaohongshu.com{uri}",
+            headers=headers,
+            data=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+        )
+        return _unwrap_platform_data(response, "小红书")
+
+    async def _kuaishou(
+        self,
+        url: str,
+        work_id: str,
+        limit: int,
+        *,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
+        cookie = self._platform_cookie("kuaishou")
+        if not cookie:
+            return _result_error(
+                "kuaishou",
+                url,
+                work_id,
+                "unsupported",
+                "快手 GraphQL/评论接口需要登录态，且网页请求会带短期 kww/kwssectoken；匿名评论常见响应为 Need captcha。请在本机运行 login_platform kuaishou 建立会话",
+            )
+        headers = _authenticated_headers(cookie, url)
+        headers.update({
+            "Content-Type": "application/json",
+            "Origin": "https://www.kuaishou.com",
+        })
+        try:
+            stats = EngagementStats()
+            comments: list[EngagementComment] = []
+            next_cursor: str | None = None
+            sources: list[str] = []
+            if include_stats:
+                detail_payload = {
+                    "operationName": "visionVideoDetail",
+                    "variables": {"photoId": work_id},
+                    "query": KUAISHOU_DETAIL_QUERY,
+                }
+                detail_response = await self._post_json(
+                    KUAISHOU_GRAPHQL_URL,
+                    headers=headers,
+                    data=json.dumps(detail_payload, separators=(",", ":")),
+                )
+                _raise_kuaishou_errors(detail_response)
+                detail = (detail_response.get("data") or {}).get("visionVideoDetail") or {}
+                photo = detail.get("photo") or {}
+                if str(photo.get("id") or "") != work_id:
+                    raise PlatformCrawlerError("快手详情响应未匹配目标 photoId")
+                stats = EngagementStats(
+                    views=_int(photo.get("viewCount")),
+                    likes=_int(photo.get("likeCount") or photo.get("realLikeCount")),
+                    comments=_int(photo.get("commentCount")),
+                )
+                sources.append("graphql visionVideoDetail")
+
+            if include_comments:
+                cursor = ""
+                total: int | None = None
+                for current_page in range(1, page + 1):
+                    comment_payload = await self._kuaishou_comment_page(
+                        work_id,
+                        cursor,
+                        headers,
+                    )
+                    comments = _parse_kuaishou_comments(
+                        comment_payload.get("rootCommentsV2") or []
+                    )
+                    total = _int(
+                        comment_payload.get("commentCountV2")
+                        or comment_payload.get("commentCount")
+                    )
+                    raw_cursor = comment_payload.get("pcursorV2") or comment_payload.get("pcursor")
+                    next_cursor = (
+                        str(raw_cursor)
+                        if raw_cursor not in {None, "", "0", "no_more"}
+                        else None
+                    )
+                    if current_page == page:
+                        break
+                    if next_cursor is None:
+                        comments = []
+                        break
+                    cursor = next_cursor
+                if not include_stats and total is not None:
+                    stats = EngagementStats(comments=total)
+                elif include_stats and stats.comments is None and total is not None:
+                    stats.comments = total
+                sources.append("rest/v/photo/comment/list")
+
+            return EngagementResult(
+                platform="kuaishou",
+                canonical_url=f"https://www.kuaishou.com/short-video/{work_id}",
+                work_id=work_id,
+                coverage="partial",
+                reason=(
+                    "快手登录会话可读取指定页一级评论；子回复未包含在本接口"
+                    if include_comments else "快手登录会话可读取目标作品当前互动量"
+                ),
+                source=" + ".join(sources),
+                stats=stats,
+                comments=comments[:limit],
+                next_cursor=next_cursor,
+            )
+        except PlatformBlockedError as exc:
+            return _result_error("kuaishou", url, work_id, "blocked", str(exc))
+        except Exception as exc:
+            coverage: EngagementCoverage = "blocked" if _is_challenge_text(str(exc)) else "failed"
+            return _result_error("kuaishou", url, work_id, coverage, str(exc))
+
+    async def _kuaishou_comment_page(
+        self,
+        work_id: str,
+        cursor: str,
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        rest_payload = {"photoId": work_id, "pcursor": cursor}
+        rest = await self._post_json(
+            KUAISHOU_COMMENT_URL,
+            headers=headers,
+            data=json.dumps(rest_payload, separators=(",", ":")),
+        )
+        if rest.get("result") == 1:
+            return rest
+        if _is_challenge_text(json.dumps(rest, ensure_ascii=False)):
+            raise PlatformBlockedError("快手评论接口要求验证码或会话已失效")
+        graphql_payload = {
+            "operationName": "commentListQuery",
+            "variables": {"photoId": work_id, "pcursor": cursor},
+            "query": KUAISHOU_COMMENT_QUERY,
+        }
+        graphql = await self._post_json(
+            KUAISHOU_GRAPHQL_URL,
+            headers=headers,
+            data=json.dumps(graphql_payload, separators=(",", ":")),
+        )
+        _raise_kuaishou_errors(graphql)
+        comment_list = (graphql.get("data") or {}).get("visionCommentList")
+        if not isinstance(comment_list, dict):
+            raise PlatformCrawlerError("快手评论响应没有目标数据")
+        return comment_list
+
+    async def _wechat(
+        self,
+        url: str,
+        work_id: str,
+        limit: int,
+        *,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
+        cookie = self._platform_cookie("wechat")
+        try:
+            article_response = await self._get_response(
+                url,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Referer": "https://mp.weixin.qq.com/",
+                    **({"Cookie": cookie} if cookie else {}),
+                },
+            )
+            text = str(getattr(article_response, "text", "") or "")
+            metadata = _parse_wechat_metadata(text, url)
+            stats = _parse_wechat_stats(text) if include_stats else EngagementStats()
+            if include_stats and not any(value is not None for value in stats.model_dump().values()) and cookie:
+                try:
+                    ext_payload = await self._wechat_appmsgext(url, metadata, cookie)
+                    stats = _parse_wechat_stats_from_payload(ext_payload)
+                except PlatformCrawlerError:
+                    pass
+
+            if not include_comments:
+                has_stats = any(value is not None for value in stats.model_dump().values())
+                return EngagementResult(
+                    platform="wechat",
+                    canonical_url=url,
+                    work_id=work_id,
+                    coverage="partial" if has_stats else "unsupported",
+                    reason=(
+                        "公众号文章页面返回了当前会话可见互动量"
+                        if has_stats
+                        else "公众号匿名文章页未下发阅读/点赞统计；需微信文章会话，普通网页账号登录不一定有效"
+                    ),
+                    source="mp article appmsgstat/cgiDataNew",
+                    stats=stats,
+                )
+
+            if metadata.get("show_comment") == "0":
+                return EngagementResult(
+                    platform="wechat",
+                    canonical_url=url,
+                    work_id=work_id,
+                    coverage="partial",
+                    reason="该公众号文章由作者关闭评论，登录账号也不会产生可抓取评论",
+                    source="cgiDataNew.show_comment",
+                    stats=stats,
+                )
+            required = ("biz", "mid", "idx", "comment_id")
+            if any(not metadata.get(key) for key in required):
+                return _result_error(
+                    "wechat", url, work_id, "unsupported", "公众号文章没有暴露完整评论参数"
+                )
+            if not cookie:
+                return _result_error(
+                    "wechat",
+                    url,
+                    work_id,
+                    "unsupported",
+                    "公众号评论需要有效微信文章会话；请在本机运行 login_platform wechat 后再试",
+                )
+            params = {
+                "action": "getcomment",
+                "__biz": metadata["biz"],
+                "mid": metadata["mid"],
+                "idx": metadata["idx"],
+                "comment_id": metadata["comment_id"],
+                "offset": str((page - 1) * min(limit, COMMENT_PAGE_SIZE)),
+                "limit": str(min(limit, COMMENT_PAGE_SIZE)),
+                "appmsg_token": metadata.get("appmsg_token", ""),
+                "uin": metadata.get("uin", ""),
+                "key": metadata.get("key", ""),
+                "pass_ticket": metadata.get("pass_ticket", ""),
+                "wxtoken": "777",
+                "devicetype": metadata.get("devicetype", "Windows 10 x64"),
+                "clientversion": metadata.get("clientversion", "63090c11"),
+                "f": "json",
+            }
+            payload = await self._get_json(
+                "https://mp.weixin.qq.com/mp/appmsg_comment",
+                params=params,
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": url,
+                    "Cookie": cookie,
+                },
+            )
+            base = payload.get("base_resp") or {}
+            raw_ret = payload.get("ret") if payload.get("ret") is not None else base.get("ret")
+            try:
+                ret = int(raw_ret) if raw_ret not in {None, ""} else None
+            except (TypeError, ValueError):
+                ret = None
+            errmsg = str(payload.get("errmsg") or base.get("errmsg") or "")
+            if ret not in {None, 0}:
+                coverage: EngagementCoverage = "blocked" if ret == -3 or "session" in errmsg.lower() else "failed"
+                return _result_error("wechat", url, work_id, coverage, f"公众号评论接口: {errmsg or ret}")
+            comments = _parse_wechat_comments(payload)
+            total = _int(
+                payload.get("total_count")
+                or payload.get("total")
+                or _find_nested_value(payload, {"total_count", "total"})
+            )
+            has_more = bool(payload.get("is_continue") or payload.get("has_more"))
+            return EngagementResult(
+                platform="wechat",
+                canonical_url=url,
+                work_id=work_id,
+                coverage="partial",
+                reason="公众号评论依赖当前微信文章会话；仅返回指定公开页",
+                source="mp/appmsg_comment",
+                stats=EngagementStats(comments=total),
+                comments=comments[:limit],
+                next_cursor=str(page + 1) if has_more else None,
+            )
+        except PlatformBlockedError as exc:
+            return _result_error("wechat", url, work_id, "blocked", str(exc))
+        except Exception as exc:
+            return _result_error("wechat", url, work_id, "failed", str(exc))
+
+    async def _wechat_appmsgext(
+        self,
+        article_url: str,
+        metadata: dict[str, str],
+        cookie: str,
+    ) -> dict[str, Any]:
+        query = {
+            "__biz": metadata.get("biz", ""),
+            "mid": metadata.get("mid", ""),
+            "idx": metadata.get("idx", "1"),
+            "sn": metadata.get("sn", ""),
+            "scene": "0",
+            "appmsg_token": metadata.get("appmsg_token", ""),
+        }
+        form = {
+            "r": "0",
+            "__biz": metadata.get("biz", ""),
+            "appmsg_type": "9",
+            "mid": metadata.get("mid", ""),
+            "sn": metadata.get("sn", ""),
+            "idx": metadata.get("idx", "1"),
+            "scene": "0",
+            "title": "",
+            "ct": "0",
+            "is_need_ad": "0",
+            "is_need_reward": "0",
+            "comment_id": metadata.get("comment_id", ""),
+            "is_only_read": "0",
+            "appmsg_token": metadata.get("appmsg_token", ""),
+        }
+        payload = await self._post_json(
+            "https://mp.weixin.qq.com/mp/getappmsgext",
+            params=query,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Referer": article_url,
+                "Cookie": cookie,
+            },
+            data=urlencode(form),
+        )
+        return payload
 
     async def _toutiao(
         self,
@@ -1014,6 +1571,230 @@ def _sign_bilibili_wbi_params(
     query = urlencode(sorted(signed.items()))
     signed["w_rid"] = md5(f"{query}{mixin_key}".encode()).hexdigest()
     return signed
+
+
+def _authenticated_headers(cookie: str, referer: str) -> dict[str, str]:
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Cookie": cookie,
+        "Referer": referer,
+        "User-Agent": DOUYIN_DESKTOP_USER_AGENT,
+    }
+
+
+def _xhs_signed_headers(
+    uri: str,
+    cookie: str,
+    *,
+    params: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    try:
+        from xhshow import Xhshow
+    except ImportError as exc:
+        raise PlatformCrawlerError("小红书签名依赖 xhshow 未安装") from exc
+    signer = Xhshow()
+    if params is not None:
+        signed = signer.sign_headers_get(uri=uri, cookies=cookie, params=params)
+    elif payload is not None:
+        signed = signer.sign_headers_post(uri=uri, cookies=cookie, payload=payload)
+    else:
+        raise ValueError("params or payload is required")
+    return {
+        key: value
+        for key, value in {
+            "X-S": signed.get("x-s"),
+            "X-T": signed.get("x-t"),
+            "X-S-Common": signed.get("x-s-common"),
+            "X-B3-Traceid": signed.get("x-b3-traceid"),
+        }.items()
+        if value
+    }
+
+
+def _unwrap_platform_data(payload: dict[str, Any], platform: str) -> dict[str, Any]:
+    if payload.get("success") is False:
+        raise PlatformCrawlerError(str(payload.get("msg") or f"{platform} response failed"))
+    if payload.get("success") is True:
+        data = payload.get("data")
+        return data if isinstance(data, dict) else {}
+    return payload
+
+
+def _xhs_note_card(payload: dict[str, Any]) -> dict[str, Any]:
+    items = payload.get("items") or []
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        card = items[0].get("note_card") or items[0].get("noteCard") or items[0]
+        return card if isinstance(card, dict) else {}
+    return payload.get("note_card") or payload.get("noteCard") or payload
+
+
+def _xhs_stats_from_note(note: dict[str, Any]) -> EngagementStats:
+    interact = note.get("interact_info") or note.get("interactInfo") or note
+    return EngagementStats(
+        likes=_int(interact.get("liked_count") or interact.get("likedCount")),
+        favorites=_int(interact.get("collected_count") or interact.get("collectedCount")),
+        shares=_int(interact.get("share_count") or interact.get("shareCount")),
+        comments=_int(interact.get("comment_count") or interact.get("commentCount")),
+    )
+
+
+def _parse_xhs_comments(payload: dict[str, Any]) -> list[EngagementComment]:
+    result: list[EngagementComment] = []
+    for item in payload.get("comments") or payload.get("comment_list") or []:
+        if not isinstance(item, dict):
+            continue
+        user = item.get("user_info") or item.get("userInfo") or item.get("user") or {}
+        if not isinstance(user, dict):
+            user = {}
+        comment_id = str(item.get("id") or item.get("comment_id") or item.get("commentId") or "")
+        text = str(item.get("content") or item.get("text") or "")
+        if not comment_id or not text:
+            continue
+        timestamp = item.get("create_time") or item.get("createTime") or item.get("timestamp")
+        result.append(EngagementComment(
+            comment_id=comment_id,
+            author=str(user.get("nickname") or user.get("nick_name") or user.get("name") or ""),
+            text=BeautifulSoup(text, "html.parser").get_text(" ", strip=True),
+            created_at=_timestamp(timestamp),
+            likes=_int(item.get("like_count") or item.get("likeCount") or item.get("liked_count")),
+            replies=_int(item.get("sub_comment_count") or item.get("subCommentCount")),
+        ))
+    return result
+
+
+def _parse_kuaishou_comments(items: list[Any]) -> list[EngagementComment]:
+    result: list[EngagementComment] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("commentId") or item.get("comment_id") or "")
+        text = str(item.get("content") or "")
+        if not comment_id or not text:
+            continue
+        result.append(EngagementComment(
+            comment_id=comment_id,
+            author=str(item.get("authorName") or item.get("author_name") or ""),
+            text=BeautifulSoup(text, "html.parser").get_text(" ", strip=True),
+            created_at=_timestamp(item.get("timestamp")),
+            likes=_int(item.get("likedCount") or item.get("liked_count")),
+            replies=_int(item.get("subCommentCount") or item.get("sub_comment_count")),
+        ))
+    return result
+
+
+def _timestamp(value: Any) -> datetime | None:
+    if value in {None, ""}:
+        return None
+    try:
+        number = float(value)
+        if number > 10_000_000_000:
+            number /= 1000
+        return datetime.fromtimestamp(number, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _raise_kuaishou_errors(payload: dict[str, Any]) -> None:
+    errors = payload.get("errors")
+    if errors:
+        message = json.dumps(errors, ensure_ascii=False)
+        if _is_challenge_text(message):
+            raise PlatformBlockedError("快手接口要求验证码或会话已失效")
+        raise PlatformCrawlerError(message)
+
+
+def _is_challenge_text(value: str) -> bool:
+    lowered = value.casefold()
+    return any(token in lowered for token in ("need captcha", "captcha", "验证码", "security check", "登录"))
+
+
+def _parse_wechat_metadata(text: str, url: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for key in (
+        "show_comment", "comment_id", "bizuin", "__biz", "mid", "idx", "sn",
+        "appmsg_token", "uin", "key", "pass_ticket", "devicetype", "clientversion",
+    ):
+        match = re.search(
+            rf"(?:[\"']{re.escape(key)}[\"']|\b{re.escape(key)})\s*[:=]\s*[\"']?([^,;\"'\s}}]+)",
+            text,
+            re.I,
+        )
+        if match:
+            values[key] = html.unescape(match.group(1))
+    if "biz" not in values:
+        values["biz"] = values.get("bizuin", "")
+    parsed = urlparse(url)
+    values.setdefault("mid", parse_qs(parsed.query).get("mid", [""])[0])
+    values.setdefault("idx", parse_qs(parsed.query).get("idx", ["1"])[0])
+    return values
+
+
+def _parse_wechat_stats(text: str) -> EngagementStats:
+    decoded = html.unescape(text).replace(r"\u0022", '"').replace(r'\"', '"')
+    values: dict[str, int | None] = {}
+    for key in ("read_num", "readCount", "like_num", "old_like_num", "comment_count", "commentCount", "share_count", "shareCount"):
+        match = re.search(rf"[\"']{re.escape(key)}[\"']\s*[:=]\s*[\"']?([0-9]+)", decoded)
+        if match:
+            values[key] = _int(match.group(1))
+    return EngagementStats(
+        views=values.get("read_num") or values.get("readCount"),
+        likes=values.get("like_num") or values.get("old_like_num"),
+        comments=values.get("comment_count") or values.get("commentCount"),
+        shares=values.get("share_count") or values.get("shareCount"),
+    )
+
+
+def _parse_wechat_stats_from_payload(payload: dict[str, Any]) -> EngagementStats:
+    nested = payload.get("appmsgstat") or payload.get("appmsg_stat") or payload
+    if not isinstance(nested, dict):
+        return EngagementStats()
+    return EngagementStats(
+        views=_int(nested.get("read_num") or nested.get("readCount")),
+        likes=_int(nested.get("like_num") or nested.get("old_like_num") or nested.get("likeCount")),
+        comments=_int(nested.get("comment_count") or nested.get("commentCount")),
+        shares=_int(nested.get("share_count") or nested.get("shareCount")),
+    )
+
+
+def _parse_wechat_comments(payload: dict[str, Any]) -> list[EngagementComment]:
+    candidates = payload.get("elected_comment") or payload.get("comment") or payload.get("comments") or []
+    if isinstance(candidates, dict):
+        candidates = candidates.get("list") or candidates.get("comment") or []
+    result: list[EngagementComment] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("comment_id") or item.get("id") or "")
+        text = str(item.get("content") or item.get("text") or "")
+        if not comment_id or not text:
+            continue
+        result.append(EngagementComment(
+            comment_id=comment_id,
+            author=str(item.get("nick_name") or item.get("nickname") or item.get("user_name") or ""),
+            text=BeautifulSoup(text, "html.parser").get_text(" ", strip=True),
+            created_at=_timestamp(item.get("create_time") or item.get("createTime")),
+            likes=_int(item.get("like_num") or item.get("like_count")),
+            replies=_int(item.get("reply_count") or item.get("reply_num")),
+        ))
+    return result
+
+
+def _find_nested_value(value: Any, keys: set[str]) -> Any:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in keys and child is not None and child != "":
+                return child
+            found = _find_nested_value(child, keys)
+            if found is not None and found != "":
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_nested_value(child, keys)
+            if found is not None and found != "":
+                return found
+    return None
 
 
 def _parse_douyin_comments(payload: dict[str, Any]) -> tuple[list[EngagementComment], str | None]:

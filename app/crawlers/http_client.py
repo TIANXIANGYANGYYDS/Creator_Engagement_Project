@@ -29,6 +29,17 @@ class AsyncHttpClient(Protocol):
     ) -> Any:
         ...
 
+    async def post(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        data: str | bytes | dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
+        ...
+
 
 class CurlAsyncHttpClient:
     """Reusable protocol client with a Chrome-compatible TLS fingerprint."""
@@ -60,18 +71,69 @@ class CurlAsyncHttpClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> Any:
+        return await self._request("GET", url, params=params, headers=headers)
+
+    async def post(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        data: str | bytes | dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
+        return await self._request(
+            "POST",
+            url,
+            params=params,
+            headers=headers,
+            data=data,
+            json=json,
+        )
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        data: str | bytes | dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
         attempts = 2 if self.proxy_provider is not None and self.proxy_mode != "direct" else 1
         last_error: Exception | None = None
         for attempt in range(attempts):
             proxies = await self._acquire_proxy()
             proxy_url = (proxies or {}).get("https") or (proxies or {}).get("http")
             try:
-                response = await self._session.get(
-                    url,
-                    params=params,
-                    headers=headers,
-                    proxy=proxy_url,
-                )
+                request = getattr(self._session, "request", None)
+                if request is not None:
+                    response = await request(
+                        method,
+                        url,
+                        params=params,
+                        headers=headers,
+                        data=data,
+                        json=json,
+                        proxy=proxy_url,
+                    )
+                elif method == "GET":
+                    response = await self._session.get(
+                        url,
+                        params=params,
+                        headers=headers,
+                        proxy=proxy_url,
+                    )
+                else:
+                    response = await self._session.post(
+                        url,
+                        params=params,
+                        headers=headers,
+                        data=data,
+                        json=json,
+                        proxy=proxy_url,
+                    )
             except Exception as exc:
                 last_error = exc
                 await self._notify_proxy("on_failure_for", "on_failure", proxies, exc)

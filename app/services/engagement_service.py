@@ -7,6 +7,7 @@ from typing import Iterable, Literal
 from app.core.config import Settings
 from app.crawlers.browser_fallback import BrowserFallback, BrowserFallbackSettings
 from app.crawlers.engagement import EngagementCrawler
+from app.crawlers.platform_session import PlatformSessionStore
 from app.crawlers.proxy_provider import AsyncDailiProxyPool, AsyncProxyProvider
 from app.models.engagement import CommentPageResult, EngagementResult, InteractionResult
 
@@ -59,6 +60,7 @@ class EngagementService:
             proxy_provider=provider,
             proxy_mode=active_mode,
             browser_fallback=browser_fallback,
+            session_store=PlatformSessionStore(Path(settings.platform_session_dir)),
         )
         return cls(crawler, proxy_provider=provider)
 

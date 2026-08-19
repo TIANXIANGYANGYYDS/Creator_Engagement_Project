@@ -17,6 +17,18 @@ conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement 
 可选的调用方 Cookie 通过 `CREATOR_ENGAGEMENT_COOKIE` 环境变量注入，不会写入输出；为兼容
 Stock_Project 现有环境，也接受 `DOUYIN_SESSION_COOKIE` 作为回退变量名。
 
+快手、小红书和公众号的登录态不通过聊天传递账号密码。首次使用时在带桌面环境的本机执行：
+
+```bash
+conda run -n MyAgent creator-engagement-login kuaishou
+conda run -n MyAgent creator-engagement-login xiaohongshu
+conda run -n MyAgent creator-engagement-login wechat
+```
+
+登录完成后按 Enter，状态只写入 `.local/browser-profiles/<platform>` 和
+`.local/platform-sessions/<platform>.json`。公众号还要求文章本身开启评论；微信网页会话
+不能保证等价于手机微信文章会话，接口会如实返回 `blocked/unsupported`。
+
 启动 API：
 
 ```bash
@@ -66,11 +78,11 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | B 站 | 播放、点赞、评论、分享、收藏、投币、弹幕和一级评论 | `x/web-interface/view`、`x/v2/reply/wbi/main`、`x/web-interface/nav` | 可用；评论仅当前页 |
 | 微博 | 点赞、评论、转发和热门评论 | `statuses/show`、`comments/hotflow` | 可用，访客态部分覆盖 |
 | 好看 | 评论总数和一级评论 | `haokan/ui-web/v2/comment/get` | 可用；详情互动量待补 |
-| 小红书 | 点赞、收藏、分享、评论总数 | 详情页 `noteDetailMap` SSR | 可用；评论列表需 `x-s/x-t` |
+| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 登录态 + `xhshow` 签名详情/评论接口，未登录回退 SSR | 需要有效 cookie、评论 URL 需 `xsec_token` |
 | 抖音 | 协议优先，浏览器会话可捕获详情统计；评论按真实响应判定 | `/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 详情已 smoke 验证；匿名评论可能 HTTP 200 空包 |
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
-| 公众号 | 协议失败后浏览器尝试正文、互动和评论响应 | `/mp/getappmsgext`、`/mp/appmsg_comment`、页面 SSR | 文章会话或登录挑战时明确 blocked |
-| 快手 | 协议失败后浏览器尝试 GraphQL 详情和评论响应 | `visionShortVideoReco`、`visionVideoDetail`、`visionCommentList` | 目标校验和验证码失败时明确 blocked，不使用推荐流冒充目标 |
+| 公众号 | 文章 SSR、会话增强互动量和文章评论 | `/mp/getappmsgext`、`/mp/appmsg_comment`、页面 SSR | 文章关闭评论或文章会话无效时明确说明 |
+| 快手 | 登录态 GraphQL 详情和一级评论 | `visionVideoDetail`、`/rest/v/photo/comment/list`、`visionCommentList` | 严格校验目标 ID；验证码失败时明确 blocked |
 
 不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音详情接口在当前版本对匿名请求稳定返回 HTTP 200 空包；需要读取统计时，通过 `CREATOR_ENGAGEMENT_COOKIE` 注入调用方自己的会话 Cookie。该 Cookie 不会写入代码或日志，过期、无效或缺少设备风控字段时结果会明确标成 `blocked`/`failed`。B 站评论的 WBI 密钥每次从公开导航接口动态读取，不依赖浏览器或登录 Cookie。
 
@@ -80,4 +92,4 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 
 快手不能用“GraphQL 返回 HTTP 200”作为成功判据。协议层匿名调用 `visionShortVideoReco` 时，返回列表可能完全不包含传入的 `photoId`，它本质上会退化成推荐流；`visionCommentList` 则稳定返回 `Need captcha`。浏览器有效请求还带有 webWeapon 生成的 `kww` 头以及 `kwfv1/kwssectoken` 等短期状态。浏览器兜底会复用按平台隔离的 Profile，但仍会校验目标 ID，不会把推荐流第一条伪装成目标 URL 的统计。
 
-小红书评论接口已经定位到 `api/sns/web/v2/comment/page`，动态脚本也能在 jsdom 中生成 `x-s/x-t/x-s-common`。当前纯协议生成的签名仍被服务端以 HTTP 406 拒绝，因此协议层只返回 SSR 统计；浏览器兜底会用运行时会话尝试触发评论请求，不把浏览器样本签名写进业务代码。
+小红书评论接口已经定位到 `api/sns/web/v2/comment/page`，项目使用独立 MIT 包 `xhshow==0.2.0` 按当前 cookie、URI 和参数生成 `x-s/x-t/x-s-common`，并保留 HTTP 406 为明确阻断，不把浏览器样本签名写进业务代码。
