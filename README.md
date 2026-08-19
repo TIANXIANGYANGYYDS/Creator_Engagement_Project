@@ -10,7 +10,8 @@
 在项目根目录执行：
 
 ```bash
-conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement '<内容 URL>' --comment-limit 20
+conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement interactions '<内容 URL>' bilibili
+conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement comments '<内容 URL>' B站 --page 1
 ```
 
 可选的调用方 Cookie 通过 `CREATOR_ENGAGEMENT_COOKIE` 环境变量注入，不会写入输出；为兼容
@@ -37,12 +38,19 @@ LLM、Mongo、51 代理 API 和日志参数。当前代理模式：
 接口：
 
 - `GET /api/v1/health`
-- `GET /api/v1/engagement?url=<URL>&comment_limit=20`
-- `POST /api/v1/engagement/batch`，请求体 `{ "urls": [...], "comment_limit": 20, "concurrency": 4 }`
+- `GET /api/v1/interactions?url=<URL>&media_name=<MEDIA>`
+- `GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1`
+
+`media_name` 的规范值为 `douyin / toutiao / wechat / xiaohongshu / haokan /
+kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小红书、好看、
+快手、B站、微博等中文名称。服务会同时识别 URL 所属平台；如果 URL 与
+`media_name` 不一致，接口返回 HTTP 422，不会把请求转给错误的平台适配器。
 
 ## 能力范围
 
-返回字段统一为 `platform / work_id / stats / comments / coverage / reason`。`coverage`
+互动量接口返回 `platform / work_id / stats / coverage / reason`；评论接口返回
+`platform / work_id / page / comments / next_page / total_comments / coverage / reason`。
+评论页固定最多 20 条。`coverage`
 不是装饰字段：`complete` 表示当前接口可完整说明本页，`partial` 表示只能拿到公开可见
 部分，`blocked` 表示平台拒绝请求，`unsupported` 表示当前尚未形成无浏览器稳定协议。
 

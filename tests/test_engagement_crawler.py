@@ -9,6 +9,7 @@ from app.crawlers.engagement import (
     EngagementCrawler,
     _parse_xhs_stats,
     identify_url,
+    normalize_media_name,
 )
 
 
@@ -50,6 +51,137 @@ class FakeClient:
 )
 def test_identify_url(url: str, expected: tuple[str, str]) -> None:
     assert identify_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("media_name", "expected"),
+    [
+        ("douyin", "douyin"),
+        ("抖音", "douyin"),
+        ("今日头条", "toutiao"),
+        ("公众号", "wechat"),
+        ("小红书", "xiaohongshu"),
+        ("好看视频", "haokan"),
+        ("快手", "kuaishou"),
+        ("B 站", "bilibili"),
+        ("微博", "weibo"),
+    ],
+)
+def test_normalize_media_name(media_name: str, expected: str) -> None:
+    assert normalize_media_name(media_name) == expected
+
+
+def test_media_name_must_match_url_before_request() -> None:
+    client = FakeClient()
+
+    with pytest.raises(ValueError, match="does not match"):
+        asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+            "https://www.bilibili.com/video/BVgood",
+            "微博",
+        ))
+
+    assert client.calls == []
+
+
+def test_bilibili_interactions_skip_comment_endpoint() -> None:
+    client = FakeClient(FakeResponse(payload={
+        "code": 0,
+        "data": {
+            "bvid": "BVgood",
+            "aid": 123,
+            "stat": {"view": 100, "like": 20, "reply": 3},
+        },
+    }))
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        "https://www.bilibili.com/video/BVgood",
+        "B站",
+    ))
+
+    assert result.stats.views == 100
+    assert "comments" not in result.model_dump()
+    assert [call[0] for call in client.calls] == [
+        "https://api.bilibili.com/x/web-interface/view"
+    ]
+
+
+def test_bilibili_comments_use_requested_page() -> None:
+    client = FakeClient(
+        FakeResponse(payload={
+            "code": 0,
+            "data": {"bvid": "BVgood", "aid": 123, "stat": {}},
+        }),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {
+                "page": {"num": 3, "size": 20, "count": 70},
+                "replies": [],
+            },
+        }),
+    )
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "https://www.bilibili.com/video/BVgood",
+        "bilibili",
+        3,
+    ))
+
+    assert result.page == 3
+    assert result.next_page == 4
+    assert result.total_comments == 70
+    assert client.calls[1][1]["params"]["pn"] == 3
+
+
+def test_toutiao_comments_map_page_to_offset() -> None:
+    client = FakeClient(FakeResponse(payload={
+        "err_no": 0,
+        "total_number": 61,
+        "has_more": True,
+        "offset": 60,
+        "data": [],
+    }))
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "https://www.toutiao.com/article/7557632662635840036/",
+        "头条",
+        3,
+    ))
+
+    assert result.page == 3
+    assert result.next_page == 4
+    assert result.total_comments == 61
+    assert client.calls[0][1]["params"]["offset"] == "40"
+
+
+def test_cursor_platform_does_not_relabel_last_page() -> None:
+    client = FakeClient(
+        FakeResponse(payload={
+            "status_code": 0,
+            "has_more": 1,
+            "cursor": 20,
+            "comments": [{"cid": "c1", "text": "第一页"}],
+        }, text='{"status_code":0}'),
+        FakeResponse(payload={
+            "status_code": 0,
+            "has_more": 0,
+            "cursor": 40,
+            "comments": [{"cid": "c2", "text": "最后一页"}],
+        }, text='{"status_code":0}'),
+    )
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        cookies="sessionid=caller-session",
+    ).fetch_comments(
+        "https://www.douyin.com/video/7665718789363309172",
+        "抖音",
+        3,
+    ))
+
+    assert result.page == 3
+    assert result.comments == []
+    assert result.next_page is None
+    assert len(client.calls) == 2
 
 
 def test_bilibili_fetches_stats_and_comments() -> None:
@@ -304,3 +436,12 @@ def test_kuaishou_protected_graphql_is_not_reported_as_target_data() -> None:
 def test_comment_limit_must_be_positive() -> None:
     with pytest.raises(ValueError, match="comment_limit"):
         asyncio.run(EngagementCrawler(client=FakeClient()).fetch("https://m.weibo.cn/detail/5301066679190033", comment_limit=0))
+
+
+def test_comment_page_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="page"):
+        asyncio.run(EngagementCrawler(client=FakeClient()).fetch_comments(
+            "https://m.weibo.cn/detail/5301066679190033",
+            "weibo",
+            0,
+        ))

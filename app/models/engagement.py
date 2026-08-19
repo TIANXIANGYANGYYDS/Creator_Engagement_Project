@@ -49,7 +49,7 @@ class EngagementComment(BaseModel):
     replies: int | None = Field(default=None, ge=0)
 
 
-class EngagementResult(BaseModel):
+class CollectionResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     platform: EngagementPlatform
@@ -58,6 +58,26 @@ class EngagementResult(BaseModel):
     coverage: EngagementCoverage
     reason: str = ""
     source: str = ""
+
+
+class InteractionResult(CollectionResult):
+    model_config = ConfigDict(extra="ignore")
+
+    stats: EngagementStats = Field(default_factory=EngagementStats)
+
+
+class CommentPageResult(CollectionResult):
+    model_config = ConfigDict(extra="ignore")
+
+    page: int = Field(ge=1)
+    comments: list[EngagementComment] = Field(default_factory=list)
+    next_page: int | None = Field(default=None, ge=1)
+    total_comments: int | None = Field(default=None, ge=0)
+
+
+class EngagementResult(CollectionResult):
+    """Legacy combined result retained for internal compatibility."""
+
     stats: EngagementStats = Field(default_factory=EngagementStats)
     comments: list[EngagementComment] = Field(default_factory=list)
     next_cursor: str | None = None

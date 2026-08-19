@@ -1,44 +1,35 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_engagement_service
-from app.models.engagement import EngagementResult
+from app.models.engagement import CommentPageResult, InteractionResult
 from app.services.engagement_service import EngagementService
 
 
 router = APIRouter(prefix="/api/v1", tags=["engagement"])
 
 
-class BatchEngagementRequest(BaseModel):
-    urls: list[str] = Field(min_length=1, max_length=100)
-    comment_limit: int = Field(default=20, ge=1, le=100)
-    concurrency: int = Field(default=4, ge=1, le=20)
-
-
-@router.get("/engagement", response_model=EngagementResult)
-async def get_engagement(
+@router.get("/interactions", response_model=InteractionResult)
+async def get_interactions(
     url: str = Query(min_length=1),
-    comment_limit: int = Query(default=20, ge=1, le=100),
+    media_name: str = Query(min_length=1),
     service: EngagementService = Depends(get_engagement_service),
-) -> EngagementResult:
+) -> InteractionResult:
     try:
-        return await service.fetch(url, comment_limit=comment_limit)
+        return await service.fetch_interactions(url, media_name)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/engagement/batch", response_model=list[EngagementResult])
-async def get_engagement_batch(
-    request: BatchEngagementRequest,
+@router.get("/comments", response_model=CommentPageResult)
+async def get_comments(
+    url: str = Query(min_length=1),
+    media_name: str = Query(min_length=1),
+    page: int = Query(default=1, ge=1),
     service: EngagementService = Depends(get_engagement_service),
-) -> list[EngagementResult]:
+) -> CommentPageResult:
     try:
-        return await service.fetch_many(
-            request.urls,
-            comment_limit=request.comment_limit,
-            concurrency=request.concurrency,
-        )
+        return await service.fetch_comments(url, media_name, page)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

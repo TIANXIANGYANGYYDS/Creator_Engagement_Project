@@ -21,16 +21,19 @@ from app.crawlers.http_client import (
     PlatformCrawlerError,
 )
 from app.models.engagement import (
+    CommentPageResult,
     EngagementComment,
     EngagementCoverage,
     EngagementPlatform,
     EngagementResult,
     EngagementStats,
+    InteractionResult,
 )
 
 
 DOUYIN_DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
 DOUYIN_COMMENT_URL = "https://www.douyin.com/aweme/v1/web/comment/list/"
+COMMENT_PAGE_SIZE = 20
 DOUYIN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -72,21 +75,88 @@ class EngagementCrawler:
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         if comment_limit <= 0:
             raise ValueError("comment_limit must be greater than zero")
-        platform, work_id = identify_url(url)
+        return await self._fetch(
+            url,
+            limit=comment_limit,
+            page=1,
+            include_stats=True,
+            include_comments=True,
+        )
+
+    async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+        result = await self._fetch(
+            url,
+            media_name=media_name,
+            limit=COMMENT_PAGE_SIZE,
+            page=1,
+            include_stats=True,
+            include_comments=False,
+        )
+        return InteractionResult.model_validate(
+            result.model_dump(exclude={"comments", "next_cursor"})
+        )
+
+    async def fetch_comments(self, url: str, media_name: str, page: int) -> CommentPageResult:
+        if page <= 0:
+            raise ValueError("page must be greater than zero")
+        result = await self._fetch(
+            url,
+            media_name=media_name,
+            limit=COMMENT_PAGE_SIZE,
+            page=page,
+            include_stats=False,
+            include_comments=True,
+        )
+        return CommentPageResult.model_validate({
+            **result.model_dump(exclude={"stats", "next_cursor"}),
+            "page": page,
+            "next_page": page + 1 if result.next_cursor is not None else None,
+            "total_comments": result.stats.comments,
+        })
+
+    async def _fetch(
+        self,
+        url: str,
+        *,
+        media_name: str | None = None,
+        limit: int,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
+        platform, work_id = validate_media_url(url, media_name) if media_name else identify_url(url)
         if not work_id:
             raise ValueError(f"cannot extract {platform} content id from URL")
         if platform == "bilibili":
-            return await self._bilibili(url, work_id, comment_limit)
+            return await self._bilibili(
+                url, work_id, limit, page=page,
+                include_stats=include_stats, include_comments=include_comments,
+            )
         if platform == "douyin":
-            return await self._douyin(url, work_id, comment_limit)
+            return await self._douyin(
+                url, work_id, limit, page=page,
+                include_stats=include_stats, include_comments=include_comments,
+            )
         if platform == "weibo":
-            return await self._weibo(url, work_id, comment_limit)
+            return await self._weibo(
+                url, work_id, limit, page=page,
+                include_stats=include_stats, include_comments=include_comments,
+            )
         if platform == "haokan":
-            return await self._haokan(url, work_id, comment_limit)
+            return await self._haokan(
+                url, work_id, limit, page=page,
+                include_stats=include_stats, include_comments=include_comments,
+            )
         if platform == "xiaohongshu":
-            return await self._xiaohongshu(url, work_id, comment_limit)
+            return await self._xiaohongshu(
+                url, work_id,
+                include_stats=include_stats, include_comments=include_comments,
+            )
         if platform == "toutiao":
-            return await self._toutiao(url, work_id, comment_limit)
+            return await self._toutiao(
+                url, work_id, limit, page=page,
+                include_stats=include_stats, include_comments=include_comments,
+            )
         return EngagementResult(
             platform=platform,
             canonical_url=url,
@@ -134,14 +204,23 @@ class EngagementCrawler:
             raise PlatformCrawlerError(f"engagement endpoint returned HTTP {status}")
         return response
 
-    async def _douyin(self, url: str, work_id: str, limit: int) -> EngagementResult:
+    async def _douyin(
+        self,
+        url: str,
+        work_id: str,
+        limit: int,
+        *,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
         if not self.cookies.strip():
             return _result_error(
                 "douyin",
                 url,
                 work_id,
                 "unsupported",
-                "抖音详情/评论请求需要 a_bogus 之外的动态设备会话；匿名协议请求返回 HTTP 200 空包，需调用方提供自己的有效会话 Cookie，不能硬编码临时 Cookie",
+                "抖音详情/评论请求需要 a_bogus 之外的动态设备会话；需调用方提供自己的有效会话 Cookie，不能硬编码临时 Cookie",
             )
         headers = {
             "Accept": "application/json, text/plain, */*",
@@ -180,74 +259,99 @@ class EngagementCrawler:
             "platform": "PC",
         }
         try:
-            detail_response = await self._get_response(
-                DOUYIN_DETAIL_URL,
-                params=common_params,
-                headers=headers,
-                include_cookies=True,
-            )
-            detail_text = str(getattr(detail_response, "text", "") or "")
-            if not detail_text.strip():
-                return _result_error(
-                    "douyin",
-                    url,
-                    work_id,
-                    "blocked",
-                    "抖音详情接口返回 HTTP 200 空包；当前会话缺少可验证的设备风控字段或已失效",
-                )
-            try:
-                detail_payload = detail_response.json()
-            except Exception as exc:
-                raise PlatformCrawlerError("抖音详情接口返回非 JSON") from exc
-            detail = detail_payload.get("aweme_detail") or {}
-            if detail_payload.get("status_code") != 0 or not detail:
-                raise PlatformCrawlerError("抖音详情接口没有有效作品数据")
-            statistics = detail.get("statistics") or {}
-            stats = EngagementStats(
-                views=_int(statistics.get("play_count")),
-                likes=_int(statistics.get("digg_count")),
-                comments=_int(statistics.get("comment_count")),
-                shares=_int(statistics.get("share_count")),
-                favorites=_int(statistics.get("collect_count")),
-                **{
-                    "admire": _int(statistics.get("admire_count")),
-                    "recommend": _int(statistics.get("recommend_count")),
-                },
-            )
-            comment_params = {
-                **common_params,
-                "cursor": "0",
-                "count": str(min(limit, 20)),
-                "item_type": "0",
-                "whale_cut_token": "",
-                "cut_version": "1",
-                "rcFT": "",
-            }
-            comment_response = await self._get_response(
-                DOUYIN_COMMENT_URL,
-                params=comment_params,
-                headers=headers,
-                include_cookies=True,
-            )
-            comment_text = str(getattr(comment_response, "text", "") or "")
+            stats = EngagementStats()
             comments: list[EngagementComment] = []
             next_cursor: str | None = None
-            if comment_text.strip():
-                try:
-                    comment_payload = comment_response.json()
-                except Exception as exc:
-                    raise PlatformCrawlerError("抖音评论接口返回非 JSON") from exc
-                comments, next_cursor = _parse_douyin_comments(comment_payload)
             reason = ""
-            if not comment_text.strip():
-                reason = "抖音访客评论接口返回 HTTP 200 空包；统计来自详情接口，评论未伪装为空成功"
+            sources: list[str] = []
+
+            if include_stats:
+                detail_response = await self._get_response(
+                    DOUYIN_DETAIL_URL,
+                    params=common_params,
+                    headers=headers,
+                    include_cookies=True,
+                )
+                detail_text = str(getattr(detail_response, "text", "") or "")
+                if not detail_text.strip():
+                    return _result_error(
+                        "douyin",
+                        url,
+                        work_id,
+                        "blocked",
+                        "抖音详情接口返回 HTTP 200 空包；当前会话缺少可验证的设备风控字段或已失效",
+                    )
+                try:
+                    detail_payload = detail_response.json()
+                except Exception as exc:
+                    raise PlatformCrawlerError("抖音详情接口返回非 JSON") from exc
+                detail = detail_payload.get("aweme_detail") or {}
+                if detail_payload.get("status_code") != 0 or not detail:
+                    raise PlatformCrawlerError("抖音详情接口没有有效作品数据")
+                statistics = detail.get("statistics") or {}
+                stats = EngagementStats(
+                    views=_int(statistics.get("play_count")),
+                    likes=_int(statistics.get("digg_count")),
+                    comments=_int(statistics.get("comment_count")),
+                    shares=_int(statistics.get("share_count")),
+                    favorites=_int(statistics.get("collect_count")),
+                    **{
+                        "admire": _int(statistics.get("admire_count")),
+                        "recommend": _int(statistics.get("recommend_count")),
+                    },
+                )
+                sources.append("aweme/v1/web/aweme/detail")
+
+            if include_comments:
+                cursor = "0"
+                for current_page in range(1, page + 1):
+                    comment_params = {
+                        **common_params,
+                        "cursor": cursor,
+                        "count": str(min(limit, COMMENT_PAGE_SIZE)),
+                        "item_type": "0",
+                        "whale_cut_token": "",
+                        "cut_version": "1",
+                        "rcFT": "",
+                    }
+                    comment_response = await self._get_response(
+                        DOUYIN_COMMENT_URL,
+                        params=comment_params,
+                        headers=headers,
+                        include_cookies=True,
+                    )
+                    comment_text = str(getattr(comment_response, "text", "") or "")
+                    if not comment_text.strip():
+                        comments = []
+                        next_cursor = None
+                        reason = "抖音访客评论接口返回 HTTP 200 空包，评论未伪装为空成功"
+                        break
+                    try:
+                        comment_payload = comment_response.json()
+                    except Exception as exc:
+                        raise PlatformCrawlerError("抖音评论接口返回非 JSON") from exc
+                    comments, next_cursor = _parse_douyin_comments(comment_payload)
+                    total = _int(comment_payload.get("total"))
+                    if not include_stats and total is not None:
+                        stats = EngagementStats(comments=total)
+                    if current_page == page:
+                        break
+                    if next_cursor is None:
+                        comments = []
+                        break
+                    cursor = next_cursor
+                sources.append("aweme/v1/web/comment/list")
+
             return EngagementResult(
                 platform="douyin",
                 canonical_url=f"https://www.douyin.com/video/{work_id}",
                 work_id=work_id,
                 coverage="partial",
-                reason=reason or "抖音评论仅获取当前公开页，不能证明评论全集",
-                source="aweme/v1/web/aweme/detail + comment/list",
+                reason=reason or (
+                    "抖音评论仅获取指定公开页，不能证明评论全集"
+                    if include_comments else "抖音详情接口提供当前公开互动量"
+                ),
+                source=" + ".join(sources),
                 stats=stats,
                 comments=comments[:limit],
                 next_cursor=next_cursor,
@@ -257,7 +361,16 @@ class EngagementCrawler:
         except Exception as exc:
             return _result_error("douyin", url, work_id, "failed", str(exc))
 
-    async def _bilibili(self, url: str, work_id: str, limit: int) -> EngagementResult:
+    async def _bilibili(
+        self,
+        url: str,
+        work_id: str,
+        limit: int,
+        *,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
         try:
             view = await self._get_json(
                 "https://api.bilibili.com/x/web-interface/view",
@@ -268,28 +381,49 @@ class EngagementCrawler:
                 raise PlatformCrawlerError("bilibili view payload is unavailable")
             actual_id = str(data.get("bvid") or work_id)
             stat = data.get("stat") or {}
-            stats = EngagementStats(
-                views=_int(stat.get("view")),
-                likes=_int(stat.get("like")),
-                comments=_int(stat.get("reply")),
-                shares=_int(stat.get("share")),
-                favorites=_int(stat.get("favorite")),
-                coins=_int(stat.get("coin")),
-                danmaku=_int(stat.get("danmaku")),
+            stats = (
+                EngagementStats(
+                    views=_int(stat.get("view")),
+                    likes=_int(stat.get("like")),
+                    comments=_int(stat.get("reply")),
+                    shares=_int(stat.get("share")),
+                    favorites=_int(stat.get("favorite")),
+                    coins=_int(stat.get("coin")),
+                    danmaku=_int(stat.get("danmaku")),
+                )
+                if include_stats else EngagementStats()
             )
             aid = _int(data.get("aid"))
-            comments_payload = await self._get_json(
-                "https://api.bilibili.com/x/v2/reply",
-                params={"type": 1, "oid": aid, "pn": 1, "ps": min(limit, 20), "sort": 2},
-            )
-            comments, cursor = _parse_bilibili_comments(comments_payload)
+            comments: list[EngagementComment] = []
+            cursor: str | None = None
+            if include_comments:
+                comments_payload = await self._get_json(
+                    "https://api.bilibili.com/x/v2/reply",
+                    params={
+                        "type": 1,
+                        "oid": aid,
+                        "pn": page,
+                        "ps": min(limit, COMMENT_PAGE_SIZE),
+                        "sort": 2,
+                    },
+                )
+                comments, cursor = _parse_bilibili_comments(comments_payload)
+                if not include_stats:
+                    comment_count = _int((comments_payload.get("data") or {}).get("page", {}).get("count"))
+                    stats = EngagementStats(comments=comment_count)
             return EngagementResult(
                 platform="bilibili",
                 canonical_url=f"https://www.bilibili.com/video/{actual_id}",
                 work_id=actual_id,
                 coverage="partial",
-                reason="B 站评论仅获取当前公开页，不能证明评论全集",
-                source="x/web-interface/view + x/v2/reply",
+                reason=(
+                    "B 站评论仅获取当前公开页（由 page 指定），不能证明评论全集"
+                    if include_comments else "B 站详情接口提供当前公开互动量"
+                ),
+                source=(
+                    "x/web-interface/view + x/v2/reply"
+                    if include_comments else "x/web-interface/view"
+                ),
                 stats=stats,
                 comments=comments[:limit],
                 next_cursor=cursor,
@@ -299,36 +433,76 @@ class EngagementCrawler:
         except Exception as exc:
             return _result_error("bilibili", url, work_id, "failed", str(exc))
 
-    async def _weibo(self, url: str, work_id: str, limit: int) -> EngagementResult:
+    async def _weibo(
+        self,
+        url: str,
+        work_id: str,
+        limit: int,
+        *,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
         headers = {
             "Referer": f"https://m.weibo.cn/detail/{work_id}",
             "X-Requested-With": "XMLHttpRequest",
         }
         try:
-            payload = await self._get_json(
-                "https://m.weibo.cn/statuses/show",
-                params={"id": work_id},
-                headers=headers,
-            )
-            data = payload.get("data") or {}
-            stats = EngagementStats(
-                likes=_int(data.get("attitudes_count")),
-                comments=_int(data.get("comments_count")),
-                reposts=_int(data.get("reposts_count")),
-            )
-            comments_payload = await self._get_json(
-                "https://m.weibo.cn/comments/hotflow",
-                params={"id": work_id, "mid": work_id, "max_id_type": 0},
-                headers=headers,
-            )
-            comments, cursor = _parse_weibo_comments(comments_payload)
+            stats = EngagementStats()
+            comments: list[EngagementComment] = []
+            cursor: str | None = None
+            sources: list[str] = []
+            if include_stats:
+                payload = await self._get_json(
+                    "https://m.weibo.cn/statuses/show",
+                    params={"id": work_id},
+                    headers=headers,
+                )
+                data = payload.get("data") or {}
+                stats = EngagementStats(
+                    likes=_int(data.get("attitudes_count")),
+                    comments=_int(data.get("comments_count")),
+                    reposts=_int(data.get("reposts_count")),
+                )
+                sources.append("m.weibo.cn/statuses/show")
+            if include_comments:
+                request_cursor: str | None = None
+                for current_page in range(1, page + 1):
+                    params: dict[str, Any] = {
+                        "id": work_id,
+                        "mid": work_id,
+                        "max_id_type": 0,
+                    }
+                    if request_cursor is not None:
+                        params["max_id"] = request_cursor
+                    comments_payload = await self._get_json(
+                        "https://m.weibo.cn/comments/hotflow",
+                        params=params,
+                        headers=headers,
+                    )
+                    comments, cursor = _parse_weibo_comments(comments_payload)
+                    if not include_stats:
+                        comment_data = comments_payload.get("data") or {}
+                        total = _int(comment_data.get("total_number") or comments_payload.get("total_number"))
+                        if total is not None:
+                            stats = EngagementStats(comments=total)
+                    if current_page == page:
+                        break
+                    if cursor is None:
+                        comments = []
+                        break
+                    request_cursor = cursor
+                sources.append("m.weibo.cn/comments/hotflow")
             return EngagementResult(
                 platform="weibo",
                 canonical_url=f"https://m.weibo.cn/detail/{work_id}",
                 work_id=work_id,
                 coverage="partial",
-                reason="微博访客时间线/评论接口可能折叠或限流，不能证明评论全集",
-                source="m.weibo.cn/statuses/show + comments/hotflow",
+                reason=(
+                    "微博访客评论接口可能折叠或限流，不能证明评论全集"
+                    if include_comments else "微博访客详情接口提供当前公开互动量"
+                ),
+                source=" + ".join(sources),
                 stats=stats,
                 comments=comments[:limit],
                 next_cursor=cursor,
@@ -338,35 +512,71 @@ class EngagementCrawler:
         except Exception as exc:
             return _result_error("weibo", url, work_id, "failed", str(exc))
 
-    async def _haokan(self, url: str, work_id: str, limit: int) -> EngagementResult:
+    async def _haokan(
+        self,
+        url: str,
+        work_id: str,
+        limit: int,
+        *,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
         try:
             payload = await self._get_json(
                 "https://haokan.baidu.com/haokan/ui-web/v2/comment/get",
-                params={"rn": min(limit, 20), "url_key": work_id, "pn": 1, "child_rn": 2},
+                params={
+                    "rn": min(limit, COMMENT_PAGE_SIZE),
+                    "url_key": work_id,
+                    "pn": page if include_comments else 1,
+                    "child_rn": 2,
+                },
                 headers={"Referer": f"https://haokan.baidu.com/v?vid={work_id}"},
             )
             data = payload.get("data") or {}
-            comments = _parse_haokan_comments(data.get("list") or [])
+            comments = _parse_haokan_comments(data.get("list") or []) if include_comments else []
             count = _int(data.get("comment_count"))
             return EngagementResult(
                 platform="haokan",
                 canonical_url=f"https://haokan.baidu.com/v?vid={work_id}",
                 work_id=work_id,
                 coverage="partial",
-                reason="好看评论接口可匿名读取；详情页互动统计需额外 video/read 参数，当前未稳定复现",
+                reason=(
+                    "好看评论接口可匿名读取指定页，不能证明评论全集"
+                    if include_comments
+                    else "当前稳定协议仅提供评论总数；其他互动量仍需额外 video/read 参数"
+                ),
                 source="haokan/ui-web/v2/comment/get",
                 stats=EngagementStats(comments=count),
                 comments=comments[:limit],
-                next_cursor=None if data.get("is_over") else "2",
+                next_cursor=None if data.get("is_over") or not include_comments else str(page + 1),
             )
         except PlatformBlockedError as exc:
             return _result_error("haokan", url, work_id, "blocked", str(exc))
         except Exception as exc:
             return _result_error("haokan", url, work_id, "failed", str(exc))
 
-    async def _xiaohongshu(self, url: str, work_id: str, limit: int) -> EngagementResult:
+    async def _xiaohongshu(
+        self,
+        url: str,
+        work_id: str,
+        *,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
         parsed = urlparse(url)
         token = parse_qs(parsed.query).get("xsec_token", [""])[0]
+        if include_comments and not include_stats:
+            return EngagementResult(
+                platform="xiaohongshu",
+                canonical_url=f"https://www.xiaohongshu.com/explore/{work_id}",
+                work_id=work_id,
+                coverage="unsupported",
+                reason="小红书评论接口需要每次生成 x-s/x-t 签名，当前尚未达到可部署标准",
+                source="api/sns/web/v2/comment/page",
+                xsec_token=token,
+                comment_endpoint="https://edith.xiaohongshu.com/api/sns/web/v2/comment/page",
+            )
         try:
             response = await self._get_response(
                 url,
@@ -393,7 +603,16 @@ class EngagementCrawler:
         except Exception as exc:
             return _result_error("xiaohongshu", url, work_id, "failed", str(exc))
 
-    async def _toutiao(self, url: str, work_id: str, limit: int) -> EngagementResult:
+    async def _toutiao(
+        self,
+        url: str,
+        work_id: str,
+        limit: int,
+        *,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
         endpoint = "https://www.toutiao.com/article/v4/tab_comments/"
         try:
             payload = await self._get_json(
@@ -401,8 +620,8 @@ class EngagementCrawler:
                 params={
                     "aid": "24",
                     "app_name": "toutiao_web",
-                    "offset": "0",
-                    "count": min(limit, 20),
+                    "offset": str((page - 1) * min(limit, COMMENT_PAGE_SIZE)) if include_comments else "0",
+                    "count": min(limit, COMMENT_PAGE_SIZE),
                     "group_id": work_id,
                     "item_id": work_id,
                 },
@@ -413,7 +632,10 @@ class EngagementCrawler:
             )
             if payload.get("err_no") != 0:
                 raise PlatformCrawlerError("toutiao comments payload is unavailable")
-            comments = _parse_toutiao_comments(payload.get("data") or [])
+            comments = (
+                _parse_toutiao_comments(payload.get("data") or [])
+                if include_comments else []
+            )
             total = _int(payload.get("total_number"))
             offset = _int(payload.get("offset"))
             has_more = bool(payload.get("has_more"))
@@ -422,11 +644,15 @@ class EngagementCrawler:
                 canonical_url=f"https://www.toutiao.com/article/{work_id}/",
                 work_id=work_id,
                 coverage="partial",
-                reason="头条评论接口可匿名协议读取；当前接口稳定提供评论总数和评论列表，点赞/转发详情需文章 SSR 或会话签名",
+                reason=(
+                    "头条评论接口可匿名读取指定页，不能证明评论全集"
+                    if include_comments
+                    else "当前稳定协议提供评论总数；点赞/转发详情仍需文章 SSR 或会话签名"
+                ),
                 source="article/v4/tab_comments",
                 stats=EngagementStats(comments=total),
                 comments=comments[:limit],
-                next_cursor=str(offset) if has_more and offset is not None else None,
+                next_cursor=str(offset) if include_comments and has_more and offset is not None else None,
             )
         except PlatformBlockedError as exc:
             return _result_error("toutiao", url, work_id, "blocked", str(exc))
@@ -442,6 +668,54 @@ _UNSUPPORTED_REASONS: dict[EngagementPlatform, str] = {
         "visionShortVideoReco 返回的可能是无关推荐流，评论接口返回 Need captcha，不能把推荐作品误报为目标作品"
     ),
 }
+
+
+_MEDIA_ALIASES: dict[str, EngagementPlatform] = {
+    "douyin": "douyin",
+    "抖音": "douyin",
+    "toutiao": "toutiao",
+    "头条": "toutiao",
+    "今日头条": "toutiao",
+    "wechat": "wechat",
+    "weixin": "wechat",
+    "微信": "wechat",
+    "公众号": "wechat",
+    "微信公众号": "wechat",
+    "xiaohongshu": "xiaohongshu",
+    "xhs": "xiaohongshu",
+    "小红书": "xiaohongshu",
+    "haokan": "haokan",
+    "好看": "haokan",
+    "好看视频": "haokan",
+    "kuaishou": "kuaishou",
+    "快手": "kuaishou",
+    "bilibili": "bilibili",
+    "b站": "bilibili",
+    "weibo": "weibo",
+    "微博": "weibo",
+}
+
+
+def normalize_media_name(media_name: str) -> EngagementPlatform:
+    normalized = re.sub(r"\s+", "", media_name.strip().casefold())
+    platform = _MEDIA_ALIASES.get(normalized)
+    if platform is None:
+        supported = ", ".join((
+            "douyin", "toutiao", "wechat", "xiaohongshu",
+            "haokan", "kuaishou", "bilibili", "weibo",
+        ))
+        raise ValueError(f"unsupported media_name; expected one of: {supported}")
+    return platform
+
+
+def validate_media_url(url: str, media_name: str) -> tuple[EngagementPlatform, str]:
+    requested_platform = normalize_media_name(media_name)
+    detected_platform, work_id = identify_url(url)
+    if detected_platform != requested_platform:
+        raise ValueError(
+            f"media_name '{media_name}' does not match URL platform '{detected_platform}'"
+        )
+    return detected_platform, work_id
 
 
 def identify_url(url: str) -> tuple[EngagementPlatform, str]:
@@ -525,6 +799,8 @@ def _parse_douyin_comments(payload: dict[str, Any]) -> tuple[list[EngagementComm
             likes=_int(item.get("digg_count")),
             replies=_int(item.get("reply_comment_total")),
         ))
+    if payload.get("has_more") in {0, False}:
+        return result, None
     cursor = payload.get("cursor")
     return result, str(cursor) if cursor not in {None, ""} else None
 
@@ -659,5 +935,48 @@ async def fetch_engagement(
     )
     try:
         return await crawler.fetch(url, comment_limit=comment_limit)
+    finally:
+        await crawler.aclose()
+
+
+async def fetch_interactions(
+    url: str,
+    media_name: str,
+    *,
+    client: AsyncHttpClient | None = None,
+    cookies: str = "",
+    proxy_provider: Any | None = None,
+    proxy_mode: str = "direct",
+) -> InteractionResult:
+    crawler = EngagementCrawler(
+        client=client,
+        cookies=cookies,
+        proxy_provider=proxy_provider,
+        proxy_mode=proxy_mode,
+    )
+    try:
+        return await crawler.fetch_interactions(url, media_name)
+    finally:
+        await crawler.aclose()
+
+
+async def fetch_comments(
+    url: str,
+    media_name: str,
+    page: int,
+    *,
+    client: AsyncHttpClient | None = None,
+    cookies: str = "",
+    proxy_provider: Any | None = None,
+    proxy_mode: str = "direct",
+) -> CommentPageResult:
+    crawler = EngagementCrawler(
+        client=client,
+        cookies=cookies,
+        proxy_provider=proxy_provider,
+        proxy_mode=proxy_mode,
+    )
+    try:
+        return await crawler.fetch_comments(url, media_name, page)
     finally:
         await crawler.aclose()

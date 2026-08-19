@@ -6,7 +6,7 @@ from typing import Iterable, Literal
 from app.core.config import Settings
 from app.crawlers.engagement import EngagementCrawler
 from app.crawlers.proxy_provider import AsyncDailiProxyPool, AsyncProxyProvider
-from app.models.engagement import EngagementResult
+from app.models.engagement import CommentPageResult, EngagementResult, InteractionResult
 
 
 class EngagementService:
@@ -49,6 +49,17 @@ class EngagementService:
 
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         return await self.crawler.fetch(url, comment_limit=comment_limit)
+
+    async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+        return await self.crawler.fetch_interactions(url, media_name)
+
+    async def fetch_comments(
+        self,
+        url: str,
+        media_name: str,
+        page: int,
+    ) -> CommentPageResult:
+        return await self.crawler.fetch_comments(url, media_name, page)
 
     async def fetch_many(
         self,
