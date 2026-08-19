@@ -1,8 +1,9 @@
-"""Protocol-only engagement and comment collection by public content URL.
+"""Protocol-first engagement and comment collection by public content URL.
 
 This module deliberately keeps platform-specific parsing small and explicit.  A
-platform that needs a browser-only token is reported as ``unsupported`` instead
-of returning an empty successful result.
+Platforms that need browser-generated state can be handed to the optional
+runtime fallback after the protocol attempt; no captured browser state is
+embedded in this module.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from hashlib import md5
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from bs4 import BeautifulSoup
@@ -31,6 +32,9 @@ from app.models.engagement import (
     EngagementStats,
     InteractionResult,
 )
+
+if TYPE_CHECKING:
+    from app.crawlers.browser_fallback import BrowserFallback
 
 
 DOUYIN_DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
@@ -63,6 +67,7 @@ class EngagementCrawler:
         cookies: str = "",
         proxy_provider: Any | None = None,
         proxy_mode: str = "direct",
+        browser_fallback: "BrowserFallback | None" = None,
     ) -> None:
         self._owns_client = client is None
         self.client = client or CurlAsyncHttpClient(
@@ -78,6 +83,7 @@ class EngagementCrawler:
             proxy_mode=proxy_mode,
         )
         self.cookies = cookies
+        self.browser_fallback = browser_fallback
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -139,43 +145,108 @@ class EngagementCrawler:
         if not work_id:
             raise ValueError(f"cannot extract {platform} content id from URL")
         if platform == "bilibili":
-            return await self._bilibili(
+            result = await self._bilibili(
                 url, work_id, limit, page=page,
                 include_stats=include_stats, include_comments=include_comments,
             )
-        if platform == "douyin":
-            return await self._douyin(
+        elif platform == "douyin":
+            result = await self._douyin(
                 url, work_id, limit, page=page,
                 include_stats=include_stats, include_comments=include_comments,
             )
-        if platform == "weibo":
-            return await self._weibo(
+        elif platform == "weibo":
+            result = await self._weibo(
                 url, work_id, limit, page=page,
                 include_stats=include_stats, include_comments=include_comments,
             )
-        if platform == "haokan":
-            return await self._haokan(
+        elif platform == "haokan":
+            result = await self._haokan(
                 url, work_id, limit, page=page,
                 include_stats=include_stats, include_comments=include_comments,
             )
-        if platform == "xiaohongshu":
-            return await self._xiaohongshu(
+        elif platform == "xiaohongshu":
+            result = await self._xiaohongshu(
                 url, work_id,
                 include_stats=include_stats, include_comments=include_comments,
             )
-        if platform == "toutiao":
-            return await self._toutiao(
+        elif platform == "toutiao":
+            result = await self._toutiao(
                 url, work_id, limit, page=page,
                 include_stats=include_stats, include_comments=include_comments,
             )
-        return EngagementResult(
-            platform=platform,
-            canonical_url=url,
-            work_id=work_id,
-            coverage="unsupported",
-            reason=_UNSUPPORTED_REASONS[platform],
-            source="protocol_probe",
-        )
+        else:
+            result = EngagementResult(
+                platform=platform,
+                canonical_url=url,
+                work_id=work_id,
+                coverage="unsupported",
+                reason=_UNSUPPORTED_REASONS[platform],
+                source="protocol_probe",
+            )
+        if self._should_use_browser_fallback(
+            result,
+            include_stats=include_stats,
+            include_comments=include_comments,
+        ):
+            browser_result = await self._run_browser_fallback(
+                url,
+                platform,
+                work_id,
+                page=page,
+                limit=limit,
+                include_stats=include_stats,
+                include_comments=include_comments,
+            )
+            if browser_result is not None:
+                return browser_result
+        return result
+
+    @staticmethod
+    def _should_use_browser_fallback(
+        result: EngagementResult,
+        *,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> bool:
+        if result.coverage in {"unsupported", "blocked", "failed"}:
+            return True
+        if include_stats and not any(value is not None for value in result.stats.model_dump().values()):
+            return True
+        if include_comments and not result.comments and result.coverage == "partial":
+            return True
+        return False
+
+    async def _run_browser_fallback(
+        self,
+        url: str,
+        platform: EngagementPlatform,
+        work_id: str,
+        *,
+        page: int,
+        limit: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult | None:
+        if self.browser_fallback is None:
+            return None
+        try:
+            return await self.browser_fallback.fetch(
+                url,
+                platform,
+                work_id,
+                page=page,
+                limit=limit,
+                include_stats=include_stats,
+                include_comments=include_comments,
+            )
+        except Exception as exc:
+            return _result_error(
+                platform,
+                url,
+                work_id,
+                "failed",
+                f"浏览器兜底调用失败: {type(exc).__name__}: {exc}",
+            )
 
     async def _get_json(
         self,

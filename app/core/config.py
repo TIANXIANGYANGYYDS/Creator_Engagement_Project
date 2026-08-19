@@ -53,6 +53,18 @@ class Settings(BaseSettings):
         alias="REQUEST_TIMEOUT_SECONDS",
         gt=0,
     )
+    browser_fallback_enabled: bool = Field(default=True, alias="BROWSER_FALLBACK_ENABLED")
+    browser_timeout_seconds: float = Field(default=35, alias="BROWSER_TIMEOUT_SECONDS", gt=0)
+    browser_challenge_wait_seconds: float = Field(
+        default=5,
+        alias="BROWSER_CHALLENGE_WAIT_SECONDS",
+        ge=0,
+    )
+    browser_headless: bool = Field(default=True, alias="BROWSER_HEADLESS")
+    browser_profile_dir: str = Field(
+        default=".local/browser-profiles",
+        alias="BROWSER_PROFILE_DIR",
+    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
     api_port: int = Field(default=8200, alias="API_PORT", ge=1, le=65535)

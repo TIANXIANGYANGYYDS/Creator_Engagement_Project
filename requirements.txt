@@ -7,6 +7,10 @@ pydantic
 pydantic-settings
 requests
 uvicorn[standard]
+# Runtime browser fallback (the Camoufox browser binary is provisioned separately
+# in the MyAgent environment).
+camoufox==0.5.4
+playwright==1.60.0
 
 # Test
 pytest

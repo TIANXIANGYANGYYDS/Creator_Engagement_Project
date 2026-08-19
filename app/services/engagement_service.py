@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Iterable, Literal
 
 from app.core.config import Settings
+from app.crawlers.browser_fallback import BrowserFallback, BrowserFallbackSettings
 from app.crawlers.engagement import EngagementCrawler
 from app.crawlers.proxy_provider import AsyncDailiProxyPool, AsyncProxyProvider
 from app.models.engagement import CommentPageResult, EngagementResult, InteractionResult
@@ -39,11 +41,24 @@ class EngagementService:
                 max_concurrency_per_proxy=settings.proxy_max_concurrency,
                 api_url=settings.proxy_51_api_url,
             )
+        browser_fallback = None
+        if settings.browser_fallback_enabled:
+            browser_fallback = BrowserFallback(
+                settings=BrowserFallbackSettings(
+                    timeout_seconds=settings.browser_timeout_seconds,
+                    challenge_wait_seconds=settings.browser_challenge_wait_seconds,
+                    headless=settings.browser_headless,
+                    profile_dir=Path(settings.browser_profile_dir),
+                ),
+                proxy_provider=provider,
+                cookies=settings.creator_engagement_cookie.get_secret_value(),
+            )
         crawler = EngagementCrawler(
             timeout_seconds=settings.request_timeout_seconds,
             cookies=settings.creator_engagement_cookie.get_secret_value(),
             proxy_provider=provider,
             proxy_mode=active_mode,
+            browser_fallback=browser_fallback,
         )
         return cls(crawler, proxy_provider=provider)
 
