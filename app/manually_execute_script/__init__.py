@@ -1,0 +1,1 @@
+"""Manual operational entry points."""

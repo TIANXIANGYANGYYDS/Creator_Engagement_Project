@@ -1,0 +1,12 @@
+# Runtime
+beautifulsoup4
+fastapi
+curl_cffi==0.9.0
+httpx
+pydantic
+pydantic-settings
+requests
+uvicorn[standard]
+
+# Test
+pytest

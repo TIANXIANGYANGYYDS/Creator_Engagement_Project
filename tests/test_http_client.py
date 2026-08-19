@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import pytest
+
+from app.crawlers.http_client import CurlAsyncHttpClient
+from app.crawlers.proxy_provider import ProxyUnavailableError
+
+
+class FakeResponse:
+    def __init__(self, status_code: int = 200) -> None:
+        self.status_code = status_code
+
+
+class FakeSession:
+    def __init__(self, response: FakeResponse | None = None, error: Exception | None = None) -> None:
+        self.response = response or FakeResponse()
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+        self.closed = False
+
+    async def get(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append({"url": url, **kwargs})
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeProxyProvider:
+    def __init__(self, proxies: dict[str, str] | None) -> None:
+        self.proxies = proxies
+        self.successes: list[dict[str, str] | None] = []
+        self.failures: list[tuple[dict[str, str] | None, Exception]] = []
+
+    async def get_requests_proxies(self) -> dict[str, str] | None:
+        return self.proxies
+
+    async def on_success_for(self, proxies: dict[str, str] | None) -> None:
+        self.successes.append(proxies)
+
+    async def on_failure_for(
+        self,
+        proxies: dict[str, str] | None,
+        exc: Exception,
+    ) -> None:
+        self.failures.append((proxies, exc))
+
+    async def close(self) -> None:
+        return None
+
+
+def test_prefer_mode_uses_and_releases_proxy_lease() -> None:
+    proxies = {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
+    provider = FakeProxyProvider(proxies)
+    session = FakeSession()
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=provider,
+        proxy_mode="prefer",
+        session=session,
+    )
+
+    asyncio.run(client.get("https://example.com"))
+
+    assert session.calls[0]["proxy"] == proxies["https"]
+    assert provider.successes == [proxies]
+    assert provider.failures == []
+
+
+def test_blocked_response_discards_proxy_lease() -> None:
+    proxies = {"https": "http://127.0.0.1:8080"}
+    provider = FakeProxyProvider(proxies)
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=provider,
+        proxy_mode="prefer",
+        session=FakeSession(FakeResponse(403)),
+    )
+
+    asyncio.run(client.get("https://example.com"))
+
+    assert len(provider.failures) == 1
+    assert provider.successes == []
+
+
+def test_required_mode_never_falls_back_to_direct() -> None:
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_mode="required",
+        session=FakeSession(),
+    )
+
+    with pytest.raises(ProxyUnavailableError, match="没有配置代理提供器"):
+        asyncio.run(client.get("https://example.com"))
