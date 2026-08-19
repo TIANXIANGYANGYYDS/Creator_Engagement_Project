@@ -7,7 +7,10 @@ import pytest
 
 from app.crawlers.engagement import (
     EngagementCrawler,
+    _extract_bilibili_wbi_mixin_key,
     _parse_xhs_stats,
+    _parse_toutiao_stats,
+    _sign_bilibili_wbi_params,
     identify_url,
     normalize_media_name,
 )
@@ -47,6 +50,7 @@ class FakeClient:
         ("https://www.toutiao.com/article/1234567890/", ("toutiao", "1234567890")),
         ("https://www.kuaishou.com/short-video/abc", ("kuaishou", "abc")),
         ("https://mp.weixin.qq.com/s?mid=2247504578", ("wechat", "2247504578")),
+        ("https://mp.weixin.qq.com/s/XKB0QLWfxHAJrOo-QvHsVw", ("wechat", "XKB0QLWfxHAJrOo-QvHsVw")),
     ],
 )
 def test_identify_url(url: str, expected: tuple[str, str]) -> None:
@@ -113,11 +117,14 @@ def test_bilibili_comments_use_requested_page() -> None:
         }),
         FakeResponse(payload={
             "code": 0,
-            "data": {
-                "page": {"num": 3, "size": 20, "count": 70},
-                "replies": [],
-            },
+            "data": {"wbi_img": {
+                "img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz0123456789abcdefgh.png",
+                "sub_url": "https://i0.hdslb.com/bfs/wbi/ZYXWVUTSRQPONMLKJIHGFEDCBA987654321zyxwvutsrqponmlk.png",
+            }},
         }),
+        FakeResponse(payload={"code": 0, "data": {"cursor": {"next": 2, "all_count": 70, "pagination_reply": {"next_offset": "token-2"}}, "replies": []}}),
+        FakeResponse(payload={"code": 0, "data": {"cursor": {"next": 3, "all_count": 70, "pagination_reply": {"next_offset": "token-3"}}, "replies": []}}),
+        FakeResponse(payload={"code": 0, "data": {"cursor": {"next": 4, "all_count": 70, "pagination_reply": {"next_offset": "token-4"}}, "replies": []}}),
     )
 
     result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
@@ -129,7 +136,69 @@ def test_bilibili_comments_use_requested_page() -> None:
     assert result.page == 3
     assert result.next_page == 4
     assert result.total_comments == 70
-    assert client.calls[1][1]["params"]["pn"] == 3
+    assert client.calls[1][0] == "https://api.bilibili.com/x/web-interface/nav"
+    assert client.calls[4][0] == "https://api.bilibili.com/x/v2/reply/wbi/main"
+    assert client.calls[3][1]["params"]["pagination_str"] == '{"offset":"token-2"}'
+    assert client.calls[4][1]["params"]["pagination_str"] == '{"offset":"token-3"}'
+
+
+def test_bilibili_does_not_relabel_last_cursor_page() -> None:
+    client = FakeClient(
+        FakeResponse(payload={
+            "code": 0,
+            "data": {"bvid": "BVgood", "aid": 123, "stat": {}},
+        }),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {"wbi_img": {
+                "img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz0123456789abcdefgh.png",
+                "sub_url": "https://i0.hdslb.com/bfs/wbi/ZYXWVUTSRQPONMLKJIHGFEDCBA987654321zyxwvutsrqponmlk.png",
+            }},
+        }),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {
+                "cursor": {"next": 0, "all_count": 1},
+                "replies": [{"rpid": 1, "content": {"message": "最后一页"}}],
+            },
+        }),
+    )
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "https://www.bilibili.com/video/BVgood",
+        "bilibili",
+        2,
+    ))
+
+    assert result.comments == []
+    assert result.next_page is None
+    assert result.total_comments == 1
+
+
+def test_bilibili_current_wbi_table_matches_browser_sample() -> None:
+    mixin_key = _extract_bilibili_wbi_mixin_key({
+        "code": -101,
+        "data": {"wbi_img": {
+            "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+            "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+        }},
+    })
+    signed = _sign_bilibili_wbi_params(
+        {
+            "oid": "455017605",
+            "type": "1",
+            "mode": "3",
+            "pagination_str": '{"offset":""}',
+            "plat": "1",
+            "seek_rpid": "",
+            "web_location": "1315875",
+        },
+        mixin_key=mixin_key,
+        wts=1787158788,
+    )
+
+    assert mixin_key == "ea1db124af3c7062474693fa704f4ff8"
+    assert signed["w_rid"] == "4233c504c4a2ed5d38c42602d2f4704b"
 
 
 def test_toutiao_comments_map_page_to_offset() -> None:
@@ -197,7 +266,16 @@ def test_bilibili_fetches_stats_and_comments() -> None:
         FakeResponse(payload={
             "code": 0,
             "data": {
-                "page": {"num": 1, "size": 20, "count": 21},
+                "wbi_img": {
+                    "img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz0123456789abcdefgh.png",
+                    "sub_url": "https://i0.hdslb.com/bfs/wbi/ZYXWVUTSRQPONMLKJIHGFEDCBA987654321zyxwvutsrqponmlk.png",
+                },
+            },
+        }),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {
+                "cursor": {"next": 2, "all_count": 21},
                 "replies": [{
                     "rpid": 9,
                     "ctime": 1700000000,
@@ -351,6 +429,35 @@ def test_toutiao_fetches_comment_count_and_comments_without_signature() -> None:
     assert result.comments[0].text == "头条评论"
     assert result.next_cursor == "5"
     assert "_signature" not in client.calls[0][1]["params"]
+
+
+def test_toutiao_interactions_parse_ssr_counters_without_comment_request() -> None:
+    client = FakeClient(FakeResponse(text=(
+        '%22itemCounter%22%3A%7B%22commentCount%22%3A28%2C%22diggCount%22%3A74%2C'
+        '%22readCount%22%3A3297%2C%22shareCount%22%3A52%2C%22showCount%22%3A167624%7D'
+    )))
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        "https://www.toutiao.com/article/7557632662635840036/",
+        "头条",
+    ))
+
+    assert result.stats.likes == 74
+    assert result.stats.views == 3297
+    assert result.stats.comments == 28
+    assert result.stats.shares == 52
+    assert len(client.calls) == 1
+
+
+def test_toutiao_stats_parser_accepts_plain_item_counter() -> None:
+    stats = _parse_toutiao_stats(
+        '{"itemCounter":{"commentCount":3,"diggCount":4,"readCount":5,"shareCount":6}}'
+    )
+    assert stats.model_dump(exclude_none=True) == {
+        "views": 5,
+        "likes": 4,
+        "comments": 3,
+        "shares": 6,
+    }
 
 
 def test_haokan_comments_do_not_require_captured_signature() -> None:

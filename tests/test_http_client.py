@@ -54,6 +54,31 @@ class FakeProxyProvider:
         return None
 
 
+class SequencedSession:
+    def __init__(self, *outcomes: FakeResponse | Exception) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list[dict[str, Any]] = []
+
+    async def get(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append({"url": url, **kwargs})
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def close(self) -> None:
+        return None
+
+
+class RotatingProxyProvider(FakeProxyProvider):
+    def __init__(self, *proxies: dict[str, str]) -> None:
+        super().__init__(None)
+        self.queue = list(proxies)
+
+    async def get_requests_proxies(self) -> dict[str, str] | None:
+        return self.queue.pop(0) if self.queue else None
+
+
 def test_prefer_mode_uses_and_releases_proxy_lease() -> None:
     proxies = {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
     provider = FakeProxyProvider(proxies)
@@ -100,3 +125,24 @@ def test_required_mode_never_falls_back_to_direct() -> None:
 
     with pytest.raises(ProxyUnavailableError, match="没有配置代理提供器"):
         asyncio.run(client.get("https://example.com"))
+
+
+def test_transport_error_discards_proxy_and_retries_once() -> None:
+    first = {"https": "http://127.0.0.1:8080"}
+    second = {"https": "http://127.0.0.2:8080"}
+    provider = RotatingProxyProvider(first, second)
+    session = SequencedSession(ConnectionError("connect failed"), FakeResponse(200))
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=provider,
+        proxy_mode="prefer",
+        session=session,
+    )
+
+    response = asyncio.run(client.get("https://example.com"))
+
+    assert response.status_code == 200
+    assert [call["proxy"] for call in session.calls] == [first["https"], second["https"]]
+    assert provider.failures[0][0] == first
+    assert provider.successes == [second]

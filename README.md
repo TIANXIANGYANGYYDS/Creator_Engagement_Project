@@ -56,16 +56,18 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 
 | 平台 | 当前能力 | 协议证据 | 状态 |
 |---|---|---|---|
-| B 站 | 播放、点赞、评论、分享、收藏、投币、弹幕和一级评论 | `x/web-interface/view`、`x/v2/reply` | 可用；评论仅当前页 |
+| B 站 | 播放、点赞、评论、分享、收藏、投币、弹幕和一级评论 | `x/web-interface/view`、`x/v2/reply/wbi/main`、`x/web-interface/nav` | 可用；评论仅当前页 |
 | 微博 | 点赞、评论、转发和热门评论 | `statuses/show`、`comments/hotflow` | 可用，访客态部分覆盖 |
 | 好看 | 评论总数和一级评论 | `haokan/ui-web/v2/comment/get` | 可用；详情互动量待补 |
 | 小红书 | 点赞、收藏、分享、评论总数 | 详情页 `noteDetailMap` SSR | 可用；评论列表需 `x-s/x-t` |
 | 抖音 | 在调用方提供有效会话 Cookie 时读取详情互动量；评论接口可能返回空包 | `/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 统计可尝试；匿名请求明确 unsupported，评论按实际响应 partial |
-| 头条 | 评论总数和一级评论 | `article/v4/tab_comments`，无需固化 `_signature` | 可用；点赞/转发详情待补 |
+| 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
 | 公众号 | URL/文章 ID 识别 | 正文可获取；互动/评论被文章会话和验证码保护 | 未稳定 |
 | 快手 | URL/作品 ID 识别 | `visionShortVideoReco`、`visionCommentList` 已定位 | 未稳定；详情依赖 webWeapon `kww`，评论返回 `Need captcha` |
 
-不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音详情接口在当前版本对匿名请求稳定返回 HTTP 200 空包；需要读取统计时，通过 `CREATOR_ENGAGEMENT_COOKIE` 注入调用方自己的会话 Cookie。该 Cookie 不会写入代码或日志，过期、无效或缺少设备风控字段时结果会明确标成 `blocked`/`failed`。
+不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音详情接口在当前版本对匿名请求稳定返回 HTTP 200 空包；需要读取统计时，通过 `CREATOR_ENGAGEMENT_COOKIE` 注入调用方自己的会话 Cookie。该 Cookie 不会写入代码或日志，过期、无效或缺少设备风控字段时结果会明确标成 `blocked`/`failed`。B 站评论的 WBI 密钥每次从公开导航接口动态读取，不依赖浏览器或登录 Cookie。
+
+逐项证据和“无法稳定获取”的阻断原因见 [`docs/PROTOCOL_MATRIX.md`](docs/PROTOCOL_MATRIX.md)。
 
 头条评论接口已验证：`/article/v4/tab_comments/` 使用 `aid/app_name/offset/count/group_id/item_id` 即可返回 `err_no=0`、`total_number`、`has_more` 和评论列表，不需要把浏览器请求里的 `_signature` 写入代码。
 

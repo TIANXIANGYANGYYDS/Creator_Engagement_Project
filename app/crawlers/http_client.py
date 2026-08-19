@@ -60,29 +60,37 @@ class CurlAsyncHttpClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> Any:
-        proxies = await self._acquire_proxy()
-        proxy_url = (proxies or {}).get("https") or (proxies or {}).get("http")
-        try:
-            response = await self._session.get(
-                url,
-                params=params,
-                headers=headers,
-                proxy=proxy_url,
-            )
-        except Exception as exc:
-            await self._notify_proxy("on_failure_for", "on_failure", proxies, exc)
-            raise
-        status = int(getattr(response, "status_code", 0))
-        if status in {403, 407, 412, 418, 429, 432, 471} or status >= 500:
-            await self._notify_proxy(
-                "on_failure_for",
-                "on_failure",
-                proxies,
-                RuntimeError(f"proxy request returned HTTP {status}"),
-            )
-        else:
-            await self._notify_proxy("on_success_for", "on_success", proxies)
-        return response
+        attempts = 2 if self.proxy_provider is not None and self.proxy_mode != "direct" else 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            proxies = await self._acquire_proxy()
+            proxy_url = (proxies or {}).get("https") or (proxies or {}).get("http")
+            try:
+                response = await self._session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    proxy=proxy_url,
+                )
+            except Exception as exc:
+                last_error = exc
+                await self._notify_proxy("on_failure_for", "on_failure", proxies, exc)
+                if attempt + 1 < attempts:
+                    continue
+                raise
+            status = int(getattr(response, "status_code", 0))
+            if status in {403, 407, 412, 418, 429, 432, 471} or status >= 500:
+                await self._notify_proxy(
+                    "on_failure_for",
+                    "on_failure",
+                    proxies,
+                    RuntimeError(f"proxy request returned HTTP {status}"),
+                )
+            else:
+                await self._notify_proxy("on_success_for", "on_success", proxies)
+            return response
+        assert last_error is not None
+        raise last_error
 
     async def _acquire_proxy(self) -> dict[str, str] | None:
         if self.proxy_mode == "direct":

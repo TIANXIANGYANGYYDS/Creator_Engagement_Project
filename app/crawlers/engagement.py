@@ -8,10 +8,12 @@ of returning an empty successful result.
 from __future__ import annotations
 
 import html
+from hashlib import md5
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 from app.crawlers.http_client import (
@@ -38,6 +40,15 @@ DOUYIN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
+)
+BILIBILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
+BILIBILI_REPLY_WBI_URL = "https://api.bilibili.com/x/v2/reply/wbi/main"
+BILIBILI_REPLY_LEGACY_URL = "https://api.bilibili.com/x/v2/reply"
+BILIBILI_WBI_MIXIN_KEY_ENC_TAB = (
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 )
 
 
@@ -396,20 +407,12 @@ class EngagementCrawler:
             aid = _int(data.get("aid"))
             comments: list[EngagementComment] = []
             cursor: str | None = None
+            comment_source = ""
             if include_comments:
-                comments_payload = await self._get_json(
-                    "https://api.bilibili.com/x/v2/reply",
-                    params={
-                        "type": 1,
-                        "oid": aid,
-                        "pn": page,
-                        "ps": min(limit, COMMENT_PAGE_SIZE),
-                        "sort": 2,
-                    },
-                )
+                comments_payload, comment_source = await self._bilibili_comments(aid, page, limit)
                 comments, cursor = _parse_bilibili_comments(comments_payload)
                 if not include_stats:
-                    comment_count = _int((comments_payload.get("data") or {}).get("page", {}).get("count"))
+                    comment_count = _bilibili_comment_count(comments_payload)
                     stats = EngagementStats(comments=comment_count)
             return EngagementResult(
                 platform="bilibili",
@@ -421,7 +424,7 @@ class EngagementCrawler:
                     if include_comments else "B 站详情接口提供当前公开互动量"
                 ),
                 source=(
-                    "x/web-interface/view + x/v2/reply"
+                    f"x/web-interface/view + {comment_source}"
                     if include_comments else "x/web-interface/view"
                 ),
                 stats=stats,
@@ -432,6 +435,81 @@ class EngagementCrawler:
             return _result_error("bilibili", url, work_id, "blocked", str(exc))
         except Exception as exc:
             return _result_error("bilibili", url, work_id, "failed", str(exc))
+
+    async def _bilibili_comments(
+        self,
+        aid: int | None,
+        page: int,
+        limit: int,
+    ) -> tuple[dict[str, Any], str]:
+        """Fetch one requested page through the current web WBI reply API.
+
+        The web endpoint is cursor-based even though our public contract is page-based;
+        walk cursors from the first page so callers do not need to know Bilibili's
+        internal pagination format.  A legacy endpoint fallback keeps the collector
+        useful during short WBI key rotations or API rollouts.
+        """
+
+        if aid is None:
+            raise PlatformCrawlerError("bilibili view contains no aid")
+        try:
+            nav = await self._get_json(BILIBILI_NAV_URL)
+            mixin_key = _extract_bilibili_wbi_mixin_key(nav)
+            offset = ""
+            payload: dict[str, Any] = {}
+            for current_page in range(1, page + 1):
+                base_params = {
+                    "oid": str(aid),
+                    "type": "1",
+                    "mode": "3",
+                    "pagination_str": json.dumps(
+                        {"offset": offset},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                    "plat": "1",
+                    "seek_rpid": "",
+                    "web_location": "1315875",
+                }
+                payload = await self._get_json(
+                    BILIBILI_REPLY_WBI_URL,
+                    params=_sign_bilibili_wbi_params(base_params, mixin_key=mixin_key),
+                    headers={"Referer": "https://www.bilibili.com/"},
+                )
+                if payload.get("code") != 0:
+                    raise PlatformCrawlerError(
+                        f"bilibili WBI reply returned code {payload.get('code')}"
+                    )
+                if current_page < page:
+                    cursor = (payload.get("data") or {}).get("cursor") or {}
+                    pagination_reply = cursor.get("pagination_reply") or {}
+                    next_offset = pagination_reply.get("next_offset")
+                    if not next_offset:
+                        return {
+                            "code": 0,
+                            "data": {
+                                "cursor": {
+                                    "all_count": cursor.get("all_count"),
+                                    "next": 0,
+                                },
+                                "replies": [],
+                            },
+                        }, "x/v2/reply/wbi/main"
+                    offset = str(next_offset)
+            return payload, "x/v2/reply/wbi/main"
+        except PlatformCrawlerError:
+            # The old endpoint is still accepted for some public videos.  It is a
+            # compatibility fallback, never the primary implementation.
+            return await self._get_json(
+                BILIBILI_REPLY_LEGACY_URL,
+                params={
+                    "type": 1,
+                    "oid": aid,
+                    "pn": page,
+                    "ps": min(limit, COMMENT_PAGE_SIZE),
+                    "sort": 2,
+                },
+            ), "x/v2/reply"
 
     async def _weibo(
         self,
@@ -615,6 +693,40 @@ class EngagementCrawler:
     ) -> EngagementResult:
         endpoint = "https://www.toutiao.com/article/v4/tab_comments/"
         try:
+            stats = EngagementStats()
+            sources: list[str] = []
+            reason = ""
+            # The article document is the only public source for digg/read/share
+            # counters.  Keep it on the interaction path so comments remain a
+            # separate paged request as required by the API contract.
+            if include_stats and not include_comments:
+                try:
+                    article_response = await self._get_response(
+                        f"https://www.toutiao.com/article/{work_id}/",
+                        headers={
+                            "Accept": "text/html,application/xhtml+xml",
+                            "Referer": f"https://www.toutiao.com/article/{work_id}/",
+                        },
+                    )
+                    stats = _parse_toutiao_stats(str(getattr(article_response, "text", "") or ""))
+                    if any(value is not None for value in stats.model_dump().values()):
+                        sources.append("article SSR itemCounter")
+                    else:
+                        reason = "头条文章 SSR 未返回 itemCounter，当前只报告可验证字段"
+                except PlatformCrawlerError as exc:
+                    reason = f"头条文章 SSR 请求受阻，互动统计不可用: {exc}"
+
+            if not include_comments:
+                return EngagementResult(
+                    platform="toutiao",
+                    canonical_url=f"https://www.toutiao.com/article/{work_id}/",
+                    work_id=work_id,
+                    coverage="partial",
+                    reason=reason or "头条互动统计来自文章 SSR，字段可能随页面挑战而缺失",
+                    source=" + ".join(sources) or "article SSR",
+                    stats=stats,
+                )
+
             payload = await self._get_json(
                 endpoint,
                 params={
@@ -646,8 +758,7 @@ class EngagementCrawler:
                 coverage="partial",
                 reason=(
                     "头条评论接口可匿名读取指定页，不能证明评论全集"
-                    if include_comments
-                    else "当前稳定协议提供评论总数；点赞/转发详情仍需文章 SSR 或会话签名"
+                    if include_comments else reason
                 ),
                 source="article/v4/tab_comments",
                 stats=EngagementStats(comments=total),
@@ -662,7 +773,7 @@ class EngagementCrawler:
 
 _UNSUPPORTED_REASONS: dict[EngagementPlatform, str] = {
     "douyin": "匿名详情请求返回空包；提供调用方自己的有效会话 Cookie 后可尝试读取统计，评论仍可能被访客接口折叠",
-    "wechat": "公众号文章正文可从 RSS 获取，但阅读/点赞/评论接口受文章会话与验证码参数保护",
+    "wechat": "公众号匿名 getappmsgext 不下发阅读/点赞统计，appmsg_comment 返回 no session；互动量和评论都需要文章会话参数",
     "kuaishou": (
         "快手作品页纯协议返回错误 JSON；未携带 webWeapon 动态 kww/kwssectoken 时，"
         "visionShortVideoReco 返回的可能是无关推荐流，评论接口返回 Need captcha，不能把推荐作品误报为目标作品"
@@ -745,7 +856,12 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
         match = re.search(r"/(?:short-video|profile)/([^/?]+)", path)
         return "kuaishou", match.group(1) if match else ""
     if "mp.weixin.qq.com" in host:
-        return "wechat", query.get("mid", [""])[0] or query.get("sn", [""])[0]
+        path_match = re.search(r"/s/([^/?]+)", path)
+        return "wechat", (
+            query.get("mid", [""])[0]
+            or query.get("sn", [""])[0]
+            or (path_match.group(1) if path_match else "")
+        )
     raise ValueError("unsupported content URL host")
 
 
@@ -779,7 +895,54 @@ def _parse_bilibili_comments(payload: dict[str, Any]) -> tuple[list[EngagementCo
             replies=_int(item.get("rcount")),
         ))
     page = data.get("page") or {}
+    cursor = data.get("cursor") or {}
+    next_cursor = cursor.get("next")
+    if next_cursor not in (None, "", 0):
+        return result, str(next_cursor)
     return result, str(int(page.get("num", 1)) + 1) if page.get("num") and page.get("count", 0) > page.get("num", 1) * page.get("size", 1) else None
+
+
+def _bilibili_comment_count(payload: dict[str, Any]) -> int | None:
+    data = payload.get("data") or {}
+    cursor = data.get("cursor") or {}
+    if cursor.get("all_count") is not None:
+        return _int(cursor.get("all_count"))
+    return _int((data.get("page") or {}).get("count"))
+
+
+def _bilibili_image_key(url: Any) -> str:
+    filename = urlparse(str(url or "")).path.rsplit("/", 1)[-1]
+    key = filename.rsplit(".", 1)[0]
+    if not key:
+        raise PlatformCrawlerError("bilibili nav contains an invalid WBI image URL")
+    return key
+
+
+def _extract_bilibili_wbi_mixin_key(payload: dict[str, Any]) -> str:
+    if payload.get("code") not in {0, -101} or not isinstance(payload.get("data"), dict):
+        raise PlatformCrawlerError(f"bilibili nav returned code {payload.get('code')}")
+    wbi_img = (payload.get("data") or {}).get("wbi_img") or {}
+    source = _bilibili_image_key(wbi_img.get("img_url")) + _bilibili_image_key(wbi_img.get("sub_url"))
+    if len(source) <= max(BILIBILI_WBI_MIXIN_KEY_ENC_TAB):
+        raise PlatformCrawlerError("bilibili nav WBI image keys are invalid")
+    return "".join(source[index] for index in BILIBILI_WBI_MIXIN_KEY_ENC_TAB)[:32]
+
+
+def _sign_bilibili_wbi_params(
+    params: dict[str, Any],
+    *,
+    mixin_key: str,
+    wts: int | None = None,
+) -> dict[str, str]:
+    timestamp = int(datetime.now(timezone.utc).timestamp()) if wts is None else wts
+    signed = {
+        key: re.sub(r"[!'()*]", "", str(value))
+        for key, value in params.items()
+    }
+    signed["wts"] = str(timestamp)
+    query = urlencode(sorted(signed.items()))
+    signed["w_rid"] = md5(f"{query}{mixin_key}".encode()).hexdigest()
+    return signed
 
 
 def _parse_douyin_comments(payload: dict[str, Any]) -> tuple[list[EngagementComment], str | None]:
@@ -885,6 +1048,34 @@ def _parse_xhs_stats(text: str, work_id: str) -> EngagementStats:
         if values:
             return _xhs_stats(values)
     return EngagementStats()
+
+
+def _parse_toutiao_stats(text: str) -> EngagementStats:
+    """Parse public article counters from plain or URL-encoded SSR JSON."""
+
+    decoded = html.unescape(text)
+    for _ in range(2):
+        decoded = unquote(decoded)
+    decoded = decoded.replace(r"\u0022", '"').replace(r'\"', '"')
+    match = re.search(r'"itemCounter"\s*:\s*\{([^{}]+)\}', decoded, re.S)
+    body = match.group(1) if match else decoded
+    values = {
+        key: _int(value)
+        for key, value in re.findall(
+            r'"(commentCount|diggCount|readCount|shareCount|showCount)"\s*:\s*"?([^",}\s]+)',
+            body,
+        )
+    }
+    like_match = re.search(r'"likeData"\s*:\s*\{[^{}]*"count"\s*:\s*"?([^",}\s]+)', decoded, re.S)
+    if values.get("diggCount") is None and like_match:
+        values["diggCount"] = _int(like_match.group(1))
+    return EngagementStats(
+        views=values.get("readCount"),
+        likes=values.get("diggCount"),
+        comments=values.get("commentCount"),
+        shares=values.get("shareCount"),
+        **{"show_count": values.get("showCount")},
+    )
 
 
 def _xhs_interaction_values(body: str) -> dict[str, int | None]:
