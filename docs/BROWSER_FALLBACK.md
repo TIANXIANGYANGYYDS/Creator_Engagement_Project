@@ -10,8 +10,8 @@
   同一个 51 代理池。
 - 每个平台使用独立的 `.local/browser-profiles/<platform>` 持久化 Profile，平台生成的
   `ttwid`、`msToken`、`UIFID`、`x-s` 等状态由浏览器自己维护并自然过期。
-- `CREATOR_ENGAGEMENT_COOKIE` 只在启动页面前注入当前调用方拥有的 Cookie，既不打印也不
-  持久化到源码；Profile 本身位于 Git 忽略目录。
+- `CREATOR_ENGAGEMENT_COOKIE` 是兼容 Stock 配置的抖音会话，只注入抖音域名，既不打印也
+  不持久化到源码；其他平台复用各自 Profile，避免跨域 Cookie 污染游客设备状态。
 - 页面加载后监听 `document/xhr/fetch` 响应，优先解析真实 JSON。评论请求没有响应体时，
   结果会标记为“评论字段未返回”，不会返回成功的空评论列表。
 - 对支持懒加载的平台会滚动页面，并尝试点击“评论/重试/刷新”按钮；验证码、登录和安全
@@ -26,8 +26,6 @@ BROWSER_CHALLENGE_WAIT_SECONDS=5
 BROWSER_HEADLESS=true
 BROWSER_PROFILE_DIR=".local/browser-profiles"
 PLATFORM_SESSION_DIR=".local/platform-sessions"
-AIDATA_API_KEY=""
-AIDATA_BASE_URL="https://aidata.vip"
 ```
 
 `MyAgent` 环境需要同时具备 `camoufox` Python 包和匹配版本的 Camoufox 浏览器二进制。
@@ -43,6 +41,6 @@ Xvfb 的运行环境单独配置，不要把人工验证码结果提交到仓库
 
 快手游客页会自动生成 `kwssectoken/kwscode` 等设备状态；项目在同一页面上下文请求目标
 `visionVideoDetail` 和一级评论 REST 接口，无需用户登录。小红书游客页可返回首屏评论，
-出现“登录查看全部评论”时会停止分页，绝不把首屏重复标成后续页。深分页可使用自有会话，
-或配置不含平台账号凭据的 AIDATA API Key。公众号文章的 `show_comment=0` 会直接判定为
-作者关闭评论；其他文章可用 AIDATA URL 接口跳过微信文章会话。
+出现“登录查看全部评论”时会停止分页，绝不把首屏重复标成后续页。深分页只能复用调用方
+自己的有效会话。公众号文章的 `show_comment=0` 会直接判定为作者关闭评论；其他文章若
+没有微信文章短时会话，会明确返回 `unsupported/blocked`。

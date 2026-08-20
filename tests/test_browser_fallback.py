@@ -43,6 +43,14 @@ class FakeBrowserFallback:
         )
 
 
+class FakeBrowserContext:
+    def __init__(self) -> None:
+        self.cookies = []
+
+    async def add_cookies(self, cookies) -> None:
+        self.cookies.extend(cookies)
+
+
 def test_protocol_unsupported_result_uses_browser_fallback() -> None:
     browser = FakeBrowserFallback()
     result = asyncio.run(
@@ -63,6 +71,30 @@ def test_protocol_unsupported_result_uses_browser_fallback() -> None:
             "include_comments": False,
         },
     )
+
+
+def test_caller_cookie_is_only_seeded_into_douyin_profile() -> None:
+    browser = BrowserFallback(cookies="sessionid=caller-owned")
+    kuaishou = FakeBrowserContext()
+    douyin = FakeBrowserContext()
+
+    asyncio.run(browser._seed_cookies(
+        kuaishou,
+        "https://www.kuaishou.com/short-video/1",
+        "kuaishou",
+    ))
+    asyncio.run(browser._seed_cookies(
+        douyin,
+        "https://www.douyin.com/video/1",
+        "douyin",
+    ))
+
+    assert kuaishou.cookies == []
+    assert douyin.cookies == [{
+        "name": "sessionid",
+        "value": "caller-owned",
+        "url": "https://www.douyin.com",
+    }]
 
 
 def test_browser_parser_accepts_real_douyin_detail_shape() -> None:
@@ -92,6 +124,24 @@ def test_browser_parser_accepts_real_douyin_detail_shape() -> None:
     assert source == "aweme/detail"
 
 
+def test_browser_parser_does_not_treat_hidden_douyin_views_as_zero() -> None:
+    stats, _, _, _ = _parse_douyin(
+        "https://www.douyin.com/aweme/v1/web/aweme/detail/",
+        {
+            "aweme_detail": {
+                "aweme_id": "1",
+                "statistics": {"play_count": 0, "digg_count": 11},
+            }
+        },
+        "1",
+        EngagementStats(),
+        [],
+    )
+
+    assert stats.views is None
+    assert stats.likes == 11
+
+
 def test_browser_parser_accepts_xhs_ssr_counters() -> None:
     stats, comments, total, source = _parse_xhs(
         "https://www.xiaohongshu.com/explore/1",
@@ -114,11 +164,11 @@ def test_kuaishou_guest_payload_matches_only_target_and_parses_comments() -> Non
         {
             "apolloState": {
                 "VisionVideoDetailPhoto:other": {"id": "other", "realLikeCount": 999},
-                "VisionVideoDetailPhoto:photo-1": {
-                    "id": "photo-1",
-                    "viewCount": "3.9万",
-                    "realLikeCount": 11626,
-                },
+            },
+            "apolloPhoto": {
+                "id": "photo-1",
+                "viewCount": "3.9万",
+                "realLikeCount": 11626,
             },
             "commentPage": {
                 "result": 1,

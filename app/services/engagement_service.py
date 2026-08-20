@@ -57,8 +57,6 @@ class EngagementService:
         crawler = EngagementCrawler(
             timeout_seconds=settings.request_timeout_seconds,
             cookies=settings.creator_engagement_cookie.get_secret_value(),
-            aidata_api_key=settings.aidata_api_key.get_secret_value(),
-            aidata_base_url=settings.aidata_base_url,
             proxy_provider=provider,
             proxy_mode=active_mode,
             browser_fallback=browser_fallback,

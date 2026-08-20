@@ -192,7 +192,10 @@ class BrowserFallback:
                         await value
 
     async def _seed_cookies(self, context: Any, url: str, platform: EngagementPlatform) -> None:
-        if not self.cookies.strip():
+        # The compatibility setting is a Douyin session cookie.  Reusing the
+        # same name/value pairs on unrelated domains can poison their guest
+        # device sessions and trigger a challenge.
+        if platform != "douyin" or not self.cookies.strip():
             return
         origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
         cookie_list = []
@@ -242,6 +245,15 @@ class BrowserFallback:
             """
             async ({workId, requestedPage, includeComments}) => {
               const apolloState = globalThis.__APOLLO_STATE__ || {};
+              const cachedPhoto = apolloState[`VisionVideoDetailPhoto:${workId}`] || null;
+              const apolloPhoto = cachedPhoto ? {
+                id: cachedPhoto.id,
+                viewCount: cachedPhoto.viewCount,
+                likeCount: cachedPhoto.likeCount,
+                realLikeCount: cachedPhoto.realLikeCount,
+                commentCount: cachedPhoto.commentCount,
+                shareCount: cachedPhoto.shareCount,
+              } : null;
               const query = `query visionVideoDetail($photoId: String) {
                 visionVideoDetail(photoId: $photoId) {
                   status
@@ -273,18 +285,18 @@ class BrowserFallback:
                 });
                 const commentPage = await response.json();
                 if (!response.ok || commentPage.result !== 1) {
-                  return {apolloState, detailPayload, commentPage, reached: false};
+                  return {apolloPhoto, detailPayload, commentPage, reached: false};
                 }
                 if (currentPage === targetPage) {
-                  return {apolloState, detailPayload, commentPage, reached: true};
+                  return {apolloPhoto, detailPayload, commentPage, reached: true};
                 }
                 const next = commentPage.pcursorV2 || commentPage.pcursor || "";
                 if (!next || next === "0" || next === "no_more") {
-                  return {apolloState, detailPayload, commentPage: null, reached: false};
+                  return {apolloPhoto, detailPayload, commentPage: null, reached: false};
                 }
                 cursor = String(next);
               }
-              return {apolloState, detailPayload, commentPage: null, reached: false};
+              return {apolloPhoto, detailPayload, commentPage: null, reached: false};
             }
             """,
             {
@@ -397,7 +409,7 @@ class BrowserFallback:
         challenge = _challenge_reason(body_text)
         if xhs_guest_page_blocked:
             coverage = "unsupported"
-            reason = "小红书游客态仅开放首屏评论；页码大于 1 需配置 AIDATA_API_KEY 或使用自有账号会话"
+            reason = "小红书游客态仅开放首屏评论；页码大于 1 需要调用方自己的有效平台会话"
         elif not useful_stats and not useful_comments:
             coverage = "blocked" if challenge else "unsupported"
             reason = challenge or "浏览器已生成会话，但页面未捕获目标公开互动或评论响应"
@@ -532,11 +544,13 @@ def _walk_comments(value: Any) -> list[EngagementComment]:
 
 def _parse_douyin(url: str, payload: Any, work_id: str, stats: EngagementStats, comments: list[EngagementComment]):
     if "/aweme/v1/web/aweme/detail/" in url and isinstance(payload, dict):
+        from app.crawlers.platforms.douyin import public_view_count
+
         detail = payload.get("aweme_detail") or {}
         if str(detail.get("aweme_id") or work_id) == work_id:
             values = detail.get("statistics") or {}
             stats = EngagementStats(
-                views=_number(values.get("play_count")), likes=_number(values.get("digg_count")),
+                views=public_view_count(values), likes=_number(values.get("digg_count")),
                 comments=_number(values.get("comment_count")), shares=_number(values.get("share_count")),
                 favorites=_number(values.get("collect_count")),
             )
@@ -559,9 +573,9 @@ def _parse_toutiao(url: str, text: str, payload: Any, stats: EngagementStats, co
                     parsed.append(value)
         return stats, parsed, _number(payload.get("total_number")), "article/tab_comments"
     try:
-        from app.crawlers.engagement import _parse_toutiao_stats
+        from app.crawlers.platforms.toutiao import parse_stats
 
-        parsed_stats = _parse_toutiao_stats(text)
+        parsed_stats = parse_stats(text)
     except Exception:
         parsed_stats = EngagementStats()
     values = parsed_stats.model_dump()
@@ -592,10 +606,10 @@ def _parse_xhs(url: str, text: str, payload: Any, stats: EngagementStats, commen
         total = _number(_find_key(payload, {"comment_count", "commentCount", "total"}))
         return stats, parsed, total or stats.comments, "comment/page"
     try:
-        from app.crawlers.engagement import _parse_xhs_stats
+        from app.crawlers.platforms.xiaohongshu import parse_stats
 
         note_id = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
-        parsed_stats = _parse_xhs_stats(text, note_id)
+        parsed_stats = parse_stats(text, note_id)
     except Exception:
         parsed_stats = EngagementStats()
     if not any(value is not None for value in parsed_stats.model_dump().values()):
@@ -642,7 +656,8 @@ def _parse_kuaishou_guest(
     work_id: str,
 ) -> tuple[EngagementStats, list[EngagementComment], int | None, bool | None, str]:
     apollo = payload.get("apolloState") or {}
-    photo: dict[str, Any] = {}
+    photo_value = payload.get("apolloPhoto")
+    photo: dict[str, Any] = photo_value if isinstance(photo_value, dict) else {}
     if isinstance(apollo, dict):
         exact = apollo.get(f"VisionVideoDetailPhoto:{work_id}")
         if isinstance(exact, dict):

@@ -82,6 +82,36 @@ def test_xiaohongshu_comments_sign_and_cursor_pagination() -> None:
     assert "cursor-2" in client.get_calls[1][0]
 
 
+def test_xiaohongshu_retries_blocked_xys_with_xyw() -> None:
+    client = DualFakeClient(gets=[
+        FakeResponse({"success": False, "code": -1}, status_code=406),
+        FakeResponse({
+            "success": True,
+            "data": {
+                "comments": [{
+                    "id": "x1",
+                    "content": "新签名返回",
+                    "user_info": {"nickname": "用户"},
+                }],
+                "has_more": False,
+            },
+        }),
+    ])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"xiaohongshu": "a1=a1-value; web_session=session-value"},
+    ).fetch_comments(
+        "https://www.xiaohongshu.com/explore/6a5585c000000000080326ac?xsec_token=token",
+        "小红书",
+        1,
+    ))
+
+    assert result.comments[0].text == "新签名返回"
+    assert client.get_calls[0][1]["headers"]["X-S"].startswith("XYS_")
+    assert client.get_calls[1][1]["headers"]["X-S"].startswith("XYW_")
+    assert "X-Xray-Traceid" in client.get_calls[1][1]["headers"]
+
+
 def test_kuaishou_detail_and_rest_comments_validate_target_id() -> None:
     client = DualFakeClient(posts=[
         FakeResponse({
@@ -161,113 +191,6 @@ def test_wechat_disabled_comments_are_distinguished_from_missing_session() -> No
     assert result.total_comments is None
 
 
-def test_wechat_aidata_stats_do_not_need_wechat_session() -> None:
-    client = DualFakeClient(gets=[
-        FakeResponse(text="<html>article</html>"),
-        FakeResponse({
-            "data": {
-                "stats": {
-                    "read_count": 1200,
-                    "like_count": 34,
-                    "comment_count": 5,
-                    "share_count": 6,
-                    "collect_count": 7,
-                }
-            }
-        }),
-    ])
-    result = asyncio.run(EngagementCrawler(
-        client=client,
-        aidata_api_key="provider-key",
-    ).fetch_interactions(
-        "https://mp.weixin.qq.com/s/article-token",
-        "公众号",
-    ))
-
-    assert result.stats.views == 1200
-    assert result.stats.likes == 34
-    assert result.stats.comments == 5
-    assert result.stats.favorites == 7
-    assert result.source == "AIDATA weixin/mp/article/stats"
-    assert client.get_calls[1][1]["headers"]["Authorization"] == "Bearer provider-key"
-
-
-def test_wechat_aidata_comments_walk_buffer_pages() -> None:
-    article = "<script>window.cgiDataNew={show_comment:1};</script>"
-    client = DualFakeClient(gets=[
-        FakeResponse(text=article),
-        FakeResponse({"data": {
-            "comments": [{"content_id": "w1", "content": "第一页"}],
-            "buffer": "buffer-2",
-            "has_more": True,
-            "total_count": 2,
-        }}),
-        FakeResponse({"data": {
-            "comments": [{
-                "content_id": "w2",
-                "content": "第二页",
-                "created_at": 1700000000,
-                "liked_count": 8,
-                "reply_count": 3,
-                "user": {"nickname": "微信用户"},
-            }],
-            "buffer": "",
-            "has_more": False,
-            "total_count": 2,
-        }}),
-    ])
-    result = asyncio.run(EngagementCrawler(
-        client=client,
-        aidata_api_key="provider-key",
-    ).fetch_comments(
-        "https://mp.weixin.qq.com/s/article-token",
-        "公众号",
-        2,
-    ))
-
-    assert result.comments[0].comment_id == "w2"
-    assert result.comments[0].author == "微信用户"
-    assert result.comments[0].likes == 8
-    assert result.total_comments == 2
-    assert result.next_page is None
-    assert client.get_calls[2][1]["params"]["buffer"] == "buffer-2"
-
-
-def test_xiaohongshu_aidata_comments_walk_cursor_without_platform_login() -> None:
-    client = DualFakeClient(gets=[
-        FakeResponse({"data": {
-            "comments": [{"id": "x1", "content": "第一页"}],
-            "cursor": "cursor-2",
-            "has_more": True,
-        }}),
-        FakeResponse({"data": {
-            "comments": [{
-                "id": "x2",
-                "content": "第二页",
-                "author": {"nickname": "小红书用户"},
-                "stats": {"like_count": 9, "sub_comment_count": 4},
-            }],
-            "cursor": "",
-            "has_more": False,
-        }}),
-    ])
-    result = asyncio.run(EngagementCrawler(
-        client=client,
-        aidata_api_key="provider-key",
-    ).fetch_comments(
-        "https://www.xiaohongshu.com/explore/6a5a69260000000011011b41",
-        "小红书",
-        2,
-    ))
-
-    assert result.comments[0].comment_id == "x2"
-    assert result.comments[0].author == "小红书用户"
-    assert result.comments[0].likes == 9
-    assert result.comments[0].replies == 4
-    assert result.next_page is None
-    assert client.get_calls[1][1]["params"]["cursor"] == "cursor-2"
-
-
 def test_wechat_no_session_is_blocked_after_article_metadata() -> None:
     html = """
     <script>
@@ -292,6 +215,65 @@ def test_wechat_no_session_is_blocked_after_article_metadata() -> None:
     assert client.get_calls[1][0].endswith("/mp/appmsg_comment")
 
 
+def test_wechat_reads_preloaded_first_page_without_session() -> None:
+    html = r'''
+    <script>
+      window.cgiDataNew = {show_comment: 1, comment_id: 10, bizuin: 'MzA=', mid: 20, idx: 1};
+      var preload_comment_list = '{"elected_comment":[{"content_id":"c1","nick_name":"读者","content":"预载评论","like_num":3}]}';
+      var preload_comment_total_cnt = 7;
+    </script>
+    '''
+    result = asyncio.run(EngagementCrawler(
+        client=DualFakeClient(gets=[FakeResponse(text=html)]),
+    ).fetch_comments(
+        "https://mp.weixin.qq.com/s/article-token",
+        "公众号",
+        1,
+    ))
+
+    assert result.coverage == "partial"
+    assert result.comments[0].comment_id == "c1"
+    assert result.comments[0].text == "预载评论"
+    assert result.total_comments == 7
+    assert result.next_page == 2
+
+
+def test_weibo_falls_back_to_anonymous_numbered_page() -> None:
+    client = DualFakeClient(gets=[
+        FakeResponse({
+            "ok": 1,
+            "data": {"max_id": 99, "data": [{"id": 1, "text": "热门首屏"}]},
+        }),
+        FakeResponse({
+            "ok": -100,
+            "url": "https://passport.weibo.com/sso/signin",
+        }),
+        FakeResponse({
+            "ok": 1,
+            "data": {
+                "max": 34,
+                "total_number": 336,
+                "data": [{
+                    "id": 2,
+                    "text": '<span><img alt="[手指比心]"></span>',
+                    "user": {"screen_name": "访客"},
+                }],
+            },
+        }),
+    ])
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "https://m.weibo.cn/detail/5301066679190033",
+        "微博",
+        2,
+    ))
+
+    assert result.comments[0].text == "[手指比心]"
+    assert result.total_comments == 336
+    assert result.next_page == 3
+    assert client.get_calls[2][0].endswith("/api/comments/show")
+    assert client.get_calls[2][1]["params"]["page"] == 2
+
+
 def test_platform_session_store_reads_playwright_state(tmp_path) -> None:
     path = tmp_path / "xiaohongshu.json"
     path.write_text(
@@ -300,6 +282,20 @@ def test_platform_session_store_reads_playwright_state(tmp_path) -> None:
     )
     store = PlatformSessionStore(tmp_path)
     assert store.cookie_header("xiaohongshu") == "a1=abc; web_session=xyz"
+
+
+def test_platform_session_store_saves_private_playwright_state(tmp_path) -> None:
+    class FakeContext:
+        async def storage_state(self, *, path: str) -> None:
+            from pathlib import Path
+
+            Path(path).write_text('{"cookies":[]}', encoding="utf-8")
+
+    store = PlatformSessionStore(tmp_path)
+    path = asyncio.run(store.save_context("wechat", FakeContext()))
+
+    assert path == tmp_path / "wechat.json"
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_xiaohongshu_invalid_ssr_page_is_not_reported_as_partial_success() -> None:

@@ -5,15 +5,13 @@ from typing import Any
 
 import pytest
 
-from app.crawlers.engagement import (
-    EngagementCrawler,
-    _extract_bilibili_wbi_mixin_key,
-    _parse_xhs_stats,
-    _parse_toutiao_stats,
-    _sign_bilibili_wbi_params,
-    identify_url,
-    normalize_media_name,
-)
+from app.crawlers.engagement import EngagementCrawler
+from app.crawlers.platforms import PLATFORM_HANDLERS
+from app.crawlers.platforms.bilibili import extract_wbi_mixin_key, sign_wbi_params
+from app.crawlers.platforms.registry import identify_url, normalize_media_name
+from app.crawlers.platforms.toutiao import parse_stats as parse_toutiao_stats
+from app.crawlers.platforms.haokan import parse_ssr_stats as parse_haokan_stats
+from app.crawlers.platforms.xiaohongshu import parse_stats as parse_xhs_stats
 
 
 class FakeResponse:
@@ -26,6 +24,19 @@ class FakeResponse:
         if self._payload is None:
             raise ValueError("no JSON")
         return self._payload
+
+
+def test_all_supported_platforms_have_independent_handlers() -> None:
+    assert set(PLATFORM_HANDLERS) == {
+        "douyin",
+        "toutiao",
+        "wechat",
+        "xiaohongshu",
+        "haokan",
+        "kuaishou",
+        "bilibili",
+        "weibo",
+    }
 
 
 class FakeClient:
@@ -176,14 +187,14 @@ def test_bilibili_does_not_relabel_last_cursor_page() -> None:
 
 
 def test_bilibili_current_wbi_table_matches_browser_sample() -> None:
-    mixin_key = _extract_bilibili_wbi_mixin_key({
+    mixin_key = extract_wbi_mixin_key({
         "code": -101,
         "data": {"wbi_img": {
             "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
             "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
         }},
     })
-    signed = _sign_bilibili_wbi_params(
+    signed = sign_wbi_params(
         {
             "oid": "455017605",
             "type": "1",
@@ -379,6 +390,30 @@ def test_douyin_stats_are_partial_when_visitor_comment_endpoint_returns_empty() 
     assert "空包" in result.reason
 
 
+def test_douyin_hidden_play_count_is_not_reported_as_real_zero() -> None:
+    client = FakeClient(FakeResponse(payload={
+        "status_code": 0,
+        "aweme_detail": {
+            "statistics": {
+                "play_count": 0,
+                "digg_count": 20,
+                "comment_count": 3,
+            },
+        },
+    }, text='{"status_code":0,"aweme_detail":{}}'))
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        cookies="sessionid=caller-session",
+    ).fetch_interactions(
+        "https://www.douyin.com/video/7665718789363309172",
+        "抖音",
+    ))
+
+    assert result.stats.views is None
+    assert result.stats.likes == 20
+
+
 def test_weibo_fetches_stats_and_hot_comments() -> None:
     client = FakeClient(
         FakeResponse(payload={"ok": 1, "data": {"attitudes_count": 11, "comments_count": 12, "reposts_count": 13}}),
@@ -449,7 +484,7 @@ def test_toutiao_interactions_parse_ssr_counters_without_comment_request() -> No
 
 
 def test_toutiao_stats_parser_accepts_plain_item_counter() -> None:
-    stats = _parse_toutiao_stats(
+    stats = parse_toutiao_stats(
         '{"itemCounter":{"commentCount":3,"diggCount":4,"readCount":5,"shareCount":6}}'
     )
     assert stats.model_dump(exclude_none=True) == {
@@ -461,19 +496,46 @@ def test_toutiao_stats_parser_accepts_plain_item_counter() -> None:
 
 
 def test_haokan_comments_do_not_require_captured_signature() -> None:
-    client = FakeClient(FakeResponse(payload={
-        "status": 0,
-        "data": {
-            "comment_count": "13",
-            "is_over": False,
-            "list": [{"reply_id": "r1", "uname": "用户", "content": "内容", "like_count": "4", "reply_count": "2"}],
-        },
-    }))
+    client = FakeClient(
+        FakeResponse(text="<html>visitor bootstrap</html>"),
+        FakeResponse(text=(
+            '<meta name="description" content="示例,22220次播放,好看视频">'
+            '<meta property="og:url" content="https://haokan.baidu.com/v?vid=327646248367276281">'
+            '<div class="ssr-icon-comment">13</div>'
+            '<div class="ssr-icon-like">257</div>'
+        )),
+        FakeResponse(payload={
+            "status": 0,
+            "data": {
+                "comment_count": "13",
+                "is_over": False,
+                "list": [{"reply_id": "r1", "uname": "用户", "content": "内容", "like_count": "4", "reply_count": "2"}],
+            },
+        }),
+    )
     result = asyncio.run(EngagementCrawler(client=client).fetch("https://haokan.baidu.com/v?vid=327646248367276281"))
 
+    assert result.stats.views == 22220
+    assert result.stats.likes == 257
     assert result.stats.comments == 13
     assert result.comments[0].comment_id == "r1"
-    assert "hk_sign" not in client.calls[0][1]["params"]
+    assert "hk_sign" not in client.calls[2][1]["params"]
+
+
+def test_haokan_ssr_stats_require_target_video() -> None:
+    text = (
+        '<meta name="description" content="示例,110808次播放,好看视频">'
+        '<meta property="og:url" content="https://haokan.baidu.com/v?vid=target-video">'
+        '<div class="ssr-icon-comment">729</div>'
+        '<div class="ssr-icon-like">620</div>'
+    )
+
+    assert parse_haokan_stats(text, "target-video").model_dump(exclude_none=True) == {
+        "views": 110808,
+        "likes": 620,
+        "comments": 729,
+    }
+    assert parse_haokan_stats(text, "different-video").model_dump(exclude_none=True) == {}
 
 
 def test_xiaohongshu_reads_ssr_stats_and_reports_signed_comments_as_partial() -> None:
@@ -497,7 +559,7 @@ def test_xiaohongshu_reads_ssr_stats_and_reports_signed_comments_as_partial() ->
 
 
 def test_xhs_stats_missing_note_is_empty_not_fabricated() -> None:
-    assert _parse_xhs_stats("<html></html>", "missing").model_dump() == {
+    assert parse_xhs_stats("<html></html>", "missing").model_dump() == {
         "views": None,
         "likes": None,
         "comments": None,
