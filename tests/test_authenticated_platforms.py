@@ -156,9 +156,116 @@ def test_wechat_disabled_comments_are_distinguished_from_missing_session() -> No
         1,
     ))
 
-    assert result.coverage == "partial"
+    assert result.coverage == "complete"
     assert "关闭评论" in result.reason
     assert result.total_comments is None
+
+
+def test_wechat_aidata_stats_do_not_need_wechat_session() -> None:
+    client = DualFakeClient(gets=[
+        FakeResponse(text="<html>article</html>"),
+        FakeResponse({
+            "data": {
+                "stats": {
+                    "read_count": 1200,
+                    "like_count": 34,
+                    "comment_count": 5,
+                    "share_count": 6,
+                    "collect_count": 7,
+                }
+            }
+        }),
+    ])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        aidata_api_key="provider-key",
+    ).fetch_interactions(
+        "https://mp.weixin.qq.com/s/article-token",
+        "公众号",
+    ))
+
+    assert result.stats.views == 1200
+    assert result.stats.likes == 34
+    assert result.stats.comments == 5
+    assert result.stats.favorites == 7
+    assert result.source == "AIDATA weixin/mp/article/stats"
+    assert client.get_calls[1][1]["headers"]["Authorization"] == "Bearer provider-key"
+
+
+def test_wechat_aidata_comments_walk_buffer_pages() -> None:
+    article = "<script>window.cgiDataNew={show_comment:1};</script>"
+    client = DualFakeClient(gets=[
+        FakeResponse(text=article),
+        FakeResponse({"data": {
+            "comments": [{"content_id": "w1", "content": "第一页"}],
+            "buffer": "buffer-2",
+            "has_more": True,
+            "total_count": 2,
+        }}),
+        FakeResponse({"data": {
+            "comments": [{
+                "content_id": "w2",
+                "content": "第二页",
+                "created_at": 1700000000,
+                "liked_count": 8,
+                "reply_count": 3,
+                "user": {"nickname": "微信用户"},
+            }],
+            "buffer": "",
+            "has_more": False,
+            "total_count": 2,
+        }}),
+    ])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        aidata_api_key="provider-key",
+    ).fetch_comments(
+        "https://mp.weixin.qq.com/s/article-token",
+        "公众号",
+        2,
+    ))
+
+    assert result.comments[0].comment_id == "w2"
+    assert result.comments[0].author == "微信用户"
+    assert result.comments[0].likes == 8
+    assert result.total_comments == 2
+    assert result.next_page is None
+    assert client.get_calls[2][1]["params"]["buffer"] == "buffer-2"
+
+
+def test_xiaohongshu_aidata_comments_walk_cursor_without_platform_login() -> None:
+    client = DualFakeClient(gets=[
+        FakeResponse({"data": {
+            "comments": [{"id": "x1", "content": "第一页"}],
+            "cursor": "cursor-2",
+            "has_more": True,
+        }}),
+        FakeResponse({"data": {
+            "comments": [{
+                "id": "x2",
+                "content": "第二页",
+                "author": {"nickname": "小红书用户"},
+                "stats": {"like_count": 9, "sub_comment_count": 4},
+            }],
+            "cursor": "",
+            "has_more": False,
+        }}),
+    ])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        aidata_api_key="provider-key",
+    ).fetch_comments(
+        "https://www.xiaohongshu.com/explore/6a5a69260000000011011b41",
+        "小红书",
+        2,
+    ))
+
+    assert result.comments[0].comment_id == "x2"
+    assert result.comments[0].author == "小红书用户"
+    assert result.comments[0].likes == 9
+    assert result.comments[0].replies == 4
+    assert result.next_page is None
+    assert client.get_calls[1][1]["params"]["cursor"] == "cursor-2"
 
 
 def test_wechat_no_session_is_blocked_after_article_metadata() -> None:

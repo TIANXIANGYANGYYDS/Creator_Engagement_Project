@@ -69,6 +69,8 @@ class Settings(BaseSettings):
         default=".local/platform-sessions",
         alias="PLATFORM_SESSION_DIR",
     )
+    aidata_api_key: SecretStr = Field(default=SecretStr(""), alias="AIDATA_API_KEY")
+    aidata_base_url: str = Field(default="https://aidata.vip", alias="AIDATA_BASE_URL")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
     api_port: int = Field(default=8200, alias="API_PORT", ge=1, le=65535)

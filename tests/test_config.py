@@ -18,3 +18,10 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.proxy_mode == "prefer"
     assert settings.proxy_pool_size == 4
     assert settings.proxy_max_concurrency == 2
+
+
+def test_aidata_is_optional_and_uses_public_default_base_url() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.aidata_api_key.get_secret_value() == ""
+    assert settings.aidata_base_url == "https://aidata.vip"

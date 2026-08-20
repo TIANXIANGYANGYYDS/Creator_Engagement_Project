@@ -17,7 +17,17 @@ conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement 
 可选的调用方 Cookie 通过 `CREATOR_ENGAGEMENT_COOKIE` 环境变量注入，不会写入输出；为兼容
 Stock_Project 现有环境，也接受 `DOUYIN_SESSION_COOKIE` 作为回退变量名。
 
-快手、小红书和公众号的登录态不通过聊天传递账号密码。首次使用时在带桌面环境的本机执行：
+快手公开作品默认使用浏览器自动生成的游客设备会话，不需要账号。小红书游客态可读取公开
+互动量和首屏评论；深分页可配置 AIDATA。公众号匿名文章页通常不下发互动量和评论，若要
+完全跳过微信登录，可配置第三方 AIDATA API：
+
+```dotenv
+AIDATA_API_KEY="your-provider-api-key"
+AIDATA_BASE_URL="https://aidata.vip"
+```
+
+这是按供应商规则计费的数据 API Key，不是微信/快手/小红书账号凭据。若仍希望使用调用方自己的
+平台会话，可在带桌面环境的本机执行：
 
 ```bash
 conda run -n MyAgent creator-engagement-login kuaishou
@@ -78,11 +88,11 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | B 站 | 播放、点赞、评论、分享、收藏、投币、弹幕和一级评论 | `x/web-interface/view`、`x/v2/reply/wbi/main`、`x/web-interface/nav` | 可用；评论仅当前页 |
 | 微博 | 点赞、评论、转发和热门评论 | `statuses/show`、`comments/hotflow` | 可用，访客态部分覆盖 |
 | 好看 | 评论总数和一级评论 | `haokan/ui-web/v2/comment/get` | 可用；详情互动量待补 |
-| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 登录态 + `xhshow` 签名详情/评论接口，未登录回退 SSR | 需要有效 cookie、评论 URL 需 `xsec_token` |
+| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 游客浏览器首屏；登录态 `xhshow`；可选 AIDATA 深分页 | 首屏无需账号；无账号深分页需供应商 API Key |
 | 抖音 | 协议优先，浏览器会话可捕获详情统计；评论按真实响应判定 | `/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 详情已 smoke 验证；匿名评论可能 HTTP 200 空包 |
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
-| 公众号 | 文章 SSR、会话增强互动量和文章评论 | `/mp/getappmsgext`、`/mp/appmsg_comment`、页面 SSR | 文章关闭评论或文章会话无效时明确说明 |
-| 快手 | 登录态 GraphQL 详情和一级评论 | `visionVideoDetail`、`/rest/v/photo/comment/list`、`visionCommentList` | 严格校验目标 ID；验证码失败时明确 blocked |
+| 公众号 | 阅读、点赞、评论、分享、收藏及文章评论 | 页面 SSR/微信会话；可选 AIDATA URL 接口 | 原生匿名页无稳定计数；AIDATA 不需要微信账号 |
+| 快手 | 播放、点赞、评论总数和一级评论 | 游客页 `visionVideoDetail`、`/rest/v/photo/comment/list` | 无需账号；严格校验目标 ID，挑战失败时明确 blocked |
 
 不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音详情接口在当前版本对匿名请求稳定返回 HTTP 200 空包；需要读取统计时，通过 `CREATOR_ENGAGEMENT_COOKIE` 注入调用方自己的会话 Cookie。该 Cookie 不会写入代码或日志，过期、无效或缺少设备风控字段时结果会明确标成 `blocked`/`failed`。B 站评论的 WBI 密钥每次从公开导航接口动态读取，不依赖浏览器或登录 Cookie。
 
@@ -90,6 +100,6 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 
 头条评论接口已验证：`/article/v4/tab_comments/` 使用 `aid/app_name/offset/count/group_id/item_id` 即可返回 `err_no=0`、`total_number`、`has_more` 和评论列表，不需要把浏览器请求里的 `_signature` 写入代码。
 
-快手不能用“GraphQL 返回 HTTP 200”作为成功判据。协议层匿名调用 `visionShortVideoReco` 时，返回列表可能完全不包含传入的 `photoId`，它本质上会退化成推荐流；`visionCommentList` 则稳定返回 `Need captcha`。浏览器有效请求还带有 webWeapon 生成的 `kww` 头以及 `kwfv1/kwssectoken` 等短期状态。浏览器兜底会复用按平台隔离的 Profile，但仍会校验目标 ID，不会把推荐流第一条伪装成目标 URL 的统计。
+快手不能用“GraphQL 返回 HTTP 200”作为成功判据。项目先打开目标页，让平台签发游客设备状态，再在同一浏览器上下文调用 `visionVideoDetail` 和 `/rest/v/photo/comment/list`；响应必须严格匹配 `photoId`。游客状态自然过期后由浏览器重新生成，不把 `kww/kwssectoken` 写入代码。
 
-小红书评论接口已经定位到 `api/sns/web/v2/comment/page`，项目使用独立 MIT 包 `xhshow==0.2.0` 按当前 cookie、URI 和参数生成 `x-s/x-t/x-s-common`，并保留 HTTP 406 为明确阻断，不把浏览器样本签名写进业务代码。
+小红书评论接口已经定位到 `api/sns/web/v2/comment/page`。未登录网页会建立游客会话并返回首屏评论，但 UI 会阻止继续翻页；项目不会把第一页冒充成第二页。配置 AIDATA 后按其 `cursor` 实现深分页；自有登录态仍可使用 `xhshow==0.2.0` 动态签名。

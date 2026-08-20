@@ -26,6 +26,8 @@ BROWSER_CHALLENGE_WAIT_SECONDS=5
 BROWSER_HEADLESS=true
 BROWSER_PROFILE_DIR=".local/browser-profiles"
 PLATFORM_SESSION_DIR=".local/platform-sessions"
+AIDATA_API_KEY=""
+AIDATA_BASE_URL="https://aidata.vip"
 ```
 
 `MyAgent` 环境需要同时具备 `camoufox` Python 包和匹配版本的 Camoufox 浏览器二进制。
@@ -36,9 +38,11 @@ Xvfb 的运行环境单独配置，不要把人工验证码结果提交到仓库
 
 抖音已验证：浏览器详情页会产生 `/aweme/v1/web/aweme/detail/` 有效 JSON，统计字段可
 直接解析；同一页面的 `/aweme/v1/web/comment/list/` 在无会话时可能 HTTP 200 空包。
-这类结果会保留统计并明确说明评论未返回。公众号、快手和部分小红书页面可能停在登录、
-安全验证或验证码页，兜底层会报告阻断，不会把推荐流或页面文案当成目标作品数据。
+这类结果会保留统计并明确说明评论未返回。安全验证或验证码页会报告阻断，不会把推荐流
+或无关页面文案当成目标作品数据。
 
-快手和小红书已有协议适配器：登录态建立后优先走 GraphQL/REST 或 `xhshow` 签名请求；
-浏览器兜底只作为运行环境允许时的最后诊断路径。公众号文章的 `show_comment=0` 会直接
-判定为作者关闭评论，不会启动浏览器伪造结果。
+快手游客页会自动生成 `kwssectoken/kwscode` 等设备状态；项目在同一页面上下文请求目标
+`visionVideoDetail` 和一级评论 REST 接口，无需用户登录。小红书游客页可返回首屏评论，
+出现“登录查看全部评论”时会停止分页，绝不把首屏重复标成后续页。深分页可使用自有会话，
+或配置不含平台账号凭据的 AIDATA API Key。公众号文章的 `show_comment=0` 会直接判定为
+作者关闭评论；其他文章可用 AIDATA URL 接口跳过微信文章会话。

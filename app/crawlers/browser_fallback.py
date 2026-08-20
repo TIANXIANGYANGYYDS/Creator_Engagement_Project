@@ -230,6 +230,71 @@ class BrowserFallback:
             except Exception:
                 continue
 
+    async def _kuaishou_guest_payload(
+        self,
+        page_obj: Any,
+        work_id: str,
+        requested_page: int,
+        include_comments: bool,
+    ) -> dict[str, Any]:
+        """Read the target cache and comments through Kuaishou's guest page session."""
+        value = await page_obj.evaluate(
+            """
+            async ({workId, requestedPage, includeComments}) => {
+              const apolloState = globalThis.__APOLLO_STATE__ || {};
+              const query = `query visionVideoDetail($photoId: String) {
+                visionVideoDetail(photoId: $photoId) {
+                  status
+                  photo { id viewCount likeCount realLikeCount }
+                }
+              }`;
+              let detailPayload = null;
+              try {
+                const detailResponse = await fetch("/graphql", {
+                  method: "POST",
+                  credentials: "include",
+                  headers: {"content-type": "application/json"},
+                  body: JSON.stringify({
+                    operationName: "visionVideoDetail",
+                    variables: {photoId: workId},
+                    query,
+                  }),
+                });
+                detailPayload = await detailResponse.json();
+              } catch (_) {}
+              let cursor = "";
+              const targetPage = includeComments ? requestedPage : 1;
+              for (let currentPage = 1; currentPage <= targetPage; currentPage += 1) {
+                const response = await fetch("/rest/v/photo/comment/list", {
+                  method: "POST",
+                  credentials: "include",
+                  headers: {"content-type": "application/json"},
+                  body: JSON.stringify({photoId: workId, pcursor: cursor}),
+                });
+                const commentPage = await response.json();
+                if (!response.ok || commentPage.result !== 1) {
+                  return {apolloState, detailPayload, commentPage, reached: false};
+                }
+                if (currentPage === targetPage) {
+                  return {apolloState, detailPayload, commentPage, reached: true};
+                }
+                const next = commentPage.pcursorV2 || commentPage.pcursor || "";
+                if (!next || next === "0" || next === "no_more") {
+                  return {apolloState, detailPayload, commentPage: null, reached: false};
+                }
+                cursor = String(next);
+              }
+              return {apolloState, detailPayload, commentPage: null, reached: false};
+            }
+            """,
+            {
+                "workId": work_id,
+                "requestedPage": requested_page,
+                "includeComments": include_comments,
+            },
+        )
+        return value if isinstance(value, dict) else {}
+
     async def _parse_responses(
         self,
         page_obj: Any,
@@ -247,11 +312,40 @@ class BrowserFallback:
         comments: list[EngagementComment] = []
         total_comments: int | None = None
         sources: list[str] = []
+        next_available: bool | None = None
         body_text = ""
         try:
             body_text = await page_obj.locator("body").inner_text(timeout=1000)
         except Exception:
             pass
+
+        if platform == "kuaishou":
+            try:
+                guest = await self._kuaishou_guest_payload(
+                    page_obj,
+                    work_id,
+                    page,
+                    include_comments,
+                )
+                guest_stats, guest_comments, guest_total, guest_next, source = _parse_kuaishou_guest(
+                    guest,
+                    work_id,
+                )
+                if any(value is not None for value in guest_stats.model_dump().values()):
+                    stats = guest_stats
+                if guest_total is not None:
+                    stats.comments = guest_total
+                if include_comments and guest.get("reached"):
+                    comments = guest_comments
+                    total_comments = guest_total
+                    if guest_total is not None:
+                        stats.comments = guest_total
+                    next_available = guest_next
+                if source:
+                    sources.append(source)
+            except Exception:
+                # Captured network responses below remain a valid fallback.
+                pass
 
         for response in responses:
             response_url = str(getattr(response, "url", ""))
@@ -272,6 +366,10 @@ class BrowserFallback:
                 stats, comments, total_comments, source = _parse_toutiao(response_url, text, payload, stats, comments)
             elif platform == "xiaohongshu":
                 stats, comments, total_comments, source = _parse_xhs(response_url, text, payload, stats, comments)
+                if "comment/page" in response_url and isinstance(payload, dict):
+                    has_more = _find_key(payload, {"has_more", "hasMore"})
+                    if has_more is not None:
+                        next_available = bool(has_more)
             elif platform == "haokan":
                 stats, comments, total_comments, source = _parse_haokan(response_url, payload, stats, comments)
             elif platform == "wechat":
@@ -288,10 +386,19 @@ class BrowserFallback:
                 sources.append(source)
 
         comments = comments[:limit]
+        xhs_guest_gate = platform == "xiaohongshu" and "登录查看全部评论" in body_text
+        xhs_guest_page_blocked = xhs_guest_gate and page > 1
+        if xhs_guest_gate:
+            next_available = False
+        if xhs_guest_page_blocked:
+            comments = []
         useful_stats = any(value is not None for value in stats.model_dump().values())
         useful_comments = bool(comments)
         challenge = _challenge_reason(body_text)
-        if not useful_stats and not useful_comments:
+        if xhs_guest_page_blocked:
+            coverage = "unsupported"
+            reason = "小红书游客态仅开放首屏评论；页码大于 1 需配置 AIDATA_API_KEY 或使用自有账号会话"
+        elif not useful_stats and not useful_comments:
             coverage = "blocked" if challenge else "unsupported"
             reason = challenge or "浏览器已生成会话，但页面未捕获目标公开互动或评论响应"
         else:
@@ -313,7 +420,11 @@ class BrowserFallback:
             source="browser:" + ",".join(sources) if sources else "browser_fallback",
             stats=stats if include_stats or total_comments is not None else EngagementStats(),
             comments=comments if include_comments else [],
-            next_cursor=str(page + 1) if include_comments and useful_comments else None,
+            next_cursor=(
+                str(page + 1)
+                if include_comments and useful_comments and next_available is not False
+                else None
+            ),
         )
 
 
@@ -327,26 +438,60 @@ def _playwright_proxy(proxies: dict[str, str] | None) -> dict[str, str] | None:
 def _number(value: Any) -> int | None:
     if value is None or value == "":
         return None
+    text = str(value).strip().replace(",", "")
+    multiplier = 1
+    if text.endswith("万"):
+        text = text[:-1]
+        multiplier = 10_000
+    elif text.endswith("亿"):
+        text = text[:-1]
+        multiplier = 100_000_000
     try:
-        return max(0, int(str(value).replace(",", "")))
+        return max(0, int(float(text) * multiplier))
     except (TypeError, ValueError):
         return None
 
 
+def _first_value(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
 def _comment(item: dict[str, Any], *, default_id: str = "") -> EngagementComment | None:
-    comment_id = str(item.get("cid") or item.get("id") or item.get("comment_id") or default_id)
+    comment_id = str(
+        item.get("cid")
+        or item.get("id")
+        or item.get("comment_id")
+        or item.get("commentId")
+        or default_id
+    )
     text = str(item.get("text") or item.get("content") or item.get("message") or "")
     user = item.get("user") or item.get("user_info") or item.get("author") or {}
     if not isinstance(user, dict):
         user = {}
-    author = str(user.get("nickname") or user.get("nick_name") or user.get("name") or user.get("uname") or item.get("user_name") or "")
+    author = str(
+        user.get("nickname")
+        or user.get("nick_name")
+        or user.get("name")
+        or user.get("uname")
+        or item.get("user_name")
+        or item.get("authorName")
+        or item.get("author_name")
+        or ""
+    )
     if not comment_id or not text:
         return None
-    created = item.get("create_time") or item.get("created_at") or item.get("time")
+    created = _first_value(item, "create_time", "created_at", "timestamp", "time")
     created_at = None
     if created:
         try:
-            created_at = datetime.fromtimestamp(float(created), tz=timezone.utc)
+            timestamp = float(created)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000
+            created_at = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         except (TypeError, ValueError, OverflowError):
             pass
     return EngagementComment(
@@ -354,8 +499,17 @@ def _comment(item: dict[str, Any], *, default_id: str = "") -> EngagementComment
         author=author,
         text=text,
         created_at=created_at,
-        likes=_number(item.get("digg_count") or item.get("like_count") or item.get("like")),
-        replies=_number(item.get("reply_count") or item.get("reply_comment_total") or item.get("rcount")),
+        likes=_number(_first_value(item, "digg_count", "like_count", "likedCount", "like")),
+        replies=_number(
+            _first_value(
+                item,
+                "reply_count",
+                "reply_comment_total",
+                "subCommentCount",
+                "commentCount",
+                "rcount",
+            )
+        ),
     )
 
 
@@ -474,13 +628,64 @@ def _parse_kuaishou(url: str, payload: Any, work_id: str, stats: EngagementStats
         return stats, comments, stats.comments, ""
     if "visionCommentList" in url or "comment" in url.lower():
         parsed = _walk_comments(payload)
-        return stats, parsed, _number(_find_key(payload, {"commentCount", "comment_count", "total"})), "graphql comments"
+        return stats, parsed, _number(_find_key(payload, {"commentCount", "comment_count", "total"})), "Kuaishou comments"
     if "visionShortVideoReco" in url or "visionVideoDetail" in url:
         if work_id not in json.dumps(payload, ensure_ascii=False):
             return stats, comments, stats.comments, ""
         values = _stats_from_mapping(payload)
         return EngagementStats(**values), comments, values.get("comments"), "graphql detail"
     return stats, comments, stats.comments, ""
+
+
+def _parse_kuaishou_guest(
+    payload: dict[str, Any],
+    work_id: str,
+) -> tuple[EngagementStats, list[EngagementComment], int | None, bool | None, str]:
+    apollo = payload.get("apolloState") or {}
+    photo: dict[str, Any] = {}
+    if isinstance(apollo, dict):
+        exact = apollo.get(f"VisionVideoDetailPhoto:{work_id}")
+        if isinstance(exact, dict):
+            photo = exact
+        else:
+            for key, value in apollo.items():
+                if (
+                    str(key).startswith("VisionVideoDetailPhoto:")
+                    and isinstance(value, dict)
+                    and str(value.get("id") or "") == work_id
+                ):
+                    photo = value
+                    break
+
+    detail_payload = payload.get("detailPayload") or {}
+    if isinstance(detail_payload, dict):
+        detail = (detail_payload.get("data") or {}).get("visionVideoDetail") or {}
+        candidate = detail.get("photo") or {}
+        if isinstance(candidate, dict) and str(candidate.get("id") or "") == work_id:
+            photo = candidate
+
+    stats = EngagementStats()
+    if str(photo.get("id") or "") == work_id:
+        stats = EngagementStats(
+            views=_number(photo.get("viewCount")),
+            likes=_number(_first_value(photo, "realLikeCount", "likeCount")),
+            comments=_number(photo.get("commentCount")),
+            shares=_number(photo.get("shareCount")),
+        )
+
+    comment_page = payload.get("commentPage") or {}
+    comments: list[EngagementComment] = []
+    total = stats.comments
+    next_available: bool | None = None
+    if isinstance(comment_page, dict) and comment_page.get("result") == 1:
+        comments = _walk_comments(comment_page.get("rootCommentsV2") or [])
+        total = _number(_first_value(comment_page, "commentCountV2", "commentCount"))
+        cursor = _first_value(comment_page, "pcursorV2", "pcursor")
+        next_available = cursor not in {None, "", "0", "no_more"}
+        if total is not None:
+            stats.comments = total
+    source = "guest GraphQL detail + REST comments" if photo or comments or total is not None else ""
+    return stats, comments, total, next_available, source
 
 
 def _parse_bilibili(url: str, payload: Any, stats: EngagementStats, comments: list[EngagementComment]):

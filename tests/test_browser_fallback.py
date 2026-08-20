@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
-from app.crawlers.browser_fallback import _parse_douyin, _parse_xhs
+from app.crawlers.browser_fallback import (
+    BrowserFallback,
+    _number,
+    _parse_douyin,
+    _parse_kuaishou_guest,
+    _parse_xhs,
+)
 from app.crawlers.engagement import EngagementCrawler
 from app.models.engagement import EngagementStats
 
@@ -101,3 +107,80 @@ def test_browser_parser_accepts_xhs_ssr_counters() -> None:
     assert stats.comments == 8
     assert total == 8
     assert source == "note SSR"
+
+
+def test_kuaishou_guest_payload_matches_only_target_and_parses_comments() -> None:
+    stats, comments, total, has_next, source = _parse_kuaishou_guest(
+        {
+            "apolloState": {
+                "VisionVideoDetailPhoto:other": {"id": "other", "realLikeCount": 999},
+                "VisionVideoDetailPhoto:photo-1": {
+                    "id": "photo-1",
+                    "viewCount": "3.9万",
+                    "realLikeCount": 11626,
+                },
+            },
+            "commentPage": {
+                "result": 1,
+                "commentCountV2": 202,
+                "pcursorV2": "cursor-2",
+                "rootCommentsV2": [{
+                    "commentId": "comment-1",
+                    "authorName": "游客可见用户",
+                    "content": "游客评论",
+                    "timestamp": 1700000000000,
+                    "likedCount": 3,
+                    "subCommentCount": 2,
+                }],
+            },
+            "reached": True,
+        },
+        "photo-1",
+    )
+
+    assert stats.views == 39000
+    assert stats.likes == 11626
+    assert total == 202
+    assert comments[0].author == "游客可见用户"
+    assert comments[0].likes == 3
+    assert comments[0].replies == 2
+    assert has_next is True
+    assert "guest" in source
+
+
+def test_browser_number_accepts_chinese_display_units() -> None:
+    assert _number("1.2万") == 12000
+    assert _number("2.5亿") == 250000000
+
+
+def test_xhs_guest_does_not_mislabel_first_page_as_page_two() -> None:
+    class Locator:
+        async def inner_text(self, timeout=0):
+            return "登录查看全部评论内容"
+
+    class Page:
+        def locator(self, selector):
+            return Locator()
+
+    class Response:
+        url = "https://edith.xiaohongshu.com/api/sns/web/v2/comment/page"
+
+        async def text(self):
+            return '{"data":{"has_more":true,"comments":[{"id":"x1","content":"首屏"}]}}'
+
+    result = asyncio.run(BrowserFallback()._parse_responses(
+        Page(),
+        [Response()],
+        "https://www.xiaohongshu.com/explore/6a5a69260000000011011b41",
+        "xiaohongshu",
+        "6a5a69260000000011011b41",
+        page=2,
+        limit=20,
+        include_stats=False,
+        include_comments=True,
+    ))
+
+    assert result.coverage == "unsupported"
+    assert result.comments == []
+    assert result.next_cursor is None
+    assert "游客态仅开放首屏" in result.reason

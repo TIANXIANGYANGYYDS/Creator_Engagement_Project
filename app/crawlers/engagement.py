@@ -66,7 +66,6 @@ query visionVideoDetail($photoId: String) {
       viewCount
       likeCount
       realLikeCount
-      commentCount
     }
   }
 }
@@ -104,6 +103,8 @@ class EngagementCrawler:
         browser_fallback: "BrowserFallback | None" = None,
         session_store: "PlatformSessionStore | None" = None,
         platform_cookies: dict[EngagementPlatform, str] | None = None,
+        aidata_api_key: str = "",
+        aidata_base_url: str = "https://aidata.vip",
     ) -> None:
         self._owns_client = client is None
         self.client = client or CurlAsyncHttpClient(
@@ -122,6 +123,8 @@ class EngagementCrawler:
         self.browser_fallback = browser_fallback
         self.session_store = session_store
         self.platform_cookies = platform_cookies or {}
+        self.aidata_api_key = aidata_api_key.strip()
+        self.aidata_base_url = aidata_base_url.rstrip("/")
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -260,7 +263,12 @@ class EngagementCrawler:
             return True
         if include_stats and not any(value is not None for value in result.stats.model_dump().values()):
             return True
-        if include_comments and not result.comments and result.coverage == "partial":
+        if (
+            include_comments
+            and not result.comments
+            and result.coverage == "partial"
+            and not result.source.startswith("AIDATA")
+        ):
             return True
         return False
 
@@ -335,6 +343,23 @@ class EngagementCrawler:
         if not isinstance(payload, dict):
             raise PlatformCrawlerError("engagement endpoint returned invalid JSON")
         return payload
+
+    async def _aidata_get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        if not self.aidata_api_key:
+            raise PlatformCrawlerError("AIDATA_API_KEY 未配置")
+        payload = await self._get_json(
+            f"{self.aidata_base_url}{path}",
+            params=params,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.aidata_api_key}",
+            },
+        )
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            message = payload.get("message") or payload.get("error") or "响应缺少 data"
+            raise PlatformCrawlerError(f"AIDATA: {message}")
+        return data
 
     async def _get_response(
         self,
@@ -854,33 +879,73 @@ class EngagementCrawler:
                     except PlatformCrawlerError:
                         pass
                 if not any(value is not None for value in stats.model_dump().values()):
-                    response = await self._get_response(
-                        url,
-                        headers={"Referer": "https://www.xiaohongshu.com/explore"},
+                    try:
+                        response = await self._get_response(
+                            url,
+                            headers={"Referer": "https://www.xiaohongshu.com/explore"},
+                        )
+                        stats = _parse_xhs_stats(str(getattr(response, "text", "")), work_id)
+                        sources.append("note SSR noteDetailMap")
+                    except PlatformCrawlerError:
+                        if not self.aidata_api_key:
+                            raise
+                if (
+                    not any(value is not None for value in stats.model_dump().values())
+                    and self.aidata_api_key
+                ):
+                    data = await self._aidata_get(
+                        "/api/v2/data/xiaohongshu/note/detail",
+                        {"url": url},
                     )
-                    stats = _parse_xhs_stats(str(getattr(response, "text", "")), work_id)
-                    sources.append("note SSR noteDetailMap")
+                    stats = _xhs_stats_from_note(data.get("stats") or data)
+                    sources.append("AIDATA xiaohongshu/note/detail")
 
             if include_comments:
                 if not cookie:
-                    if include_stats:
+                    if self.aidata_api_key:
+                        cursor = ""
+                        for current_page in range(1, page + 1):
+                            params = {"url": url}
+                            if cursor:
+                                params["cursor"] = cursor
+                            data = await self._aidata_get(
+                                "/api/v1/data/xiaohongshu/note/comments",
+                                params,
+                            )
+                            comment_data = data.get("data") if isinstance(data.get("data"), dict) else data
+                            comments = _parse_xhs_comments(comment_data)
+                            raw_cursor = comment_data.get("cursor")
+                            next_cursor = (
+                                str(raw_cursor)
+                                if comment_data.get("has_more") and raw_cursor not in {None, ""}
+                                else None
+                            )
+                            if current_page == page:
+                                break
+                            if next_cursor is None:
+                                comments = []
+                                break
+                            cursor = next_cursor
+                        sources.append("AIDATA xiaohongshu/note/comments")
+                    elif include_stats:
                         return EngagementResult(
                             platform="xiaohongshu",
                             canonical_url=canonical_url,
                             work_id=work_id,
                             coverage="partial",
-                            reason="小红书 SSR 已返回互动统计；评论需要登录态和 xsec_token",
+                            reason="小红书 SSR 已返回互动统计；未登录游客浏览器仅能尝试当前公开首屏评论",
                             source="note SSR noteDetailMap",
                             stats=stats,
                         )
-                    return _result_error(
-                        "xiaohongshu",
-                        url,
-                        work_id,
-                        "unsupported",
-                        "小红书评论需要登录态；请在本机运行 login_platform xiaohongshu 建立会话",
-                    )
-                if not token:
+                    else:
+                        return _result_error(
+                            "xiaohongshu",
+                            url,
+                            work_id,
+                            "unsupported",
+                            "协议请求没有账号会话；将回退浏览器游客会话读取首屏。深分页需配置 AIDATA_API_KEY",
+                        )
+                elif not token:
                     if include_stats:
                         return EngagementResult(
                             platform="xiaohongshu",
@@ -898,44 +963,49 @@ class EngagementCrawler:
                         "unsupported",
                         "小红书评论需要 URL 中的 xsec_token；请使用搜索或推荐流生成的完整笔记链接",
                     )
-                cursor = ""
-                total: int | None = None
-                for current_page in range(1, page + 1):
-                    params = {
-                        "note_id": work_id,
-                        "cursor": cursor,
-                        "top_comment_id": "",
-                        "image_formats": "jpg,webp,avif",
-                        "xsec_token": token,
-                    }
-                    comment_payload = await self._xhs_get(
-                        "/api/sns/web/v2/comment/page",
-                        params,
-                        cookie,
-                        url,
-                    )
-                    comments = _parse_xhs_comments(comment_payload)
-                    total = _int(
-                        comment_payload.get("total_count")
-                        or comment_payload.get("comment_count")
-                        or comment_payload.get("comments_count")
-                    )
-                    next_cursor = (
-                        str(comment_payload.get("cursor"))
-                        if comment_payload.get("has_more") and comment_payload.get("cursor")
-                        else None
-                    )
-                    if current_page == page:
-                        break
-                    if next_cursor is None:
-                        comments = []
-                        break
-                    cursor = next_cursor
-                if not include_stats and total is not None:
-                    stats = EngagementStats(comments=total)
-                sources.append("api/sns/web/v2/comment/page")
+                else:
+                    cursor = ""
+                    total: int | None = None
+                    for current_page in range(1, page + 1):
+                        params = {
+                            "note_id": work_id,
+                            "cursor": cursor,
+                            "top_comment_id": "",
+                            "image_formats": "jpg,webp,avif",
+                            "xsec_token": token,
+                        }
+                        comment_payload = await self._xhs_get(
+                            "/api/sns/web/v2/comment/page",
+                            params,
+                            cookie,
+                            url,
+                        )
+                        comments = _parse_xhs_comments(comment_payload)
+                        total = _int(
+                            comment_payload.get("total_count")
+                            or comment_payload.get("comment_count")
+                            or comment_payload.get("comments_count")
+                        )
+                        next_cursor = (
+                            str(comment_payload.get("cursor"))
+                            if comment_payload.get("has_more") and comment_payload.get("cursor")
+                            else None
+                        )
+                        if current_page == page:
+                            break
+                        if next_cursor is None:
+                            comments = []
+                            break
+                        cursor = next_cursor
+                    if not include_stats and total is not None:
+                        stats = EngagementStats(comments=total)
+                    sources.append("api/sns/web/v2/comment/page")
 
-            if not comments and not any(value is not None for value in stats.model_dump().values()):
+            if (
+                not comments
+                and not any(value is not None for value in stats.model_dump().values())
+                and not any(source.startswith("AIDATA") for source in sources)
+            ):
                 return _result_error(
                     "xiaohongshu",
                     url,
@@ -950,7 +1020,9 @@ class EngagementCrawler:
                 work_id=work_id,
                 coverage="partial",
                 reason=(
-                    "小红书登录会话和纯算法动态签名已生效；评论仅返回指定公开页"
+                    "小红书评论仅返回指定公开页；数据源不需要小红书账号登录"
+                    if include_comments and not cookie
+                    else "小红书登录会话和纯算法动态签名已生效；评论仅返回指定公开页"
                     if include_comments
                     else "小红书互动量来自签名详情接口或笔记 SSR"
                 ),
@@ -1017,7 +1089,7 @@ class EngagementCrawler:
                 url,
                 work_id,
                 "unsupported",
-                "快手 GraphQL/评论接口需要登录态，且网页请求会带短期 kww/kwssectoken；匿名评论常见响应为 Need captcha。请在本机运行 login_platform kuaishou 建立会话",
+                "快手纯 HTTP 请求缺少短期游客验证状态（kww/kwssectoken，常返回 Need captcha）；将回退浏览器在目标页自动建立游客会话，无需账号登录",
             )
         headers = _authenticated_headers(cookie, url)
         headers.update({
@@ -1047,7 +1119,7 @@ class EngagementCrawler:
                     raise PlatformCrawlerError("快手详情响应未匹配目标 photoId")
                 stats = EngagementStats(
                     views=_int(photo.get("viewCount")),
-                    likes=_int(photo.get("likeCount") or photo.get("realLikeCount")),
+                    likes=_int(photo.get("realLikeCount") or photo.get("likeCount")),
                     comments=_int(photo.get("commentCount")),
                 )
                 sources.append("graphql visionVideoDetail")
@@ -1085,6 +1157,13 @@ class EngagementCrawler:
                 elif include_stats and stats.comments is None and total is not None:
                     stats.comments = total
                 sources.append("rest/v/photo/comment/list")
+            elif include_stats and stats.comments is None:
+                comment_payload = await self._kuaishou_comment_page(work_id, "", headers)
+                stats.comments = _int(
+                    comment_payload.get("commentCountV2")
+                    or comment_payload.get("commentCount")
+                )
+                sources.append("rest/v/photo/comment/list total")
 
             return EngagementResult(
                 platform="kuaishou",
@@ -1150,23 +1229,40 @@ class EngagementCrawler:
     ) -> EngagementResult:
         cookie = self._platform_cookie("wechat")
         try:
-            article_response = await self._get_response(
-                url,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Referer": "https://mp.weixin.qq.com/",
-                    **({"Cookie": cookie} if cookie else {}),
-                },
-            )
-            text = str(getattr(article_response, "text", "") or "")
+            try:
+                article_response = await self._get_response(
+                    url,
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml",
+                        "Referer": "https://mp.weixin.qq.com/",
+                        **({"Cookie": cookie} if cookie else {}),
+                    },
+                )
+                text = str(getattr(article_response, "text", "") or "")
+            except PlatformCrawlerError:
+                if not self.aidata_api_key:
+                    raise
+                text = ""
             metadata = _parse_wechat_metadata(text, url)
             stats = _parse_wechat_stats(text) if include_stats else EngagementStats()
+            stats_from_aidata = False
             if include_stats and not any(value is not None for value in stats.model_dump().values()) and cookie:
                 try:
                     ext_payload = await self._wechat_appmsgext(url, metadata, cookie)
                     stats = _parse_wechat_stats_from_payload(ext_payload)
                 except PlatformCrawlerError:
                     pass
+            if (
+                include_stats
+                and not any(value is not None for value in stats.model_dump().values())
+                and self.aidata_api_key
+            ):
+                data = await self._aidata_get(
+                    "/api/v2/data/weixin/mp/article/stats",
+                    {"url": url},
+                )
+                stats = _parse_wechat_stats_from_payload(data.get("stats") or data)
+                stats_from_aidata = True
 
             if not include_comments:
                 has_stats = any(value is not None for value in stats.model_dump().values())
@@ -1176,11 +1272,16 @@ class EngagementCrawler:
                     work_id=work_id,
                     coverage="partial" if has_stats else "unsupported",
                     reason=(
-                        "公众号文章页面返回了当前会话可见互动量"
+                        "AIDATA 按文章 URL 返回互动量，不需要微信账号登录"
+                        if stats_from_aidata
+                        else "公众号文章页面返回了当前会话可见互动量"
                         if has_stats
-                        else "公众号匿名文章页未下发阅读/点赞统计；需微信文章会话，普通网页账号登录不一定有效"
+                        else "公众号匿名文章页未下发阅读/点赞统计；可配置 AIDATA_API_KEY 作为无微信登录后备"
                     ),
-                    source="mp article appmsgstat/cgiDataNew",
+                    source=(
+                        "AIDATA weixin/mp/article/stats"
+                        if stats_from_aidata else "mp article appmsgstat/cgiDataNew"
+                    ),
                     stats=stats,
                 )
 
@@ -1189,10 +1290,44 @@ class EngagementCrawler:
                     platform="wechat",
                     canonical_url=url,
                     work_id=work_id,
-                    coverage="partial",
+                    coverage="complete",
                     reason="该公众号文章由作者关闭评论，登录账号也不会产生可抓取评论",
                     source="cgiDataNew.show_comment",
                     stats=stats,
+                )
+            if self.aidata_api_key:
+                buffer = ""
+                comments: list[EngagementComment] = []
+                total: int | None = None
+                has_more = False
+                for current_page in range(1, page + 1):
+                    params = {"url": url}
+                    if buffer:
+                        params["buffer"] = buffer
+                    data = await self._aidata_get(
+                        "/api/v2/data/weixin/mp/article/comments",
+                        params,
+                    )
+                    comments = _parse_wechat_comments(data)
+                    total = _int(data.get("total_count") or data.get("elected_total"))
+                    has_more = bool(data.get("has_more"))
+                    next_buffer = str(data.get("buffer") or "")
+                    if current_page == page:
+                        break
+                    if not has_more or not next_buffer:
+                        comments = []
+                        break
+                    buffer = next_buffer
+                return EngagementResult(
+                    platform="wechat",
+                    canonical_url=url,
+                    work_id=work_id,
+                    coverage="partial",
+                    reason="AIDATA 按文章 URL 返回指定评论页，不需要微信账号登录",
+                    source="AIDATA weixin/mp/article/comments",
+                    stats=EngagementStats(comments=total),
+                    comments=comments[:limit],
+                    next_cursor=str(page + 1) if has_more else None,
                 )
             required = ("biz", "mid", "idx", "comment_id")
             if any(not metadata.get(key) for key in required):
@@ -1205,7 +1340,7 @@ class EngagementCrawler:
                     url,
                     work_id,
                     "unsupported",
-                    "公众号评论需要有效微信文章会话；请在本机运行 login_platform wechat 后再试",
+                    "公众号原生评论接口需要微信文章会话；如需跳过微信登录，请配置 AIDATA_API_KEY",
                 )
             params = {
                 "action": "getcomment",
@@ -1496,10 +1631,26 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
 def _int(value: Any) -> int | None:
     if value is None or value == "":
         return None
+    text = str(value).strip().replace(",", "")
+    multiplier = 1
+    if text.endswith("万"):
+        text = text[:-1]
+        multiplier = 10_000
+    elif text.endswith("亿"):
+        text = text[:-1]
+        multiplier = 100_000_000
     try:
-        return max(0, int(str(value).replace(",", "")))
+        return max(0, int(float(text) * multiplier))
     except (TypeError, ValueError):
         return None
+
+
+def _first_present(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value is not None and value != "":
+            return value
+    return None
 
 
 def _result_error(platform: EngagementPlatform, url: str, work_id: str, coverage: EngagementCoverage, reason: str) -> EngagementResult:
@@ -1633,10 +1784,10 @@ def _xhs_note_card(payload: dict[str, Any]) -> dict[str, Any]:
 def _xhs_stats_from_note(note: dict[str, Any]) -> EngagementStats:
     interact = note.get("interact_info") or note.get("interactInfo") or note
     return EngagementStats(
-        likes=_int(interact.get("liked_count") or interact.get("likedCount")),
-        favorites=_int(interact.get("collected_count") or interact.get("collectedCount")),
-        shares=_int(interact.get("share_count") or interact.get("shareCount")),
-        comments=_int(interact.get("comment_count") or interact.get("commentCount")),
+        likes=_int(_first_present(interact, "liked_count", "likedCount")),
+        favorites=_int(_first_present(interact, "collected_count", "collectedCount")),
+        shares=_int(_first_present(interact, "share_count", "shareCount")),
+        comments=_int(_first_present(interact, "comment_count", "commentCount")),
     )
 
 
@@ -1645,7 +1796,13 @@ def _parse_xhs_comments(payload: dict[str, Any]) -> list[EngagementComment]:
     for item in payload.get("comments") or payload.get("comment_list") or []:
         if not isinstance(item, dict):
             continue
-        user = item.get("user_info") or item.get("userInfo") or item.get("user") or {}
+        user = (
+            item.get("user_info")
+            or item.get("userInfo")
+            or item.get("user")
+            or item.get("author")
+            or {}
+        )
         if not isinstance(user, dict):
             user = {}
         comment_id = str(item.get("id") or item.get("comment_id") or item.get("commentId") or "")
@@ -1653,13 +1810,24 @@ def _parse_xhs_comments(payload: dict[str, Any]) -> list[EngagementComment]:
         if not comment_id or not text:
             continue
         timestamp = item.get("create_time") or item.get("createTime") or item.get("timestamp")
+        item_stats = item.get("stats") or {}
+        if not isinstance(item_stats, dict):
+            item_stats = {}
         result.append(EngagementComment(
             comment_id=comment_id,
             author=str(user.get("nickname") or user.get("nick_name") or user.get("name") or ""),
             text=BeautifulSoup(text, "html.parser").get_text(" ", strip=True),
             created_at=_timestamp(timestamp),
-            likes=_int(item.get("like_count") or item.get("likeCount") or item.get("liked_count")),
-            replies=_int(item.get("sub_comment_count") or item.get("subCommentCount")),
+            likes=_int(
+                _first_present(item, "like_count", "likeCount", "liked_count")
+                if _first_present(item, "like_count", "likeCount", "liked_count") is not None
+                else _first_present(item_stats, "like_count")
+            ),
+            replies=_int(
+                _first_present(item, "sub_comment_count", "subCommentCount")
+                if _first_present(item, "sub_comment_count", "subCommentCount") is not None
+                else _first_present(item_stats, "sub_comment_count")
+            ),
         ))
     return result
 
@@ -1678,8 +1846,8 @@ def _parse_kuaishou_comments(items: list[Any]) -> list[EngagementComment]:
             author=str(item.get("authorName") or item.get("author_name") or ""),
             text=BeautifulSoup(text, "html.parser").get_text(" ", strip=True),
             created_at=_timestamp(item.get("timestamp")),
-            likes=_int(item.get("likedCount") or item.get("liked_count")),
-            replies=_int(item.get("subCommentCount") or item.get("sub_comment_count")),
+            likes=_int(_first_present(item, "likedCount", "liked_count")),
+            replies=_int(_first_present(item, "subCommentCount", "sub_comment_count")),
         ))
     return result
 
@@ -1751,10 +1919,20 @@ def _parse_wechat_stats_from_payload(payload: dict[str, Any]) -> EngagementStats
     if not isinstance(nested, dict):
         return EngagementStats()
     return EngagementStats(
-        views=_int(nested.get("read_num") or nested.get("readCount")),
-        likes=_int(nested.get("like_num") or nested.get("old_like_num") or nested.get("likeCount")),
-        comments=_int(nested.get("comment_count") or nested.get("commentCount")),
-        shares=_int(nested.get("share_count") or nested.get("shareCount")),
+        views=_int(_first_present(nested, "read_num", "read_count", "readCount")),
+        likes=_int(
+            _first_present(
+                nested,
+                "like_num",
+                "like_count",
+                "old_like_num",
+                "old_like_count",
+                "likeCount",
+            )
+        ),
+        comments=_int(_first_present(nested, "comment_count", "commentCount")),
+        shares=_int(_first_present(nested, "share_count", "shareCount")),
+        favorites=_int(_first_present(nested, "collect_count", "favorite_count")),
     )
 
 
@@ -1766,17 +1944,28 @@ def _parse_wechat_comments(payload: dict[str, Any]) -> list[EngagementComment]:
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        comment_id = str(item.get("comment_id") or item.get("id") or "")
+        comment_id = str(item.get("comment_id") or item.get("content_id") or item.get("id") or "")
         text = str(item.get("content") or item.get("text") or "")
         if not comment_id or not text:
             continue
+        user = item.get("user") or {}
+        if not isinstance(user, dict):
+            user = {}
         result.append(EngagementComment(
             comment_id=comment_id,
-            author=str(item.get("nick_name") or item.get("nickname") or item.get("user_name") or ""),
+            author=str(
+                item.get("nick_name")
+                or item.get("nickname")
+                or item.get("user_name")
+                or user.get("nickname")
+                or ""
+            ),
             text=BeautifulSoup(text, "html.parser").get_text(" ", strip=True),
-            created_at=_timestamp(item.get("create_time") or item.get("createTime")),
-            likes=_int(item.get("like_num") or item.get("like_count")),
-            replies=_int(item.get("reply_count") or item.get("reply_num")),
+            created_at=_timestamp(
+                item.get("create_time") or item.get("createTime") or item.get("created_at")
+            ),
+            likes=_int(_first_present(item, "like_num", "like_count", "liked_count")),
+            replies=_int(_first_present(item, "reply_count", "reply_num")),
         ))
     return result
 
