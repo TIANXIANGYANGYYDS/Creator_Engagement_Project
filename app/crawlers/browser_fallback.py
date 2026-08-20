@@ -128,7 +128,12 @@ class BrowserFallback:
                     # A challenge page can keep navigation open; already captured
                     # responses are still useful and are parsed below.
                     pass
-                await self._interact_with_page(page_obj, platform, page)
+                await self._interact_with_page(
+                    page_obj,
+                    platform,
+                    page,
+                    include_comments=include_comments,
+                )
                 await page_obj.wait_for_timeout(int(self.settings.challenge_wait_seconds * 1000))
                 result = await self._parse_responses(
                     page_obj,
@@ -155,7 +160,12 @@ class BrowserFallback:
                         )
                     except Exception:
                         pass
-                    await self._interact_with_page(page_obj, platform, page)
+                    await self._interact_with_page(
+                        page_obj,
+                        platform,
+                        page,
+                        include_comments=include_comments,
+                    )
                     await page_obj.wait_for_timeout(int(self.settings.challenge_wait_seconds * 1000))
                     result = await self._parse_responses(
                         page_obj,
@@ -208,16 +218,19 @@ class BrowserFallback:
         if cookie_list:
             await context.add_cookies(cookie_list)
 
-    async def _interact_with_page(self, page: Any, platform: EngagementPlatform, requested_page: int) -> None:
-        # Trigger lazy comment requests.  Selectors are intentionally generic so
-        # platform markup changes do not break the protocol path.
-        if platform in {"douyin", "xiaohongshu", "kuaishou", "wechat", "bilibili", "weibo"}:
-            for _ in range(min(max(requested_page, 1) + 1, 6)):
-                try:
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await page.wait_for_timeout(500)
-                except Exception:
-                    break
+    async def _interact_with_page(
+        self,
+        page: Any,
+        platform: EngagementPlatform,
+        requested_page: int,
+        *,
+        include_comments: bool = True,
+    ) -> None:
+        if not include_comments:
+            return
+        # Open the comment panel before scrolling.  Several desktop pages keep
+        # comments in an inner modal, so scrolling only ``window`` never emits
+        # the next-page request.
         for selector in (
             "button:has-text('评论')",
             "[role='button']:has-text('评论')",
@@ -232,6 +245,33 @@ class BrowserFallback:
                     break
             except Exception:
                 continue
+        if platform in {"douyin", "xiaohongshu", "kuaishou", "wechat", "bilibili", "weibo"}:
+            for _ in range(min(max(requested_page, 1) + 2, 8)):
+                try:
+                    await page.evaluate(
+                        """
+                        () => {
+                          window.scrollTo(0, document.body.scrollHeight);
+                          const candidates = Array.from(document.querySelectorAll('*'))
+                            .filter((element) => {
+                              const style = getComputedStyle(element);
+                              return /(auto|scroll)/.test(style.overflowY)
+                                && element.scrollHeight > element.clientHeight + 40;
+                            })
+                            .sort((left, right) =>
+                              (right.scrollHeight - right.clientHeight)
+                              - (left.scrollHeight - left.clientHeight)
+                            )
+                            .slice(0, 3);
+                          for (const element of candidates) {
+                            element.scrollTop = element.scrollHeight;
+                          }
+                        }
+                        """
+                    )
+                    await page.wait_for_timeout(700)
+                except Exception:
+                    break
 
     async def _kuaishou_guest_payload(
         self,
@@ -375,7 +415,14 @@ class BrowserFallback:
             if platform == "douyin":
                 stats, comments, total_comments, source = _parse_douyin(response_url, payload, work_id, stats, comments)
             elif platform == "toutiao":
-                stats, comments, total_comments, source = _parse_toutiao(response_url, text, payload, stats, comments)
+                stats, comments, total_comments, source = _parse_toutiao(
+                    response_url,
+                    text,
+                    payload,
+                    work_id,
+                    stats,
+                    comments,
+                )
             elif platform == "xiaohongshu":
                 stats, comments, total_comments, source = _parse_xhs(response_url, text, payload, stats, comments)
                 if "comment/page" in response_url and isinstance(payload, dict):
@@ -561,7 +608,14 @@ def _parse_douyin(url: str, payload: Any, work_id: str, stats: EngagementStats, 
     return stats, comments, stats.comments, ""
 
 
-def _parse_toutiao(url: str, text: str, payload: Any, stats: EngagementStats, comments: list[EngagementComment]):
+def _parse_toutiao(
+    url: str,
+    text: str,
+    payload: Any,
+    work_id: str,
+    stats: EngagementStats,
+    comments: list[EngagementComment],
+):
     if "tab_comments" in url and isinstance(payload, dict):
         items = payload.get("data") or []
         parsed = []
@@ -572,6 +626,8 @@ def _parse_toutiao(url: str, text: str, payload: Any, stats: EngagementStats, co
                 if value:
                     parsed.append(value)
         return stats, parsed, _number(payload.get("total_number")), "article/tab_comments"
+    if f"/article/{work_id}" not in url and f"/video/{work_id}" not in url:
+        return stats, comments, stats.comments, ""
     try:
         from app.crawlers.platforms.toutiao import parse_stats
 

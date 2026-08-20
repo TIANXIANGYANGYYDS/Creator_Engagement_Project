@@ -27,21 +27,33 @@ conda run -n MyAgent uvicorn app.api.app:create_app --factory --host 0.0.0.0 --p
 
 ```bash
 curl http://127.0.0.1:8200/api/v1/health
-curl 'http://127.0.0.1:8200/api/v1/engagement?url=https%3A%2F%2Fwww.toutiao.com%2Farticle%2F7557632662635840036%2F&comment_limit=5'
+curl 'http://127.0.0.1:8200/api/v1/interactions?url=https%3A%2F%2Fwww.toutiao.com%2Farticle%2F7557632662635840036%2F&media_name=toutiao'
+curl 'http://127.0.0.1:8200/api/v1/comments?url=https%3A%2F%2Fwww.toutiao.com%2Farticle%2F7557632662635840036%2F&media_name=toutiao&page=1'
 ```
 
 ## CLI
 
 ```bash
 conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement \
+  interactions \
   'https://www.toutiao.com/article/7557632662635840036/' \
-  --comment-limit 20
+  toutiao
 ```
 
 临时绕过代理池：
 
 ```bash
 conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement \
+  comments \
   'https://www.toutiao.com/article/7557632662635840036/' \
+  toutiao \
+  --page 1 \
   --direct
+```
+
+首次需要平台账号时，在带桌面环境的本机建立独立 Profile；可用 `--url` 直接打开目标内容
+页完成登录或安全验证：
+
+```bash
+conda run -n MyAgent creator-engagement-login xiaohongshu --url '<小红书笔记 URL>'
 ```

@@ -60,13 +60,18 @@ conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 
 快手公开作品默认使用浏览器自动生成的游客设备会话，不需要账号。小红书游客态可读取公开
 互动量和首屏评论。项目不接入付费数据供应商；小红书评论深分页和任意公众号文章的互动/
-评论没有可验证的免费匿名接口，因此需要时只能复用调用方自己的平台会话。可在带桌面环境
-的本机执行：
+评论没有可验证的免费匿名接口，因此需要时复用调用方自己的平台会话。八个平台都可以在
+带桌面环境的本机建立独立 Profile：
 
 ```bash
-conda run -n MyAgent creator-engagement-login kuaishou
-conda run -n MyAgent creator-engagement-login xiaohongshu
-conda run -n MyAgent creator-engagement-login wechat
+conda run -n MyAgent creator-engagement-login <platform>
+```
+
+`platform` 可选 `douyin / toutiao / wechat / xiaohongshu / haokan / kuaishou /
+bilibili / weibo`。需要在具体内容页完成登录或安全验证时传入同平台 URL：
+
+```bash
+conda run -n MyAgent creator-engagement-login xiaohongshu --url '<小红书笔记 URL>'
 ```
 
 登录完成后按 Enter，状态只写入 `.local/browser-profiles/<platform>` 和
@@ -91,7 +96,8 @@ LLM、Mongo、51 代理 API 和日志参数。当前代理模式：
 51 代理池沿用 Stock_Project 的 3 分钟 IP TTL、批量补池、单 IP 并发上限、失败淘汰、
 过期排空和供应商 API 限流机制。互动采集请求通过 `CurlAsyncHttpClient` 统一租约和归还代理。
 
-协议返回 `unsupported/blocked/failed`、空响应或缺少目标字段时，如果
+运行时以最终获取数据为验收标准：先走成本更低的协议请求；协议返回
+`unsupported/blocked/failed`、空响应或缺少目标字段时，如果
 `BROWSER_FALLBACK_ENABLED=true`，服务会使用 MyAgent 中的 Camoufox 持久化浏览器重新
 访问页面并监听真实 `document/xhr/fetch` 响应。每个平台的 Profile 位于
 `.local/browser-profiles/<platform>`，动态 Cookie 和签名由浏览器生成，不会硬编码。

@@ -7,6 +7,7 @@ from app.crawlers.browser_fallback import (
     _number,
     _parse_douyin,
     _parse_kuaishou_guest,
+    _parse_toutiao,
     _parse_xhs,
 )
 from app.crawlers.engagement import EngagementCrawler
@@ -142,6 +143,30 @@ def test_browser_parser_does_not_treat_hidden_douyin_views_as_zero() -> None:
     assert stats.likes == 11
 
 
+def test_browser_toutiao_stats_ignore_unrelated_document_response() -> None:
+    target_stats, comments, _, source = _parse_toutiao(
+        "https://www.toutiao.com/article/7557632662635840036/",
+        'window.data={"itemCounter":{"readCount":3307,"commentCount":28}}',
+        None,
+        "7557632662635840036",
+        EngagementStats(),
+        [],
+    )
+    stats, _, _, unrelated_source = _parse_toutiao(
+        "https://www.toutiao.com/article/7000000000000000000/",
+        'window.data={"itemCounter":{"readCount":5,"commentCount":0}}',
+        None,
+        "7557632662635840036",
+        target_stats,
+        comments,
+    )
+
+    assert target_stats.views == 3307
+    assert source == "article SSR"
+    assert stats.views == 3307
+    assert unrelated_source == ""
+
+
 def test_browser_parser_accepts_xhs_ssr_counters() -> None:
     stats, comments, total, source = _parse_xhs(
         "https://www.xiaohongshu.com/explore/1",
@@ -234,3 +259,52 @@ def test_xhs_guest_does_not_mislabel_first_page_as_page_two() -> None:
     assert result.comments == []
     assert result.next_cursor is None
     assert "游客态仅开放首屏" in result.reason
+
+
+def test_browser_opens_comment_panel_before_scrolling_inner_container() -> None:
+    events = []
+
+    class Locator:
+        @property
+        def first(self):
+            return self
+
+        async def is_visible(self, timeout=0):
+            return True
+
+        async def click(self, timeout=0):
+            events.append("click")
+
+    class Page:
+        def locator(self, selector):
+            return Locator()
+
+        async def evaluate(self, expression):
+            events.append(expression)
+
+        async def wait_for_timeout(self, timeout):
+            pass
+
+    asyncio.run(BrowserFallback()._interact_with_page(Page(), "xiaohongshu", 2))
+
+    assert events[0] == "click"
+    assert "overflowY" in events[1]
+    assert len(events) == 5
+
+
+def test_browser_stats_request_does_not_open_comment_panel() -> None:
+    class Page:
+        def locator(self, selector):
+            raise AssertionError("interaction-only request must not locate comments")
+
+        async def evaluate(self, expression):
+            raise AssertionError("interaction-only request must not scroll comments")
+
+    asyncio.run(
+        BrowserFallback()._interact_with_page(
+            Page(),
+            "douyin",
+            1,
+            include_comments=False,
+        )
+    )
