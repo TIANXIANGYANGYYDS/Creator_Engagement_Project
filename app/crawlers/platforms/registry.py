@@ -8,6 +8,9 @@ from urllib.parse import parse_qs, urlparse
 from app.models.engagement import EngagementPlatform
 
 
+WEIBO_BASE62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
 MEDIA_ALIASES: dict[str, EngagementPlatform] = {
     "douyin": "douyin",
     "抖音": "douyin",
@@ -56,18 +59,44 @@ def validate_media_url(url: str, media_name: str) -> tuple[EngagementPlatform, s
     return detected_platform, work_id
 
 
+def weibo_bid_to_mid(bid: str) -> str:
+    """Convert the base62 ID used in desktop Weibo URLs to a numeric MID."""
+
+    if not bid or any(char not in WEIBO_BASE62_ALPHABET for char in bid):
+        raise ValueError("invalid Weibo base62 content id")
+
+    mid = ""
+    for end in range(len(bid), 0, -4):
+        start = max(0, end - 4)
+        value = 0
+        for char in bid[start:end]:
+            value = value * 62 + WEIBO_BASE62_ALPHABET.index(char)
+        chunk = str(value).zfill(7) if start > 0 else str(value)
+        mid = chunk + mid
+    return mid.lstrip("0") or "0"
+
+
 def identify_url(url: str) -> tuple[EngagementPlatform, str]:
     parsed = urlparse(url)
     host = parsed.netloc.lower().split(":", 1)[0]
     path = parsed.path
     query = parse_qs(parsed.query)
     if "bilibili.com" in host:
+        if host == "live.bilibili.com":
+            room_match = re.search(r"/(\d+)(?:/|$)", path)
+            room_id = room_match.group(1) if room_match else ""
+            return "bilibili", f"live:{room_id}" if room_id else ""
         match = re.search(r"/(BV[0-9A-Za-z]+|av\d+)(?:/|$)", path)
         work_id = match.group(1) if match else query.get("bvid", [""])[0]
         return "bilibili", work_id[2:] if work_id.startswith("av") else work_id
     if "weibo.com" in host or host == "m.weibo.cn":
-        match = re.search(r"/(?:detail/)?(\d{8,})", path)
-        return "weibo", (match.group(1) if match else query.get("id", [""])[0])
+        numeric_match = re.search(r"/(?:detail|status)/(\d{8,})(?:/|$)", path)
+        if numeric_match:
+            return "weibo", numeric_match.group(1)
+        desktop_match = re.search(r"^/\d+/([0-9A-Za-z]+)(?:/|$)", path)
+        if desktop_match:
+            return "weibo", weibo_bid_to_mid(desktop_match.group(1))
+        return "weibo", query.get("id", [""])[0]
     if "xiaohongshu.com" in host:
         match = re.search(r"/explore/([0-9a-f]{24})", path, re.I)
         return "xiaohongshu", match.group(1) if match else ""
@@ -77,10 +106,10 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
         match = re.search(r"/(?:video|share/video)/(\d+)", path)
         return "douyin", match.group(1) if match else ""
     if "toutiao.com" in host:
-        match = re.search(r"/(?:article|video)/(\d+)", path)
-        return "toutiao", match.group(1) if match else ""
+        match = re.search(r"/(?:article|video)/(\d+)|/i(\d+)(?:/|$)", path)
+        return "toutiao", next((value for value in match.groups() if value), "") if match else ""
     if "kuaishou.com" in host:
-        match = re.search(r"/(?:short-video|profile)/([^/?]+)", path)
+        match = re.search(r"/(?:short-video|profile|fw/photo)/([^/?]+)", path)
         return "kuaishou", match.group(1) if match else ""
     if "mp.weixin.qq.com" in host:
         path_match = re.search(r"/s/([^/?]+)", path)

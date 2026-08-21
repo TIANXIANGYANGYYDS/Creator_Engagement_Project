@@ -26,9 +26,9 @@
 | 好看 | 互动量 | 纯协议可用（字段不完整） | 首页匿名 Cookie → 目标页 SSR；精确播放、点赞、评论数 | 收藏、分享没有公开数字时保持 `null` |
 | 好看 | 评论 | 可用（部分覆盖） | `/haokan/ui-web/v2/comment/get`，`rn/url_key/pn/child_rn` | 只能说明指定页，不保证评论全集 |
 | 快手 | 互动量 | 游客可用（实测） | 目标页游客设备会话 + `POST /graphql` `visionVideoDetail` | 严格校验响应 `photo.id`，不接受推荐流冒充目标 |
-| 快手 | 评论 | 游客可用（实测） | 同页会话 `POST /rest/v/photo/comment/list` + `pcursor` | 不需要账号；挑战失败时明确 blocked；只返回一级评论 |
-| B 站 | 互动量 | 可用（部分覆盖） | `/x/web-interface/view` | 返回当前公开计数，平台变化或限流仍可能影响结果 |
-| B 站 | 评论 | 可用（部分覆盖） | `/x/v2/reply/wbi/main`；WBI 密钥从 `/x/web-interface/nav` 动态提取并签名 | WBI 是游标接口，项目将公开 `page` 转换为游标遍历；只保证当前页 |
+| 快手 | 评论 | 游客可用（实测） | 同页会话 `POST /rest/v/photo/comment/list` + `pcursor` | 不需要账号；挑战失败时明确 blocked；一级评论跨页按 ID 去重 |
+| B 站 | 互动量 | 可用（部分覆盖） | 视频 `/x/web-interface/view`；直播 `Room/get_info` | 直播只返回当前在线、关注和开播状态，不等同于累计互动 |
+| B 站 | 评论 | 可用（部分覆盖） | 视频 `/x/v2/reply/wbi/main`；直播 `dM/gethistory` | 视频支持游标分页；直播只提供最近弹幕窗口，不能回溯历史全集 |
 | 微博 | 互动量 | 可用（部分覆盖） | `m.weibo.cn/statuses/show?id=...` | 访客态字段受限流和可见性影响 |
 | 微博 | 评论 | 前两页匿名可用（部分覆盖） | 首屏 `comments/hotflow`；登录跳转时降级 `api/comments/show?page=N` | 两个接口排序和总数口径不同；本轮第 2 页成功，第 3 页仍可能 `ok=-100` |
 

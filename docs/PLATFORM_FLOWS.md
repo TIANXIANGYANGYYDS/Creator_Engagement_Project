@@ -73,18 +73,22 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 - 互动量：同一游客/自有会话请求 GraphQL `visionVideoDetail`，并强制校验返回
   `photo.id == URL photoId`。
 - 评论：优先请求 `/rest/v/photo/comment/list`，必要时回退 GraphQL
-  `commentListQuery`，按 `pcursor` 遍历指定页。
+  `commentListQuery`，按 `pcursor` 遍历指定页；置顶评论若在后续页重复，会按评论 ID 去重。
 - 失败处理：无短期游客状态、Need captcha 或目标 ID 不一致时均不算成功；浏览器打开目标页
   重新生成游客状态后重试。
+- URL：同时接受 `www.kuaishou.com/short-video/{id}` 和 `c.kuaishou.com/fw/photo/{id}`；
+  分享链接在浏览器阶段自动规范化为同作品详情页。
 - 会话边界：公开作品首屏不要求账号；只返回一级评论，不混入推荐流或子回复。
 
 ## B 站
 
 代码：`app/crawlers/platforms/bilibili.py`
 
-- 互动量：请求 `/x/web-interface/view`，解析播放、点赞、评论、分享、收藏、投币和弹幕。
+- 视频互动量：请求 `/x/web-interface/view`，解析播放、点赞、评论、分享、收藏、投币和弹幕。
 - 评论：从 `/x/web-interface/nav` 动态提取 WBI key，签名请求
   `/x/v2/reply/wbi/main`，把公开页码转换为内部 cursor；旧 reply 接口仅作兼容回退。
+- 直播：`live.bilibili.com/{room_id}` 使用 `Room/get_info` 返回当前在线、关注和开播状态；
+  `dM/gethistory` 只返回最近弹幕窗口，不将其伪装为历史评论全集。
 - 失败处理：WBI key 轮换、接口限流或数据缺失时进入浏览器兜底。
 - 会话边界：当前公开路径无需账号，不保存 WBI 临时密钥。
 
@@ -93,6 +97,8 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 代码：`app/crawlers/platforms/weibo.py`
 
 - 互动量：请求 `m.weibo.cn/statuses/show`，解析点赞、评论和转发。
+- URL：桌面端 `/用户ID/base62短ID` 会先本地转换为数值 MID，再复用移动端公开接口；不会
+  再把用户 ID 误判成作品 ID。
 - 评论：优先请求 `m.weibo.cn/comments/hotflow`，按 `max_id` 遍历；后续页返回登录跳转时，
   改用 `m.weibo.cn/api/comments/show?id=...&page=N` 匿名页码接口。
 - 文本：把评论 HTML 中图片表情的 `alt` 文本保留下来，避免纯表情评论变成空字符串。
@@ -102,7 +108,8 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 
 ## 共享边界
 
-- `platforms/registry.py` 只负责媒体别名、URL 平台和作品 ID 识别。
+- `platforms/registry.py` 只负责媒体别名、URL 平台和作品 ID 识别，包括头条 `/i{id}`、
+  快手分享链接、微博 base62 短 ID 和 B站直播房间。
 - `platforms/common.py` 只包含无平台状态的数值、时间及失败结果转换。
 - `engagement.py` 只负责统一接口、路由、HTTP 客户端和是否进入浏览器兜底。
 - `browser_fallback.py` 只管理持久化浏览器、目标页操作和网络响应收集，不作为首选协议。

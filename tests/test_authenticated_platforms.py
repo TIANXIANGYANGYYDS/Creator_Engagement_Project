@@ -171,6 +171,41 @@ def test_kuaishou_detail_mismatch_is_not_success() -> None:
     assert "photoId" in result.reason
 
 
+def test_kuaishou_comment_pages_exclude_repeated_pinned_comment() -> None:
+    client = DualFakeClient(posts=[
+        FakeResponse({
+            "result": 1,
+            "commentCountV2": 3,
+            "pcursorV2": "cursor-2",
+            "rootCommentsV2": [
+                {"commentId": "pinned", "content": "置顶评论"},
+                {"commentId": "page-1", "content": "第一页"},
+            ],
+        }),
+        FakeResponse({
+            "result": 1,
+            "commentCountV2": 3,
+            "pcursorV2": "no_more",
+            "rootCommentsV2": [
+                {"commentId": "pinned", "content": "置顶评论"},
+                {"commentId": "page-2", "content": "第二页"},
+            ],
+        }),
+    ])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"kuaishou": "userId=user-1; kww=short-lived"},
+    ).fetch_comments(
+        "https://www.kuaishou.com/short-video/photo-1",
+        "快手",
+        2,
+    ))
+
+    assert [comment.comment_id for comment in result.comments] == ["page-2"]
+    assert result.total_comments == 3
+    assert result.next_page is None
+
+
 def test_wechat_disabled_comments_are_distinguished_from_missing_session() -> None:
     html = """
     <script>

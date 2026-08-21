@@ -20,6 +20,8 @@ from app.models.engagement import EngagementComment, EngagementResult, Engagemen
 NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 REPLY_WBI_URL = "https://api.bilibili.com/x/v2/reply/wbi/main"
 REPLY_LEGACY_URL = "https://api.bilibili.com/x/v2/reply"
+LIVE_ROOM_INFO_URL = "https://api.live.bilibili.com/room/v1/Room/get_info"
+LIVE_HISTORY_URL = "https://api.live.bilibili.com/xlive/web-room/v1/dM/gethistory"
 WBI_MIXIN_KEY_ENC_TAB = (
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
     27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
@@ -38,6 +40,16 @@ async def fetch(
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
+    if work_id.startswith("live:"):
+        return await fetch_live(
+            crawler,
+            url,
+            work_id.removeprefix("live:"),
+            limit,
+            page=page,
+            include_stats=include_stats,
+            include_comments=include_comments,
+        )
     try:
         view = await crawler._get_json(
             "https://api.bilibili.com/x/web-interface/view",
@@ -90,6 +102,95 @@ async def fetch(
         return result_error("bilibili", url, work_id, "blocked", str(exc))
     except Exception as exc:
         return result_error("bilibili", url, work_id, "failed", str(exc))
+
+
+async def fetch_live(
+    crawler: PlatformCrawlerContext,
+    url: str,
+    room_id: str,
+    limit: int,
+    *,
+    page: int,
+    include_stats: bool,
+    include_comments: bool,
+) -> EngagementResult:
+    """Collect current room counters and the public recent-danmaku window."""
+
+    try:
+        stats = EngagementStats()
+        sources: list[str] = []
+        if include_stats:
+            payload = await crawler._get_json(
+                LIVE_ROOM_INFO_URL,
+                params={"room_id": room_id},
+                headers={"Referer": f"https://live.bilibili.com/{room_id}"},
+            )
+            data = payload.get("data") or {}
+            if payload.get("code") != 0 or str(data.get("room_id") or "") != room_id:
+                raise PlatformCrawlerError("bilibili live room payload is unavailable")
+            stats = EngagementStats(
+                **{
+                    "online": to_int(data.get("online")),
+                    "followers": to_int(data.get("attention")),
+                    "live_status": to_int(data.get("live_status")),
+                }
+            )
+            sources.append("Room/get_info")
+
+        comments: list[EngagementComment] = []
+        if include_comments:
+            if page > 1:
+                return result_error(
+                    "bilibili",
+                    url,
+                    room_id,
+                    "unsupported",
+                    "B 站直播公开接口只提供最近弹幕窗口，不支持历史评论页码",
+                )
+            payload = await crawler._post_json(
+                LIVE_HISTORY_URL,
+                data={"roomid": room_id},
+                headers={"Referer": f"https://live.bilibili.com/{room_id}"},
+            )
+            if payload.get("code") != 0:
+                raise PlatformCrawlerError("bilibili live history payload is unavailable")
+            comments = parse_live_comments(payload)[:limit]
+            sources.append("dM/gethistory")
+
+        return EngagementResult(
+            platform="bilibili",
+            canonical_url=f"https://live.bilibili.com/{room_id}",
+            work_id=room_id,
+            coverage="partial",
+            reason=(
+                "B 站直播公开接口只提供最近弹幕窗口，不代表历史评论全集"
+                if include_comments
+                else "B 站直播互动量仅提供当前在线人数、关注数和开播状态"
+            ),
+            source=" + ".join(sources),
+            stats=stats,
+            comments=comments,
+        )
+    except PlatformBlockedError as exc:
+        return result_error("bilibili", url, room_id, "blocked", str(exc))
+    except Exception as exc:
+        return result_error("bilibili", url, room_id, "failed", str(exc))
+
+
+def parse_live_comments(payload: dict[str, Any]) -> list[EngagementComment]:
+    data = payload.get("data") or {}
+    result: list[EngagementComment] = []
+    for item in [*(data.get("admin") or []), *(data.get("room") or [])]:
+        comment_id = str(item.get("id_str") or item.get("rnd") or "")
+        text = str(item.get("text") or "")
+        if not comment_id or not text:
+            continue
+        result.append(EngagementComment(
+            comment_id=comment_id,
+            author=str(item.get("nickname") or ""),
+            text=text,
+        ))
+    return result
 
 
 async def fetch_comments(

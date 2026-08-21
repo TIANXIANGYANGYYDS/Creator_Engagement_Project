@@ -125,7 +125,7 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 
 | 平台 | 当前能力 | 协议证据 | 状态 |
 |---|---|---|---|
-| B 站 | 播放、点赞、评论、分享、收藏、投币、弹幕和一级评论 | `x/web-interface/view`、`x/v2/reply/wbi/main`、`x/web-interface/nav` | 可用；评论仅当前页 |
+| B 站 | 视频互动/评论；直播当前状态和最近弹幕 | 视频 `x/web-interface/view`、`x/v2/reply/wbi/main`；直播 `Room/get_info`、`dM/gethistory` | 视频支持分页；直播不提供历史弹幕全集 |
 | 微博 | 点赞、评论、转发和匿名评论分页 | `statuses/show`、`comments/hotflow`、`api/comments/show` | 可用，访客态部分覆盖 |
 | 好看 | 播放、点赞、评论总数和一级评论 | 目标页 SSR、`haokan/ui-web/v2/comment/get` | 纯协议匿名可用；收藏/分享未公开 |
 | 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 游客 SSR/浏览器首屏；自有会话 `xhshow` | 首屏无需账号；游客态不承诺深分页 |
@@ -133,6 +133,10 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
 | 公众号 | 页面公开字段；有文章会话时读取互动和评论 | 页面 SSR、`getappmsgext`、`appmsg_comment` | 任意文章匿名互动/评论无稳定免费接口；官方统计只适用于自有公众号授权 |
 | 快手 | 播放、点赞、评论总数和一级评论 | 游客页 `visionVideoDetail`、`/rest/v/photo/comment/list` | 无需账号；严格校验目标 ID，挑战失败时明确 blocked |
+
+真实输入 URL 同时兼容头条 `/i{id}`、快手 `c.kuaishou.com/fw/photo/{id}`、微博桌面端
+`/用户ID/base62短ID` 和 `live.bilibili.com/{room_id}`。这些变体只在路由层规范化，平台
+采集器仍使用同一套目标 ID 校验，不会把用户 ID、推荐内容或其他房间数据当成目标作品。
 
 不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音详情接口在当前版本对匿名请求稳定返回 HTTP 200 空包；需要读取统计时，通过 `CREATOR_ENGAGEMENT_COOKIE` 注入调用方自己的会话 Cookie。该 Cookie 不会写入代码或日志，过期、无效或缺少设备风控字段时结果会明确标成 `blocked`/`failed`。B 站评论的 WBI 密钥每次从公开导航接口动态读取，不依赖浏览器或登录 Cookie。
 

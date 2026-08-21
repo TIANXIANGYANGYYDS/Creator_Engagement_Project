@@ -8,7 +8,11 @@ import pytest
 from app.crawlers.engagement import EngagementCrawler
 from app.crawlers.platforms import PLATFORM_HANDLERS
 from app.crawlers.platforms.bilibili import extract_wbi_mixin_key, sign_wbi_params
-from app.crawlers.platforms.registry import identify_url, normalize_media_name
+from app.crawlers.platforms.registry import (
+    identify_url,
+    normalize_media_name,
+    weibo_bid_to_mid,
+)
 from app.crawlers.platforms.toutiao import parse_stats as parse_toutiao_stats
 from app.crawlers.platforms.haokan import parse_ssr_stats as parse_haokan_stats
 from app.crawlers.platforms.xiaohongshu import parse_stats as parse_xhs_stats
@@ -48,24 +52,84 @@ class FakeClient:
         self.calls.append((url, kwargs))
         return self.responses.pop(0)
 
+    async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append((url, kwargs))
+        return self.responses.pop(0)
+
 
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
         ("https://www.bilibili.com/video/BV1abc123", ("bilibili", "BV1abc123")),
         ("https://www.bilibili.com/video/av12345", ("bilibili", "12345")),
+        ("https://live.bilibili.com/22595201#pub=1787011298", ("bilibili", "live:22595201")),
         ("https://m.weibo.cn/detail/5301066679190033", ("weibo", "5301066679190033")),
+        ("http://weibo.com/6539142196/RdVPmEYKD", ("weibo", "5333205569766651")),
         ("https://www.xiaohongshu.com/explore/6a5585c000000000080326ac", ("xiaohongshu", "6a5585c000000000080326ac")),
         ("https://haokan.baidu.com/v?vid=327646248367276281", ("haokan", "327646248367276281")),
         ("https://www.douyin.com/video/7665718789363309172", ("douyin", "7665718789363309172")),
         ("https://www.toutiao.com/article/1234567890/", ("toutiao", "1234567890")),
+        ("https://www.toutiao.com/i7675062618096288275/", ("toutiao", "7675062618096288275")),
         ("https://www.kuaishou.com/short-video/abc", ("kuaishou", "abc")),
+        ("https://c.kuaishou.com/fw/photo/3x4zebgce2jutx2", ("kuaishou", "3x4zebgce2jutx2")),
         ("https://mp.weixin.qq.com/s?mid=2247504578", ("wechat", "2247504578")),
         ("https://mp.weixin.qq.com/s/XKB0QLWfxHAJrOo-QvHsVw", ("wechat", "XKB0QLWfxHAJrOo-QvHsVw")),
     ],
 )
 def test_identify_url(url: str, expected: tuple[str, str]) -> None:
     assert identify_url(url) == expected
+
+
+def test_weibo_desktop_bid_conversion() -> None:
+    assert weibo_bid_to_mid("RdVPmEYKD") == "5333205569766651"
+
+
+def test_bilibili_live_interactions_use_room_info() -> None:
+    client = FakeClient(FakeResponse(payload={
+        "code": 0,
+        "data": {
+            "room_id": 22595201,
+            "online": 439,
+            "attention": 1666281,
+            "live_status": 1,
+        },
+    }))
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        "https://live.bilibili.com/22595201#pub=1787011298",
+        "B站",
+    ))
+
+    assert result.work_id == "22595201"
+    assert result.stats.online == 439
+    assert result.stats.followers == 1666281
+    assert result.stats.live_status == 1
+    assert client.calls[0][0].endswith("/room/v1/Room/get_info")
+
+
+def test_bilibili_live_comments_return_recent_danmaku_window() -> None:
+    client = FakeClient(FakeResponse(payload={
+        "code": 0,
+        "data": {
+            "admin": [],
+            "room": [{
+                "id_str": "comment-1",
+                "nickname": "直播用户",
+                "text": "直播弹幕",
+            }],
+        },
+    }))
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "https://live.bilibili.com/22595201#pub=1787011298",
+        "bilibili",
+        1,
+    ))
+
+    assert result.comments[0].comment_id == "comment-1"
+    assert result.comments[0].text == "直播弹幕"
+    assert result.next_page is None
+    assert client.calls[0][0].endswith("/xlive/web-room/v1/dM/gethistory")
 
 
 @pytest.mark.parametrize(

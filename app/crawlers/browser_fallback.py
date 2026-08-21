@@ -91,6 +91,7 @@ class BrowserFallback:
             proxy = _playwright_proxy(proxy_mapping)
             profile_dir = self.settings.profile_dir / platform
             profile_dir.mkdir(parents=True, exist_ok=True)
+            target_url = _browser_target_url(url, platform, work_id)
 
             from camoufox.async_api import AsyncCamoufox
             from camoufox.addons import DefaultAddons
@@ -107,7 +108,7 @@ class BrowserFallback:
                 exclude_addons=[DefaultAddons.UBO],
                 enable_cache=True,
             ) as context:
-                await self._seed_cookies(context, url, platform)
+                await self._seed_cookies(context, target_url, platform)
                 page_obj = context.pages[0] if context.pages else await context.new_page()
                 responses: list[Any] = []
 
@@ -120,7 +121,7 @@ class BrowserFallback:
                 page_obj.on("response", collect)
                 try:
                     await page_obj.goto(
-                        url,
+                        target_url,
                         wait_until="domcontentloaded",
                         timeout=int(self.settings.timeout_seconds * 1000),
                     )
@@ -315,6 +316,7 @@ class BrowserFallback:
                 detailPayload = await detailResponse.json();
               } catch (_) {}
               let cursor = "";
+              const seenCommentIds = new Set();
               const targetPage = includeComments ? requestedPage : 1;
               for (let currentPage = 1; currentPage <= targetPage; currentPage += 1) {
                 const response = await fetch("/rest/v/photo/comment/list", {
@@ -328,7 +330,15 @@ class BrowserFallback:
                   return {apolloPhoto, detailPayload, commentPage, reached: false};
                 }
                 if (currentPage === targetPage) {
+                  if (Array.isArray(commentPage.rootCommentsV2)) {
+                    commentPage.rootCommentsV2 = commentPage.rootCommentsV2.filter(
+                      (comment) => !seenCommentIds.has(String(comment.commentId || ""))
+                    );
+                  }
                   return {apolloPhoto, detailPayload, commentPage, reached: true};
+                }
+                for (const comment of commentPage.rootCommentsV2 || []) {
+                  seenCommentIds.add(String(comment.commentId || ""));
                 }
                 const next = commentPage.pcursorV2 || commentPage.pcursor || "";
                 if (!next || next === "0" || next === "no_more") {
@@ -492,6 +502,24 @@ def _playwright_proxy(proxies: dict[str, str] | None) -> dict[str, str] | None:
         return None
     server = proxies.get("https") or proxies.get("http")
     return {"server": server} if server else None
+
+
+def _browser_target_url(
+    url: str,
+    platform: EngagementPlatform,
+    work_id: str,
+) -> str:
+    """Use the platform's full content page for share and desktop URL variants."""
+
+    if platform == "kuaishou":
+        return f"https://www.kuaishou.com/short-video/{work_id}"
+    if platform == "toutiao":
+        return f"https://www.toutiao.com/article/{work_id}/"
+    if platform == "weibo":
+        return f"https://m.weibo.cn/detail/{work_id}"
+    if platform == "bilibili" and work_id.startswith("live:"):
+        return f"https://live.bilibili.com/{work_id.removeprefix('live:')}"
+    return url
 
 
 def _number(value: Any) -> int | None:

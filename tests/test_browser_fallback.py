@@ -4,6 +4,7 @@ import asyncio
 
 from app.crawlers.browser_fallback import (
     BrowserFallback,
+    _browser_target_url,
     _number,
     _parse_douyin,
     _parse_kuaishou_guest,
@@ -226,6 +227,19 @@ def test_kuaishou_guest_payload_matches_only_target_and_parses_comments() -> Non
 def test_browser_number_accepts_chinese_display_units() -> None:
     assert _number("1.2万") == 12000
     assert _number("2.5亿") == 250000000
+
+
+def test_browser_normalizes_share_and_desktop_content_urls() -> None:
+    assert _browser_target_url(
+        "https://c.kuaishou.com/fw/photo/3x4zebgce2jutx2",
+        "kuaishou",
+        "3x4zebgce2jutx2",
+    ) == "https://www.kuaishou.com/short-video/3x4zebgce2jutx2"
+    assert _browser_target_url(
+        "http://weibo.com/6539142196/RdVPmEYKD",
+        "weibo",
+        "5333205569766651",
+    ) == "https://m.weibo.cn/detail/5333205569766651"
 
 
 def test_xhs_guest_does_not_mislabel_first_page_as_page_two() -> None:

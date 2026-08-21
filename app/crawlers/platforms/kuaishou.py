@@ -113,9 +113,15 @@ async def fetch(
         if include_comments:
             cursor = ""
             total: int | None = None
+            seen_comment_ids: set[str] = set()
             for current_page in range(1, page + 1):
                 comment_payload = await fetch_comment_page(crawler, work_id, cursor, headers)
-                comments = parse_comments(comment_payload.get("rootCommentsV2") or [])
+                page_comments = parse_comments(comment_payload.get("rootCommentsV2") or [])
+                comments = [
+                    comment
+                    for comment in page_comments
+                    if comment.comment_id not in seen_comment_ids
+                ]
                 total = to_int(
                     comment_payload.get("commentCountV2")
                     or comment_payload.get("commentCount")
@@ -128,6 +134,7 @@ async def fetch(
                 )
                 if current_page == page:
                     break
+                seen_comment_ids.update(comment.comment_id for comment in page_comments)
                 if next_cursor is None:
                     comments = []
                     break
