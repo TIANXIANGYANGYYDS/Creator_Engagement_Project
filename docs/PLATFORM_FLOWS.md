@@ -2,7 +2,7 @@
 
 本文对应 `app/crawlers/platforms/` 下的八个实现文件。公共 API 不包含平台条件分支；
 `EngagementCrawler` 根据 `media_name + URL` 选择一个处理器，协议结果不可用时再进入统一
-Camoufox 兜底。互动量和评论仍是两条独立外部接口，但首页在服务内部合并采集：
+Camoufox 兜底。互动量和评论是两条独立接口，也分别执行上游请求：
 
 ```text
 GET /api/v1/interactions?url=...&media_name=...
@@ -10,13 +10,11 @@ GET /api/v1/interactions?url=...&media_name=...
 
 GET /api/v1/comments?url=...&media_name=...&page=N
   -> include_stats=false, include_comments=true
-
-内部 page=1：include_stats=true + include_comments=true
-  -> 同一代理租约 -> 同一协议/浏览器会话 -> 120 秒缓存
 ```
 
-因此两个接口无论谁先到达，第二个都直接投影缓存结果；同时到达的相同 URL 请求会合并成
-一个任务。只有评论 `page>1` 独立执行分页流程。
+只有接口类型、媒体、URL 和页码都相同的重复请求才会合并任务并命中 120 秒缓存。互动量
+接口不会提前抓评论，评论接口也不会提前抓互动量。一个代理 IP 可以承载多次 HTTP 请求；
+共用代理租约不等于合并请求。
 
 ## 抖音
 

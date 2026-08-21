@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from time import monotonic
-from typing import Iterable, Literal
+from typing import Literal
 
 from app.core.config import Settings
 from app.crawlers.browser_fallback import BrowserFallback, BrowserFallbackSettings
@@ -13,6 +14,10 @@ from app.crawlers.platform_session import PlatformSessionStore
 from app.crawlers.platforms.registry import normalize_media_name
 from app.crawlers.proxy_provider import AsyncDailiProxyPool, AsyncProxyProvider
 from app.models.engagement import CommentPageResult, EngagementResult, InteractionResult
+
+
+CachedResult = InteractionResult | CommentPageResult
+CacheKey = tuple[str, str, str, int]
 
 
 class EngagementService:
@@ -38,10 +43,10 @@ class EngagementService:
         self._collection_semaphore = asyncio.Semaphore(collection_max_concurrency)
         self._cache_ttl_seconds = cache_ttl_seconds
         self._cache_max_entries = cache_max_entries
-        self._bundle_cache: OrderedDict[
-            tuple[str, str], tuple[float, EngagementResult]
+        self._result_cache: OrderedDict[
+            CacheKey, tuple[float, CachedResult]
         ] = OrderedDict()
-        self._bundle_tasks: dict[tuple[str, str], asyncio.Task[EngagementResult]] = {}
+        self._result_tasks: dict[CacheKey, asyncio.Task[CachedResult]] = {}
         self._cache_lock = asyncio.Lock()
 
     @classmethod
@@ -96,10 +101,17 @@ class EngagementService:
             return await self.crawler.fetch(url, comment_limit=comment_limit)
 
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
-        result = await self._fetch_bundle(url, media_name)
-        return InteractionResult.model_validate(
-            result.model_dump(exclude={"comments", "next_cursor"})
+        platform = normalize_media_name(media_name)
+
+        async def collect() -> CachedResult:
+            return await self.crawler.fetch_interactions(url, media_name)
+
+        result = await self._fetch_cached(
+            ("interactions", platform, url, 0),
+            collect,
         )
+        assert isinstance(result, InteractionResult)
+        return result
 
     async def fetch_comments(
         self,
@@ -109,57 +121,64 @@ class EngagementService:
     ) -> CommentPageResult:
         if page <= 0:
             raise ValueError("page must be greater than zero")
-        if page == 1:
-            result = await self._fetch_bundle(url, media_name)
-            return CommentPageResult.model_validate({
-                **result.model_dump(exclude={"stats", "next_cursor"}),
-                "page": 1,
-                "next_page": 2 if result.next_cursor is not None else None,
-                "total_comments": result.stats.comments,
-            })
-        async with self._collection_semaphore:
+        platform = normalize_media_name(media_name)
+
+        async def collect() -> CachedResult:
             return await self.crawler.fetch_comments(url, media_name, page)
 
-    async def _fetch_bundle(self, url: str, media_name: str) -> EngagementResult:
-        key = (normalize_media_name(media_name), url)
+        result = await self._fetch_cached(
+            ("comments", platform, url, page),
+            collect,
+        )
+        assert isinstance(result, CommentPageResult)
+        return result
+
+    async def _fetch_cached(
+        self,
+        key: CacheKey,
+        collect: Callable[[], Awaitable[CachedResult]],
+    ) -> CachedResult:
         now = monotonic()
         async with self._cache_lock:
-            while self._bundle_cache:
-                oldest_key, (expires_at, _) = next(iter(self._bundle_cache.items()))
+            while self._result_cache:
+                oldest_key, (expires_at, _) = next(iter(self._result_cache.items()))
                 if expires_at > now:
                     break
-                self._bundle_cache.pop(oldest_key)
-            cached = self._bundle_cache.get(key)
+                self._result_cache.pop(oldest_key)
+            cached = self._result_cache.get(key)
             if cached is not None and cached[0] > now:
-                self._bundle_cache.move_to_end(key)
+                self._result_cache.move_to_end(key)
                 return cached[1].model_copy(deep=True)
-            task = self._bundle_tasks.get(key)
+            task = self._result_tasks.get(key)
             if task is None:
-                task = asyncio.create_task(self._collect_bundle(url, media_name))
-                self._bundle_tasks[key] = task
+                task = asyncio.create_task(self._collect_cached(collect))
+                self._result_tasks[key] = task
         try:
             result = await asyncio.shield(task)
         except Exception:
             async with self._cache_lock:
-                if self._bundle_tasks.get(key) is task:
-                    self._bundle_tasks.pop(key, None)
+                if self._result_tasks.get(key) is task:
+                    self._result_tasks.pop(key, None)
             raise
         async with self._cache_lock:
-            if self._bundle_tasks.get(key) is task:
-                self._bundle_tasks.pop(key, None)
+            if self._result_tasks.get(key) is task:
+                self._result_tasks.pop(key, None)
             if self._cache_ttl_seconds > 0:
-                self._bundle_cache[key] = (
+                self._result_cache[key] = (
                     monotonic() + self._cache_ttl_seconds,
                     result.model_copy(deep=True),
                 )
-                self._bundle_cache.move_to_end(key)
-                while len(self._bundle_cache) > self._cache_max_entries:
-                    self._bundle_cache.popitem(last=False)
+                self._result_cache.move_to_end(key)
+                while len(self._result_cache) > self._cache_max_entries:
+                    self._result_cache.popitem(last=False)
         return result.model_copy(deep=True)
 
-    async def _collect_bundle(self, url: str, media_name: str) -> EngagementResult:
+    async def _collect_cached(
+        self,
+        collect: Callable[[], Awaitable[CachedResult]],
+    ) -> CachedResult:
         async with self._collection_semaphore:
-            return await self.crawler.fetch_bundle(url, media_name)
+            return await collect()
 
     async def fetch_many(
         self,
@@ -179,8 +198,8 @@ class EngagementService:
         return list(await asyncio.gather(*(fetch_one(url) for url in urls)))
 
     async def aclose(self) -> None:
-        tasks = list(self._bundle_tasks.values())
-        self._bundle_tasks.clear()
+        tasks = list(self._result_tasks.values())
+        self._result_tasks.clear()
         for task in tasks:
             task.cancel()
         if tasks:

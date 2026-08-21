@@ -114,9 +114,17 @@
     td.cost-cell {
       background: #f2f6fc;
       color: #163f78;
-      font-size: 17px;
+      font-size: 16px;
       font-weight: 800;
-      white-space: nowrap;
+    }
+
+    .cost-cell small,
+    .request-detail {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
     }
 
     td.note-cell {
@@ -168,7 +176,7 @@
         <h1>互动量与公开评论采集成本单</h1>
         <div class="subtitle">支持：抖音、今日头条、微信公众号、小红书、好看视频、快手、B站、微博</div>
       </div>
-      <div class="badge">内部成本价 · 不设请求量阶梯</div>
+      <div class="badge">内部 IP 成本 · 不设请求量阶梯</div>
     </header>
 
     <table aria-label="互动量与公开评论采集成本单">
@@ -184,7 +192,7 @@
           <th>数据产品</th>
           <th>服务内容</th>
           <th>请求量</th>
-          <th>成本价（元）</th>
+          <th>IP 成本（元）</th>
           <th>备注</th>
         </tr>
       </thead>
@@ -194,59 +202,59 @@
             <span class="api-line">接口1：评论内容更新接口</span>
             <span class="api-line">接口2：互动量更新接口</span>
           </td>
-          <td class="service-cell">抖音：评论内容、互动量获取</td>
+          <td class="service-cell">抖音<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
           <td class="volume-cell">不分级</td>
-          <td class="cost-cell">0.00084 元/次*</td>
+          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
           <td class="note-cell" rowspan="8">
             <ol>
-              <li>成本按代理 IP 计算：84 元 ÷ 100000 个 IP = 0.00084 元/IP。</li>
-              <li>同一 URL 的互动量与评论首页在内部合并采集，正常情况下共用一个 IP；120 秒缓存期内调用另一个接口不增加 IP 成本。</li>
-              <li>评论接口每次返回一页公开评论，默认最多约 20 条；后续页按页码继续请求，不代表一次返回全部评论。</li>
-              <li>快手、小红书、公众号等平台可能触发浏览器兜底或需要平台会话，但本表只核算 IP 成本。</li>
-              <li>验证码、代理失效或平台风控导致换 IP 时，按实际新增 IP 数量核算；服务器、存储、带宽、维护和人工登录成本不包含在内。</li>
+              <li>一个上游响应同时包含互动量和评论内容时才能合并；详情接口、评论接口各调用一次时，按两次请求记录。</li>
+              <li>IP 和请求不是一一对应：一个 IP 在有效期内可以承载多次请求，不能把 0.00084 元/IP 直接写成每次请求成本。</li>
+              <li>成本公式：新增代理 IP 数量 × 0.00084 元；平均请求成本再除以该批 IP 实际完成的成功请求数。</li>
+              <li>直连且未调用代理池时，IP 采购成本为 0。公众号 HTML 只有在同时预载统计和精选评论时，才属于同一响应获取两类数据。</li>
+              <li>验证码、代理失效或平台风控导致换 IP 时按实际新增 IP 计；服务器、存储、带宽、维护和人工登录成本不包含在内。</li>
             </ol>
           </td>
         </tr>
         <tr>
-          <td class="service-cell">今日头条：评论内容、互动量获取</td>
+          <td class="service-cell">今日头条<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
           <td class="volume-cell">不分级</td>
-          <td class="cost-cell">0.00084 元/次*</td>
+          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
         </tr>
         <tr>
-          <td class="service-cell">微信公众号：精选评论、互动量获取</td>
+          <td class="service-cell">微信公众号<span class="request-detail">HTML 同时预载两类数据时可共用一次响应</span></td>
           <td class="volume-cell">不分级</td>
-          <td class="cost-cell">0.00084 元/次*</td>
+          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
         </tr>
         <tr>
-          <td class="service-cell">小红书：评论内容、互动量获取</td>
+          <td class="service-cell">小红书<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
           <td class="volume-cell">不分级</td>
-          <td class="cost-cell">0.00084 元/次*</td>
+          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
         </tr>
         <tr>
-          <td class="service-cell">好看视频：评论内容、互动量获取</td>
+          <td class="service-cell">好看视频<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
           <td class="volume-cell">不分级</td>
-          <td class="cost-cell">0.00084 元/次*</td>
+          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
         </tr>
         <tr>
-          <td class="service-cell">快手：评论内容、互动量获取</td>
+          <td class="service-cell">快手<span class="request-detail">详情请求、评论分页请求相互独立</span></td>
           <td class="volume-cell">不分级</td>
-          <td class="cost-cell">0.00084 元/次*</td>
+          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
         </tr>
         <tr>
-          <td class="service-cell">B站：评论内容、互动量获取</td>
+          <td class="service-cell">B站<span class="request-detail">互动量请求、评论/弹幕请求相互独立</span></td>
           <td class="volume-cell">不分级</td>
-          <td class="cost-cell">0.00084 元/次*</td>
+          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
         </tr>
         <tr>
-          <td class="service-cell">微博：评论内容、互动量获取</td>
+          <td class="service-cell">微博<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
           <td class="volume-cell">不分级</td>
-          <td class="cost-cell">0.00084 元/次*</td>
+          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
         </tr>
       </tbody>
     </table>
 
     <div class="footnote">
-      <span><strong>* 成本口径：</strong>按一次采集任务最保守占用一个新 IP 计算；IP 在有效期内复用时，实际平均成本会更低。</span>
+      <span><strong>成本口径：</strong>84 元 ÷ 100000 个 IP = 0.00084 元/IP；请求成本按一个 IP 实际承载的成功请求数量摊销。</span>
       <span>版本日期：2026-08-21</span>
     </div>
   </main>

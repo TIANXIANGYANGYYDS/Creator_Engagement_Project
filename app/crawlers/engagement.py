@@ -81,18 +81,6 @@ class EngagementCrawler:
             include_comments=True,
         )
 
-    async def fetch_bundle(self, url: str, media_name: str) -> EngagementResult:
-        """Collect first-page statistics and comments in one upstream session."""
-
-        return await self._fetch(
-            url,
-            media_name=media_name,
-            limit=COMMENT_PAGE_SIZE,
-            page=1,
-            include_stats=True,
-            include_comments=True,
-        )
-
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
         result = await self._fetch(
             url,

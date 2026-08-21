@@ -30,18 +30,7 @@ class FakeCrawler:
             canonical_url=url,
             work_id="123",
             coverage="partial",
-        )
-
-    async def fetch_bundle(self, url: str, media_name: str) -> EngagementResult:
-        self.calls.append((f"bundle:{media_name}:{url}", 1))
-        return EngagementResult(
-            platform="toutiao",
-            canonical_url=url,
-            work_id="123",
-            coverage="partial",
             stats={"likes": 7, "comments": 1},
-            comments=[EngagementComment(comment_id="c1", text="same collection")],
-            next_cursor="next",
         )
 
     async def fetch_comments(self, url: str, media_name: str, page: int) -> CommentPageResult:
@@ -52,6 +41,9 @@ class FakeCrawler:
             work_id="123",
             coverage="partial",
             page=page,
+            comments=[EngagementComment(comment_id="c1", text="comment request")],
+            next_page=page + 1,
+            total_comments=1,
         )
 
     async def aclose(self) -> None:
@@ -68,7 +60,7 @@ def test_fetch_many_preserves_input_order() -> None:
     assert crawler.calls == [("first", 3), ("second", 3)]
 
 
-def test_separate_apis_share_one_first_page_collection() -> None:
+def test_separate_apis_use_independent_platform_requests() -> None:
     crawler = FakeCrawler()
     service = EngagementService(crawler)  # type: ignore[arg-type]
 
@@ -77,9 +69,12 @@ def test_separate_apis_share_one_first_page_collection() -> None:
 
     assert interaction.canonical_url == "url-1"
     assert interaction.stats.likes == 7
-    assert comments.comments[0].text == "same collection"
+    assert comments.comments[0].text == "comment request"
     assert comments.next_page == 2
-    assert crawler.calls == [("bundle:头条:url-1", 1)]
+    assert crawler.calls == [
+        ("头条:url-1", 0),
+        ("toutiao:url-1", 1),
+    ]
 
 
 def test_deeper_comment_page_remains_an_independent_collection() -> None:
@@ -92,26 +87,26 @@ def test_deeper_comment_page_remains_an_independent_collection() -> None:
     assert crawler.calls == [("toutiao:url-2", 3)]
 
 
-def test_concurrent_first_page_requests_are_coalesced() -> None:
+def test_concurrent_identical_interaction_requests_are_coalesced() -> None:
     class SlowCrawler(FakeCrawler):
-        async def fetch_bundle(self, url: str, media_name: str) -> EngagementResult:
+        async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
             await asyncio.sleep(0.01)
-            return await super().fetch_bundle(url, media_name)
+            return await super().fetch_interactions(url, media_name)
 
-    async def run() -> tuple[InteractionResult, CommentPageResult, SlowCrawler]:
+    async def run() -> tuple[InteractionResult, InteractionResult, SlowCrawler]:
         crawler = SlowCrawler()
         service = EngagementService(crawler)  # type: ignore[arg-type]
-        interaction, comments = await asyncio.gather(
+        first, second = await asyncio.gather(
             service.fetch_interactions("same-url", "头条"),
-            service.fetch_comments("same-url", "toutiao", 1),
+            service.fetch_interactions("same-url", "toutiao"),
         )
-        return interaction, comments, crawler
+        return first, second, crawler
 
-    interaction, comments, crawler = asyncio.run(run())
+    first, second, crawler = asyncio.run(run())
 
-    assert interaction.stats.likes == 7
-    assert len(comments.comments) == 1
-    assert crawler.calls == [("bundle:头条:same-url", 1)]
+    assert first.stats.likes == 7
+    assert second.stats.likes == 7
+    assert crawler.calls == [("头条:same-url", 0)]
 
 
 def test_collection_concurrency_is_bounded() -> None:
@@ -121,12 +116,12 @@ def test_collection_concurrency_is_bounded() -> None:
             self.active = 0
             self.max_active = 0
 
-        async def fetch_bundle(self, url: str, media_name: str) -> EngagementResult:
+        async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
             await asyncio.sleep(0.01)
             self.active -= 1
-            return await super().fetch_bundle(url, media_name)
+            return await super().fetch_interactions(url, media_name)
 
     async def run() -> CountingCrawler:
         crawler = CountingCrawler()
