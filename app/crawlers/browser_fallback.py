@@ -31,6 +31,7 @@ class BrowserFallbackSettings:
     timeout_seconds: float = 35
     challenge_wait_seconds: float = 5
     headless: bool | str = True
+    max_concurrency: int = 2
     profile_dir: Path = Path(".local/browser-profiles")
 
 
@@ -48,6 +49,7 @@ class BrowserFallback:
         self.proxy_provider = proxy_provider
         self.cookies = cookies
         self._locks: dict[EngagementPlatform, asyncio.Lock] = {}
+        self._semaphore = asyncio.Semaphore(self.settings.max_concurrency)
 
     async def fetch(
         self,
@@ -62,15 +64,16 @@ class BrowserFallback:
     ) -> EngagementResult:
         lock = self._locks.setdefault(platform, asyncio.Lock())
         async with lock:
-            return await self._fetch_locked(
-                url,
-                platform,
-                work_id,
-                page=page,
-                limit=limit,
-                include_stats=include_stats,
-                include_comments=include_comments,
-            )
+            async with self._semaphore:
+                return await self._fetch_locked(
+                    url,
+                    platform,
+                    work_id,
+                    page=page,
+                    limit=limit,
+                    include_stats=include_stats,
+                    include_comments=include_comments,
+                )
 
     async def _fetch_locked(
         self,

@@ -19,10 +19,18 @@ from app.crawlers.platforms.xiaohongshu import parse_stats as parse_xhs_stats
 
 
 class FakeResponse:
-    def __init__(self, *, payload: dict[str, Any] | None = None, text: str = "", status_code: int = 200) -> None:
+    def __init__(
+        self,
+        *,
+        payload: dict[str, Any] | None = None,
+        text: str = "",
+        status_code: int = 200,
+        cookies: dict[str, str] | None = None,
+    ) -> None:
         self._payload = payload
         self.text = text
         self.status_code = status_code
+        self.cookies = cookies or {}
 
     def json(self) -> dict[str, Any]:
         if self._payload is None:
@@ -500,34 +508,77 @@ def test_weibo_fetches_stats_and_hot_comments() -> None:
     assert result.next_cursor == "99"
 
 
-def test_toutiao_fetches_comment_count_and_comments_without_signature() -> None:
-    client = FakeClient(FakeResponse(payload={
-        "message": "success",
-        "err_no": 0,
-        "total_number": 28,
-        "has_more": True,
-        "offset": 5,
-        "data": [{
-            "comment": {
-                "id_str": "c1",
-                "user_name": "头条用户",
-                "text": "<b>头条评论</b>",
-                "create_time": 1700000000,
-                "digg_count": 4,
-                "reply_count": 2,
+def test_weibo_session_cookie_and_cursor_type_support_deep_pages() -> None:
+    def comment_page(comment_id: int, next_id: int, next_type: int) -> FakeResponse:
+        return FakeResponse(payload={
+            "ok": 1,
+            "data": {
+                "max_id": next_id,
+                "max_id_type": next_type,
+                "data": [{
+                    "id": comment_id,
+                    "text": f"第{comment_id}页",
+                    "user": {"screen_name": "微博用户"},
+                }],
             },
-        }],
-    }))
+        })
+
+    client = FakeClient(
+        comment_page(1, 101, 1),
+        comment_page(2, 202, 2),
+        comment_page(3, 0, 0),
+    )
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"weibo": "SUB=caller-session; XSRF-TOKEN=token%3D"},
+    ).fetch_comments(
+        "https://m.weibo.cn/detail/5301066679190033",
+        "微博",
+        3,
+    ))
+
+    assert result.comments[0].text == "第3页"
+    assert client.calls[1][1]["params"]["max_id_type"] == 1
+    assert client.calls[2][1]["params"]["max_id_type"] == 2
+    assert client.calls[2][1]["headers"]["Cookie"].startswith("SUB=")
+    assert client.calls[2][1]["headers"]["X-XSRF-TOKEN"] == "token="
+
+
+def test_toutiao_fetches_comment_count_and_comments_without_signature() -> None:
+    client = FakeClient(
+        FakeResponse(text=(
+            '%22itemCounter%22%3A%7B%22commentCount%22%3A28%2C%22diggCount%22%3A74%2C'
+            '%22readCount%22%3A3297%2C%22shareCount%22%3A52%7D'
+        )),
+        FakeResponse(payload={
+            "message": "success",
+            "err_no": 0,
+            "total_number": 28,
+            "has_more": True,
+            "offset": 5,
+            "data": [{
+                "comment": {
+                    "id_str": "c1",
+                    "user_name": "头条用户",
+                    "text": "<b>头条评论</b>",
+                    "create_time": 1700000000,
+                    "digg_count": 4,
+                    "reply_count": 2,
+                },
+            }],
+        }),
+    )
     result = asyncio.run(EngagementCrawler(client=client).fetch(
         "https://www.toutiao.com/article/7557632662635840036/"
     ))
 
     assert result.coverage == "partial"
+    assert result.stats.likes == 74
     assert result.stats.comments == 28
     assert result.comments[0].author == "头条用户"
     assert result.comments[0].text == "头条评论"
     assert result.next_cursor == "5"
-    assert "_signature" not in client.calls[0][1]["params"]
+    assert "_signature" not in client.calls[1][1]["params"]
 
 
 def test_toutiao_interactions_parse_ssr_counters_without_comment_request() -> None:
@@ -646,10 +697,44 @@ def test_xiaohongshu_blocked_page_is_not_reported_as_partial_success() -> None:
     assert result.stats.likes is None
 
 
-def test_session_bound_platform_is_explicitly_unsupported() -> None:
-    result = asyncio.run(EngagementCrawler(client=FakeClient()).fetch("https://www.douyin.com/video/7665718789363309172"))
-    assert result.coverage == "unsupported"
-    assert "a_bogus" in result.reason
+def test_douyin_anonymous_session_fetches_stats_and_comments() -> None:
+    client = FakeClient(
+        FakeResponse(text="<html>prewarm</html>"),
+        FakeResponse(
+            payload={"status_code": 0},
+            cookies={"ttwid": "visitor-token"},
+        ),
+        FakeResponse(
+            payload={
+                "status_code": 0,
+                "aweme_detail": {
+                    "statistics": {"digg_count": 9, "comment_count": 2},
+                },
+            },
+            text='{"status_code":0,"aweme_detail":{}}',
+        ),
+        FakeResponse(
+            payload={
+                "status_code": 0,
+                "has_more": 0,
+                "total": 2,
+                "comments": [{"cid": "c1", "text": "访客评论"}],
+            },
+            text='{"status_code":0,"comments":[]}',
+        ),
+    )
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch(
+        "https://www.douyin.com/video/7665718789363309172"
+    ))
+
+    assert result.coverage == "partial"
+    assert result.stats.likes == 9
+    assert result.comments[0].text == "访客评论"
+    assert len(client.calls) == 4
+    assert client.calls[1][0].endswith("/ttwid/union/register/")
+    assert client.calls[2][1]["headers"]["Cookie"] == "ttwid=visitor-token"
+    assert client.calls[2][1]["params"]["a_bogus"]
 
 
 def test_kuaishou_protected_graphql_is_not_reported_as_target_data() -> None:

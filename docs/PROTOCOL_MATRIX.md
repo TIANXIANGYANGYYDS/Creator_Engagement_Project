@@ -1,6 +1,6 @@
 # 八个平台 16 项协议能力矩阵
 
-最后验证：2026-08-20，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先、浏览器
+最后验证：2026-08-21，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先、浏览器
 持久化会话接管，不接入付费数据供应商。快手和小红书首屏不需要用户账号；公众号任意文章
 互动/评论及小红书深分页不存在已验证的免费匿名协议，不硬编码浏览器 Cookie/签名。
 
@@ -15,8 +15,8 @@
 
 | 平台 | 请求 | 当前状态 | 当前接口/证据 | 不能保证的部分 |
 |---|---|---|---|---|
-| 抖音 | 互动量 | 协议/浏览器已验证可获取 | `/aweme/v1/web/aweme/detail/`；页面运行时生成 `a_bogus`、`msToken`、`UIFID` 等状态 | 统计依赖页面会话；平台对已有互动作品返回 `play_count=0` 时按“未下发”处理为 `null`，不误报零播放 |
-| 抖音 | 评论 | 浏览器按响应判定 | `/aweme/v1/web/comment/list/`；浏览器请求带动态设备风控状态 | 当前样例无会话时 HTTP 200 空包，结果明确说明评论未返回 |
+| 抖音 | 互动量 | 匿名纯协议可用（已实测） | 第一方初始化 `ttwid`，随机 `msToken` + 纯 Python `a_bogus` 请求 `/aweme/v1/web/aweme/detail/` | 平台对已有互动作品返回 `play_count=0` 时按“未下发”处理为 `null`，不误报零播放 |
+| 抖音 | 评论 | 匿名纯协议分页可用（已实测） | 同一访客/IP 请求 `/aweme/v1/web/comment/list/`；首屏/第 2 页各 20 条、总数 2909 | 只能说明公开页；签名/访客规则变化或风控空包时进入浏览器兜底 |
 | 头条 | 互动量 | 受 SSR/挑战影响 | 文章 SSR 中的 `itemCounter`/`likeData`；无 `_signature` 的评论接口可用 | 直接协议首包可能是 JSVM 挑战，统计字段可能为空 |
 | 头条 | 评论 | 可用（部分覆盖） | `/article/v4/tab_comments/`，参数 `aid/app_name/offset/count/group_id/item_id` | 只能说明指定公开页，不保证评论全集 |
 | 公众号 | 互动量 | 无会话无法稳定获取 | 匿名 SSR、`/mp/getappmsgext`；官方统计 API 需要自有公众号授权 | 匿名页通常不下发计数，不能仅凭文章 URL 获取任意账号数据 |
@@ -34,12 +34,14 @@
 
 ## 结论
 
-当前无需平台账号即可验证：B 站 2 项、微博 2 项、头条评论、好看互动量/评论、快手互动量/一级
-评论、小红书互动量/首屏评论。小红书后续评论页和公众号任意文章互动/评论没有接入付费
-接口，也不会把首屏、空包或聚合站缓存冒充为成功。公众号接口仍区分作者关闭评论与原生
-会话 `no session`。
+当前无需平台账号即可验证：抖音 2 项、B 站 2 项、微博 2 项、头条评论、好看互动量/评论、
+快手互动量/一级评论、小红书互动量/首屏评论。小红书后续评论页和公众号任意文章互动/评论
+没有接入付费接口，也不会把首屏、空包或聚合站缓存冒充为成功。公众号接口仍区分作者关闭
+评论与原生会话 `no session`。
 
-仍不应硬编码或伪造：公众号文章会话参数、小红书动态签名、快手短期游客验证状态和抖音临时 Cookie。浏览器会自行生成游客状态；遇到验证码或空响应时，接口返回 `blocked/unsupported` 与原因。
+仍不应硬编码或伪造：公众号文章会话参数、小红书动态签名、快手短期游客验证状态和抖音
+临时 Cookie。抖音签名和第一方访客标识现已在运行时生成；其他游客状态由浏览器生成。遇到
+验证码或空响应时，接口返回 `blocked/unsupported` 与原因。
 
 运行时使用 `--direct` 可排除代理池质量对协议验证的干扰；生产环境仍可使用 Stock 项目同源的 51 代理池，但应把代理失败和平台返回分开记录。
 
@@ -65,8 +67,8 @@ Cookie 交给服务端配置。
   自己的会话，不虚构匿名深分页。
 - 公众号匿名 `/mp/getappmsgext` 可能返回 `ret=0` 但不含统计，`/mp/appmsg_comment`
   无文章会话返回 `ret=-3`；只有 HTML 已预载的精选评论可直接解析。
-- 抖音公开纯算项目仍需要临时 Cookie/设备状态，部分项目也明确说明业务接口会触发
-  anti-bot wall；未经过当前真实接口验收的 signer 不替换现有已验证路径。
+- 抖音按公开实现交叉还原后，用当前 UA、请求参数顺序、第一方 `ttwid` 和本地 `a_bogus`
+  完成真实验收；详情和评论均在同一匿名会话返回有效数据，浏览器降为备用路径。
 - 好看视频无需复制第三方算法：同一纯协议会话先访问首页，再访问目标页即可得到目标
   SSR，且可用 `og:url` 校验没有误读推荐视频。
 
@@ -82,3 +84,5 @@ Cookie 交给服务端配置。
 - <https://developers.weixin.qq.com/doc/offiaccount/Analytics/Graphic_Analysis_Data_Interface.html>
 - <https://github.com/intAV/Douyin_live_like>
 - <https://github.com/tamnd/douyin-cli>
+- <https://github.com/Johnserf-Seed/f2/blob/main/f2/utils/abogus.py>
+- <https://github.com/runningZ1/short_video_py/tree/main/api/douyin%20new/cloudflare%20workers>

@@ -11,6 +11,20 @@ cp .env.example .local/env/.env
 部署时将真实的 `PROXY_51_API_URL`、平台会话 Cookie 等值写入
 `.local/env/.env`。该目录已被 Git 忽略，不应提交或打印敏感值。
 
+生产默认资源上限为 4 个采集、2 个浏览器、2 个代理 IP。低于约 2 GB 可用内存时建议：
+
+```dotenv
+BROWSER_MAX_CONCURRENCY=1
+COLLECTION_MAX_CONCURRENCY=4
+PROXY_POOL_SIZE=2
+PROXY_MAX_CONCURRENCY=2
+ENGAGEMENT_CACHE_TTL_SECONDS=120
+ENGAGEMENT_CACHE_MAX_ENTRIES=1000
+```
+
+Uvicorn 建议只启动 1 个 worker；每增加一个 worker 都会复制浏览器并发槽位、缓存和代理池，
+不能靠多 worker 提高本项目吞吐。容量和成本估算见 `docs/COST_AND_CAPACITY.md`。
+
 代理模式由 `PROXY_MODE` 控制：
 
 - `direct`：本机直连；

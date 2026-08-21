@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import secrets
 from typing import Any
+from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 
@@ -11,15 +13,23 @@ from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
 from app.crawlers.platforms.base import PlatformCrawlerContext
 from app.crawlers.platforms.common import (
     COMMENT_PAGE_SIZE,
-    DESKTOP_USER_AGENT,
     result_error,
     to_int,
 )
+from app.crawlers.platforms.douyin_abogus import DouyinABogusSigner
 from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
 
 
 DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
 COMMENT_URL = "https://www.douyin.com/aweme/v1/web/comment/list/"
+TTWID_REGISTER_URL = "https://ttwid.bytedance.com/ttwid/union/register/"
+MSTOKEN_ALPHABET = "ABCDEFGHIGKLMNOPQRSTUVWXYZabcdefghigklmnopqrstuvwxyz0123456789="
+DOUYIN_PROTOCOL_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/123.0.0.0 Safari/537.36"
+)
+_SIGNER = DouyinABogusSigner(DOUYIN_PROTOCOL_USER_AGENT)
 
 
 async def fetch(
@@ -32,51 +42,20 @@ async def fetch(
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
-    if not crawler.cookies.strip():
-        return result_error(
-            "douyin",
-            url,
-            work_id,
-            "unsupported",
-            "抖音详情/评论请求需要 a_bogus 之外的动态设备会话；需调用方提供自己的有效会话 Cookie，不能硬编码临时 Cookie",
-        )
+    referer = f"https://www.douyin.com/video/{work_id}?previous_page=web_code_link"
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": f"https://www.douyin.com/video/{work_id}",
-        "User-Agent": DESKTOP_USER_AGENT,
-    }
-    common_params = {
-        "device_platform": "webapp",
-        "aid": "6383",
-        "channel": "channel_pc_web",
-        "aweme_id": work_id,
-        "request_source": "600",
-        "origin_type": "video_page",
-        "update_version_code": "170400",
-        "pc_client_type": "1",
-        "pc_libra_divert": "Windows",
-        "support_h265": "1",
-        "support_dash": "1",
-        "cpu_core_num": "8",
-        "version_code": "170400",
-        "version_name": "17.4.0",
-        "cookie_enabled": "true",
-        "screen_width": "1920",
-        "screen_height": "1080",
-        "browser_language": "zh-CN",
-        "browser_platform": "Win32",
-        "browser_name": "Chrome",
-        "browser_version": "124.0.0.0",
-        "browser_online": "true",
-        "engine_name": "Blink",
-        "engine_version": "124.0.0.0",
-        "os_name": "Windows",
-        "os_version": "10",
-        "device_memory": "8",
-        "platform": "PC",
+        "Referer": referer,
+        "User-Agent": DOUYIN_PROTOCOL_USER_AGENT,
     }
     try:
+        cookie = crawler._platform_cookie("douyin")
+        if cookie:
+            headers["Cookie"] = cookie
+        else:
+            headers["Cookie"] = await prepare_anonymous_session(crawler, referer)
+
         stats = EngagementStats()
         comments: list[EngagementComment] = []
         next_cursor: str | None = None
@@ -86,7 +65,13 @@ async def fetch(
         if include_stats:
             detail_response = await crawler._get_response(
                 DETAIL_URL,
-                params=common_params,
+                params=signed_params({
+                    "device_platform": "webapp",
+                    "aid": "6383",
+                    "channel": "channel_pc_web",
+                    "aweme_id": work_id,
+                    "msToken": random_ms_token(),
+                }),
                 headers=headers,
                 include_cookies=True,
             )
@@ -124,17 +109,21 @@ async def fetch(
             cursor = "0"
             for current_page in range(1, page + 1):
                 comment_params = {
-                    **common_params,
+                    "device_platform": "webapp",
+                    "aid": "6383",
+                    "channel": "channel_pc_web",
+                    "aweme_id": work_id,
                     "cursor": cursor,
                     "count": str(min(limit, COMMENT_PAGE_SIZE)),
                     "item_type": "0",
                     "whale_cut_token": "",
                     "cut_version": "1",
                     "rcFT": "",
+                    "msToken": random_ms_token(),
                 }
                 comment_response = await crawler._get_response(
                     COMMENT_URL,
-                    params=comment_params,
+                    params=signed_params(comment_params),
                     headers=headers,
                     include_cookies=True,
                 )
@@ -178,6 +167,58 @@ async def fetch(
         return result_error("douyin", url, work_id, "blocked", str(exc))
     except Exception as exc:
         return result_error("douyin", url, work_id, "failed", str(exc))
+
+
+async def prepare_anonymous_session(
+    crawler: PlatformCrawlerContext,
+    referer: str,
+) -> str:
+    """Create a fresh first-party visitor cookie without a user login."""
+
+    await crawler._get_response(
+        referer,
+        headers={
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "User-Agent": DOUYIN_PROTOCOL_USER_AGENT,
+        },
+    )
+    response = await crawler._post_response(
+        TTWID_REGISTER_URL,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": DOUYIN_PROTOCOL_USER_AGENT,
+        },
+        json_body={
+            "region": "cn",
+            "aid": 6383,
+            "need_t": 1,
+            "service": "www.douyin.com",
+            "migrate_priority": 0,
+            "cb_url_protocol": "https",
+            "domain": ".douyin.com",
+        },
+    )
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise PlatformCrawlerError("抖音访客标识初始化返回非 JSON") from exc
+    if payload.get("status_code") not in {0, None}:
+        raise PlatformCrawlerError("抖音访客标识初始化失败")
+    cookie_jar = getattr(response, "cookies", None)
+    ttwid = str(cookie_jar.get("ttwid") if cookie_jar is not None else "").strip()
+    if not ttwid:
+        raise PlatformCrawlerError("抖音访客标识初始化未返回 ttwid")
+    return f"ttwid={ttwid}"
+
+
+def random_ms_token(length: int = 107) -> str:
+    return "".join(secrets.choice(MSTOKEN_ALPHABET) for _ in range(length))
+
+
+def signed_params(params: dict[str, str]) -> dict[str, str]:
+    query = urlencode(params)
+    return {**params, "a_bogus": _SIGNER.sign(query)}
 
 
 def parse_comments(

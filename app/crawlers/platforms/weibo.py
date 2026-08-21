@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
+import re
 from typing import Any
+from urllib.parse import unquote
 
 from bs4 import BeautifulSoup
 
@@ -24,10 +26,17 @@ async def fetch(
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
+    cookie = crawler._platform_cookie("weibo")
     headers = {
         "Referer": f"https://m.weibo.cn/detail/{work_id}",
         "X-Requested-With": "XMLHttpRequest",
+        "MWeibo-Pwa": "1",
     }
+    if cookie:
+        headers["Cookie"] = cookie
+        xsrf_match = re.search(r"(?:^|;\s*)XSRF-TOKEN=([^;]+)", cookie, re.I)
+        if xsrf_match:
+            headers["X-XSRF-TOKEN"] = unquote(xsrf_match.group(1))
     try:
         stats = EngagementStats()
         comments: list[EngagementComment] = []
@@ -48,12 +57,13 @@ async def fetch(
             sources.append("m.weibo.cn/statuses/show")
         if include_comments:
             request_cursor: str | None = None
+            request_cursor_type = 0
             used_numbered_fallback = False
             for current_page in range(1, page + 1):
                 params: dict[str, Any] = {
                     "id": work_id,
                     "mid": work_id,
-                    "max_id_type": 0,
+                    "max_id_type": request_cursor_type,
                 }
                 if request_cursor is not None:
                     params["max_id"] = request_cursor
@@ -81,8 +91,9 @@ async def fetch(
                     used_numbered_fallback = True
                     break
                 comments, cursor = parse_comments(comments_payload)
+                comment_data = comments_payload.get("data") or {}
+                request_cursor_type = to_int(comment_data.get("max_id_type")) or 0
                 if not include_stats:
-                    comment_data = comments_payload.get("data") or {}
                     total = to_int(
                         comment_data.get("total_number")
                         or comments_payload.get("total_number")
@@ -106,7 +117,11 @@ async def fetch(
             work_id=work_id,
             coverage="partial",
             reason=(
-                "微博访客评论接口可能折叠或限流，不能证明评论全集"
+                (
+                    "微博当前会话可读取热门评论分页，不能证明隐藏或已删除评论全集"
+                    if cookie
+                    else "微博访客评论接口可能折叠或限流，不能证明评论全集"
+                )
                 if include_comments else "微博访客详情接口提供当前公开互动量"
             ),
             source=" + ".join(sources),

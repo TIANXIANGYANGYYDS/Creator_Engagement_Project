@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 import inspect
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Literal, Protocol, runtime_checkable
 
 from curl_cffi import requests as curl_requests
 
@@ -16,6 +19,13 @@ class PlatformCrawlerError(RuntimeError):
 
 class PlatformBlockedError(PlatformCrawlerError):
     """The platform rejected an otherwise valid public request."""
+
+
+@dataclass
+class _ProxyLeaseState:
+    proxies: dict[str, str] | None = None
+    acquired: bool = False
+    failed: bool = False
 
 
 @runtime_checkable
@@ -63,6 +73,30 @@ class CurlAsyncHttpClient:
         )
         self.proxy_provider = proxy_provider
         self.proxy_mode = proxy_mode
+        self._lease_state: ContextVar[_ProxyLeaseState | None] = ContextVar(
+            "creator_engagement_proxy_lease",
+            default=None,
+        )
+
+    @asynccontextmanager
+    async def lease_scope(self) -> AsyncIterator[None]:
+        """Keep one lazily-acquired proxy lease for one collection operation."""
+
+        state = _ProxyLeaseState()
+        token = self._lease_state.set(state)
+        try:
+            yield
+        finally:
+            self._lease_state.reset(token)
+            if state.acquired and state.proxies is not None:
+                callback = "on_failure_for" if state.failed else "on_success_for"
+                error = RuntimeError("collection proxy lease failed") if state.failed else None
+                await self._notify_proxy(
+                    callback,
+                    "on_failure" if state.failed else "on_success",
+                    state.proxies,
+                    error,
+                )
 
     async def get(
         self,
@@ -101,10 +135,21 @@ class CurlAsyncHttpClient:
         data: str | bytes | dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> Any:
-        attempts = 2 if self.proxy_provider is not None and self.proxy_mode != "direct" else 1
+        lease_state = self._lease_state.get()
+        attempts = (
+            1
+            if lease_state is not None
+            else (2 if self.proxy_provider is not None and self.proxy_mode != "direct" else 1)
+        )
         last_error: Exception | None = None
         for attempt in range(attempts):
-            proxies = await self._acquire_proxy()
+            if lease_state is not None:
+                if not lease_state.acquired:
+                    lease_state.proxies = await self._acquire_proxy()
+                    lease_state.acquired = True
+                proxies = lease_state.proxies
+            else:
+                proxies = await self._acquire_proxy()
             proxy_url = (proxies or {}).get("https") or (proxies or {}).get("http")
             try:
                 request = getattr(self._session, "request", None)
@@ -136,19 +181,25 @@ class CurlAsyncHttpClient:
                     )
             except Exception as exc:
                 last_error = exc
-                await self._notify_proxy("on_failure_for", "on_failure", proxies, exc)
+                if lease_state is not None:
+                    lease_state.failed = True
+                else:
+                    await self._notify_proxy("on_failure_for", "on_failure", proxies, exc)
                 if attempt + 1 < attempts:
                     continue
                 raise
             status = int(getattr(response, "status_code", 0))
             if status in {403, 407, 412, 418, 429, 432, 471} or status >= 500:
-                await self._notify_proxy(
-                    "on_failure_for",
-                    "on_failure",
-                    proxies,
-                    RuntimeError(f"proxy request returned HTTP {status}"),
-                )
-            else:
+                if lease_state is not None:
+                    lease_state.failed = True
+                else:
+                    await self._notify_proxy(
+                        "on_failure_for",
+                        "on_failure",
+                        proxies,
+                        RuntimeError(f"proxy request returned HTTP {status}"),
+                    )
+            elif lease_state is None:
                 await self._notify_proxy("on_success_for", "on_success", proxies)
             return response
         assert last_error is not None

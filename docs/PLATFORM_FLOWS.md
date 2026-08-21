@@ -2,7 +2,7 @@
 
 本文对应 `app/crawlers/platforms/` 下的八个实现文件。公共 API 不包含平台条件分支；
 `EngagementCrawler` 根据 `media_name + URL` 选择一个处理器，协议结果不可用时再进入统一
-Camoufox 兜底。互动量和评论始终是两条独立请求路径：
+Camoufox 兜底。互动量和评论仍是两条独立外部接口，但首页在服务内部合并采集：
 
 ```text
 GET /api/v1/interactions?url=...&media_name=...
@@ -10,17 +10,27 @@ GET /api/v1/interactions?url=...&media_name=...
 
 GET /api/v1/comments?url=...&media_name=...&page=N
   -> include_stats=false, include_comments=true
+
+内部 page=1：include_stats=true + include_comments=true
+  -> 同一代理租约 -> 同一协议/浏览器会话 -> 120 秒缓存
 ```
+
+因此两个接口无论谁先到达，第二个都直接投影缓存结果；同时到达的相同 URL 请求会合并成
+一个任务。只有评论 `page>1` 独立执行分页流程。
 
 ## 抖音
 
 代码：`app/crawlers/platforms/douyin.py`
 
-- 互动量：带调用方抖音 Cookie 请求 `/aweme/v1/web/aweme/detail/`，解析播放、点赞、
-  评论、分享、收藏等字段。
-- 评论：从 cursor=0 开始请求 `/aweme/v1/web/comment/list/`，按公开 `page` 顺序遍历游标。
+- 匿名会话：先打开目标页预热，再向第一方 `ttwid/union/register` 初始化访客标识；不使用
+  固定 Cookie，也不要求账号。
+- 签名：每个请求生成 107 字符 `msToken`，用纯 Python SM3/RC4 实现即时计算 `a_bogus`。
+- 互动量：请求 `/aweme/v1/web/aweme/detail/`，解析播放、点赞、评论、分享、收藏等字段。
+- 评论：从 cursor=0 开始请求 `/aweme/v1/web/comment/list/`，按公开 `page` 顺序遍历游标；
+  访客实测首屏 20 条、总数 2909。
 - 失败处理：HTTP 200 空包不算成功；标记 `blocked` 后进入目标作品页浏览器兜底。
-- 会话边界：不硬编码 Cookie、`a_bogus` 或设备参数；临时状态由调用方会话或浏览器生成。
+- 会话边界：访客 `ttwid` 只保留在当前请求/客户端生命周期；可选调用方 Cookie 仍只注入
+  抖音域，临时状态不会写入源码或日志。
 
 ## 今日头条
 

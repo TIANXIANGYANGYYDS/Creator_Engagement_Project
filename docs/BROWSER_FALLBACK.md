@@ -9,6 +9,10 @@
 
 - `EngagementService.from_settings()` 创建一个 `BrowserFallback`，与协议客户端共用
   同一个 51 代理池。
+- 浏览器全局并发由 `BROWSER_MAX_CONCURRENCY` 限制；同一平台另外串行执行，避免多个进程
+  同时写一个持久化 Profile。默认最多 2 个浏览器，低内存服务器建议设为 1。
+- 互动接口和评论首页先合并为一个内部任务；只有协议结果仍不可用时才启动一次浏览器，
+  浏览器返回的统计和评论同时进入 120 秒缓存。
 - 每个平台使用独立的 `.local/browser-profiles/<platform>` 持久化 Profile，平台生成的
   `ttwid`、`msToken`、`UIFID`、`x-s` 等状态由浏览器自己维护并自然过期。
 - `CREATOR_ENGAGEMENT_COOKIE` 是兼容 Stock 配置的抖音会话，只注入抖音域名，既不打印也
@@ -30,6 +34,7 @@ BROWSER_FALLBACK_ENABLED=true
 BROWSER_TIMEOUT_SECONDS=35
 BROWSER_CHALLENGE_WAIT_SECONDS=5
 BROWSER_HEADLESS=true
+BROWSER_MAX_CONCURRENCY=2
 BROWSER_PROFILE_DIR=".local/browser-profiles"
 PLATFORM_SESSION_DIR=".local/platform-sessions"
 ```
@@ -40,10 +45,9 @@ Xvfb 的运行环境单独配置，不要把人工验证码结果提交到仓库
 
 ## 当前证据边界
 
-抖音已验证：浏览器详情页会产生 `/aweme/v1/web/aweme/detail/` 有效 JSON，统计字段可
-直接解析；同一页面的 `/aweme/v1/web/comment/list/` 在无会话时可能 HTTP 200 空包。
-这类结果会保留统计并明确说明评论未返回。安全验证或验证码页会报告阻断，不会把推荐流
-或无关页面文案当成目标作品数据。
+抖音匿名纯协议已验证能同时取得 `/aweme/v1/web/aweme/detail/` 和
+`/aweme/v1/web/comment/list/`，常规请求不再启动浏览器。协议出现 HTTP 200 空包时仍保留
+本兜底；安全验证或验证码页会报告阻断，不会把推荐流或无关页面文案当成目标作品数据。
 
 快手游客页会自动生成 `kwssectoken/kwscode` 等设备状态；项目在同一页面上下文请求目标
 `visionVideoDetail` 和一级评论 REST 接口，无需用户登录。小红书游客页可返回首屏评论，

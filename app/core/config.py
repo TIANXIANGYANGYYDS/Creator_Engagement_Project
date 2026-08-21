@@ -34,7 +34,7 @@ class Settings(BaseSettings):
         default="prefer",
         alias="PROXY_MODE",
     )
-    proxy_pool_size: int = Field(default=4, alias="PROXY_POOL_SIZE", ge=1, le=200)
+    proxy_pool_size: int = Field(default=2, alias="PROXY_POOL_SIZE", ge=1, le=200)
     proxy_max_concurrency: int = Field(
         default=2,
         alias="PROXY_MAX_CONCURRENCY",
@@ -53,6 +53,21 @@ class Settings(BaseSettings):
         alias="REQUEST_TIMEOUT_SECONDS",
         gt=0,
     )
+    collection_max_concurrency: int = Field(
+        default=4,
+        alias="COLLECTION_MAX_CONCURRENCY",
+        ge=1,
+    )
+    engagement_cache_ttl_seconds: float = Field(
+        default=120,
+        alias="ENGAGEMENT_CACHE_TTL_SECONDS",
+        ge=0,
+    )
+    engagement_cache_max_entries: int = Field(
+        default=1000,
+        alias="ENGAGEMENT_CACHE_MAX_ENTRIES",
+        ge=1,
+    )
     browser_fallback_enabled: bool = Field(default=True, alias="BROWSER_FALLBACK_ENABLED")
     browser_timeout_seconds: float = Field(default=35, alias="BROWSER_TIMEOUT_SECONDS", gt=0)
     browser_challenge_wait_seconds: float = Field(
@@ -61,6 +76,11 @@ class Settings(BaseSettings):
         ge=0,
     )
     browser_headless: bool = Field(default=True, alias="BROWSER_HEADLESS")
+    browser_max_concurrency: int = Field(
+        default=2,
+        alias="BROWSER_MAX_CONCURRENCY",
+        ge=1,
+    )
     browser_profile_dir: str = Field(
         default=".local/browser-profiles",
         alias="BROWSER_PROFILE_DIR",

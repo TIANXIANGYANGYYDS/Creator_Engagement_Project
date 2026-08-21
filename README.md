@@ -54,9 +54,10 @@ conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement 
 conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 ```
 
-可选的抖音调用方 Cookie 通过 `CREATOR_ENGAGEMENT_COOKIE` 环境变量注入，不会写入输出；
-为兼容 Stock_Project 现有环境，也接受 `DOUYIN_SESSION_COOKIE` 作为回退变量名。该 Cookie
-只会注入抖音域名，不会污染快手、小红书等平台的游客会话。
+抖音默认会自行初始化第一方访客 `ttwid`、生成随机 `msToken` 并用纯 Python 计算
+`a_bogus`，不要求登录。可选的调用方 Cookie 仍可通过 `CREATOR_ENGAGEMENT_COOKIE`
+注入；为兼容 Stock_Project 现有环境，也接受 `DOUYIN_SESSION_COOKIE` 作为回退变量名。
+该 Cookie 只会注入抖音域名，不会污染快手、小红书等平台的游客会话。
 
 快手公开作品默认使用浏览器自动生成的游客设备会话，不需要账号。小红书游客态可读取公开
 互动量和首屏评论。项目不接入付费数据供应商；小红书评论深分页和任意公众号文章的互动/
@@ -94,7 +95,13 @@ LLM、Mongo、51 代理 API 和日志参数。当前代理模式：
 - `PROXY_MODE=required`：必须取得代理，否则请求直接失败，不会静默直连。
 
 51 代理池沿用 Stock_Project 的 3 分钟 IP TTL、批量补池、单 IP 并发上限、失败淘汰、
-过期排空和供应商 API 限流机制。互动采集请求通过 `CurlAsyncHttpClient` 统一租约和归还代理。
+过期排空和供应商 API 限流机制。一次 URL 首屏采集内的预热、互动量和评论请求共享一个
+代理租约；互动接口与评论首页接口的外部契约仍然分开，但内部共享同一次采集结果。
+
+服务默认最多同时运行 4 个采集任务、2 个浏览器任务，代理池只保留 2 个 IP；同一 URL
+的并发重复请求会合并，结果缓存 120 秒（最多 1000 项）。需要更保守的低内存配置时可把
+`BROWSER_MAX_CONCURRENCY=1`。配置项、真实内存测试和 51 代理成本公式见
+[`docs/COST_AND_CAPACITY.md`](docs/COST_AND_CAPACITY.md)。
 
 运行时以最终获取数据为验收标准：先走成本更低的协议请求；协议返回
 `unsupported/blocked/failed`、空响应或缺少目标字段时，如果
@@ -129,7 +136,7 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | 微博 | 点赞、评论、转发和匿名评论分页 | `statuses/show`、`comments/hotflow`、`api/comments/show` | 可用，访客态部分覆盖 |
 | 好看 | 播放、点赞、评论总数和一级评论 | 目标页 SSR、`haokan/ui-web/v2/comment/get` | 纯协议匿名可用；收藏/分享未公开 |
 | 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 游客 SSR/浏览器首屏；自有会话 `xhshow` | 首屏无需账号；游客态不承诺深分页 |
-| 抖音 | 协议优先，浏览器会话可捕获详情统计；评论按真实响应判定 | `/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 详情已 smoke 验证；匿名评论可能 HTTP 200 空包 |
+| 抖音 | 匿名纯协议互动量和评论分页；浏览器仅作风控兜底 | 第一方访客 `ttwid`、纯 Python `a_bogus`、`/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 真实首屏 20 条、总数 2909；平台隐藏 `play_count` 时播放保持 `null` |
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
 | 公众号 | 页面公开字段；有文章会话时读取互动和评论 | 页面 SSR、`getappmsgext`、`appmsg_comment` | 任意文章匿名互动/评论无稳定免费接口；官方统计只适用于自有公众号授权 |
 | 快手 | 播放、点赞、评论总数和一级评论 | 游客页 `visionVideoDetail`、`/rest/v/photo/comment/list` | 无需账号；严格校验目标 ID，挑战失败时明确 blocked |
@@ -138,7 +145,10 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 `/用户ID/base62短ID` 和 `live.bilibili.com/{room_id}`。这些变体只在路由层规范化，平台
 采集器仍使用同一套目标 ID 校验，不会把用户 ID、推荐内容或其他房间数据当成目标作品。
 
-不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音详情接口在当前版本对匿名请求稳定返回 HTTP 200 空包；需要读取统计时，通过 `CREATOR_ENGAGEMENT_COOKIE` 注入调用方自己的会话 Cookie。该 Cookie 不会写入代码或日志，过期、无效或缺少设备风控字段时结果会明确标成 `blocked`/`failed`。B 站评论的 WBI 密钥每次从公开导航接口动态读取，不依赖浏览器或登录 Cookie。
+不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音的
+访客状态由运行时向第一方初始化，`a_bogus` 由本地算法按请求即时计算；若协议受风控，
+再进入浏览器兜底。B 站评论的 WBI 密钥每次从公开导航接口动态读取，不依赖浏览器或登录
+Cookie。
 
 逐项证据和“无法稳定获取”的阻断原因见 [`docs/PROTOCOL_MATRIX.md`](docs/PROTOCOL_MATRIX.md)，
 代码入口和执行顺序见 [`docs/PLATFORM_FLOWS.md`](docs/PLATFORM_FLOWS.md)。

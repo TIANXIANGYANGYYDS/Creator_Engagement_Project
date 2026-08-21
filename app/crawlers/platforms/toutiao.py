@@ -33,7 +33,7 @@ async def fetch(
         stats = EngagementStats()
         sources: list[str] = []
         reason = ""
-        if include_stats and not include_comments:
+        if include_stats:
             try:
                 article_response = await crawler._get_response(
                     f"https://www.toutiao.com/article/{work_id}/",
@@ -82,6 +82,8 @@ async def fetch(
         total = to_int(payload.get("total_number"))
         offset = to_int(payload.get("offset"))
         has_more = bool(payload.get("has_more"))
+        if total is not None:
+            stats.comments = total
         return EngagementResult(
             platform="toutiao",
             canonical_url=f"https://www.toutiao.com/article/{work_id}/",
@@ -89,7 +91,7 @@ async def fetch(
             coverage="partial",
             reason="头条评论接口可匿名读取指定页，不能证明评论全集",
             source="article/v4/tab_comments",
-            stats=EngagementStats(comments=total),
+            stats=stats,
             comments=comments[:limit],
             next_cursor=str(offset) if has_more and offset is not None else None,
         )

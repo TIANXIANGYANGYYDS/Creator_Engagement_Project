@@ -60,6 +60,16 @@ class FakeProxyProvider:
         return None
 
 
+class CountingProxyProvider(FakeProxyProvider):
+    def __init__(self, proxies: dict[str, str]) -> None:
+        super().__init__(proxies)
+        self.acquisitions = 0
+
+    async def get_requests_proxies(self) -> dict[str, str] | None:
+        self.acquisitions += 1
+        return self.proxies
+
+
 class SequencedSession:
     def __init__(self, *outcomes: FakeResponse | Exception) -> None:
         self.outcomes = list(outcomes)
@@ -120,6 +130,30 @@ def test_post_uses_and_releases_proxy_lease() -> None:
 
     assert session.calls[0]["proxy"] == proxies["https"]
     assert session.calls[0]["json"] == {"query": "detail"}
+    assert provider.successes == [proxies]
+
+
+def test_collection_scope_reuses_one_proxy_for_multiple_requests() -> None:
+    proxies = {"https": "http://127.0.0.1:8080"}
+    provider = CountingProxyProvider(proxies)
+    session = FakeSession()
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=provider,
+        proxy_mode="prefer",
+        session=session,
+    )
+
+    async def run() -> None:
+        async with client.lease_scope():
+            await client.get("https://example.com/detail")
+            await client.post("https://example.com/comments")
+
+    asyncio.run(run())
+
+    assert provider.acquisitions == 1
+    assert [call["proxy"] for call in session.calls] == [proxies["https"], proxies["https"]]
     assert provider.successes == [proxies]
 
 

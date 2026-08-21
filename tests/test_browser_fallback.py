@@ -4,6 +4,7 @@ import asyncio
 
 from app.crawlers.browser_fallback import (
     BrowserFallback,
+    BrowserFallbackSettings,
     _browser_target_url,
     _number,
     _parse_douyin,
@@ -12,7 +13,7 @@ from app.crawlers.browser_fallback import (
     _parse_xhs,
 )
 from app.crawlers.engagement import EngagementCrawler
-from app.models.engagement import EngagementStats
+from app.models.engagement import EngagementResult, EngagementStats
 
 
 class FakeClient:
@@ -51,6 +52,39 @@ class FakeBrowserContext:
 
     async def add_cookies(self, cookies) -> None:
         self.cookies.extend(cookies)
+
+
+def test_browser_fallback_has_a_global_concurrency_limit() -> None:
+    class CountingBrowserFallback(BrowserFallback):
+        def __init__(self) -> None:
+            super().__init__(settings=BrowserFallbackSettings(max_concurrency=2))
+            self.active = 0
+            self.max_active = 0
+
+        async def _fetch_locked(self, url, platform, work_id, **kwargs):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            return EngagementResult(
+                platform=platform,
+                canonical_url=url,
+                work_id=work_id,
+                coverage="partial",
+            )
+
+    async def run() -> CountingBrowserFallback:
+        browser = CountingBrowserFallback()
+        await asyncio.gather(
+            browser.fetch("u1", "douyin", "1", page=1, limit=20, include_stats=True, include_comments=True),
+            browser.fetch("u2", "kuaishou", "2", page=1, limit=20, include_stats=True, include_comments=True),
+            browser.fetch("u3", "weibo", "3", page=1, limit=20, include_stats=True, include_comments=True),
+        )
+        return browser
+
+    browser = asyncio.run(run())
+
+    assert browser.max_active == 2
 
 
 def test_protocol_unsupported_result_uses_browser_fallback() -> None:

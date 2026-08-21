@@ -29,6 +29,16 @@ class PlatformCrawlerContext(Protocol):
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
+    async def _post_response(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        data: str | bytes | dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any: ...
+
     async def _get_response(
         self,
         url: str,

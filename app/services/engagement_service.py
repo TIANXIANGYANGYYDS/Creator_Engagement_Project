@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from pathlib import Path
+from time import monotonic
 from typing import Iterable, Literal
 
 from app.core.config import Settings
 from app.crawlers.browser_fallback import BrowserFallback, BrowserFallbackSettings
 from app.crawlers.engagement import EngagementCrawler
 from app.crawlers.platform_session import PlatformSessionStore
+from app.crawlers.platforms.registry import normalize_media_name
 from app.crawlers.proxy_provider import AsyncDailiProxyPool, AsyncProxyProvider
 from app.models.engagement import CommentPageResult, EngagementResult, InteractionResult
 
@@ -20,9 +23,26 @@ class EngagementService:
         crawler: EngagementCrawler,
         *,
         proxy_provider: AsyncProxyProvider | None = None,
+        collection_max_concurrency: int = 4,
+        cache_ttl_seconds: float = 120,
+        cache_max_entries: int = 1000,
     ) -> None:
+        if collection_max_concurrency <= 0:
+            raise ValueError("collection_max_concurrency must be greater than zero")
+        if cache_ttl_seconds < 0:
+            raise ValueError("cache_ttl_seconds must not be negative")
+        if cache_max_entries <= 0:
+            raise ValueError("cache_max_entries must be greater than zero")
         self.crawler = crawler
         self.proxy_provider = proxy_provider
+        self._collection_semaphore = asyncio.Semaphore(collection_max_concurrency)
+        self._cache_ttl_seconds = cache_ttl_seconds
+        self._cache_max_entries = cache_max_entries
+        self._bundle_cache: OrderedDict[
+            tuple[str, str], tuple[float, EngagementResult]
+        ] = OrderedDict()
+        self._bundle_tasks: dict[tuple[str, str], asyncio.Task[EngagementResult]] = {}
+        self._cache_lock = asyncio.Lock()
 
     @classmethod
     def from_settings(
@@ -49,6 +69,7 @@ class EngagementService:
                     timeout_seconds=settings.browser_timeout_seconds,
                     challenge_wait_seconds=settings.browser_challenge_wait_seconds,
                     headless=settings.browser_headless,
+                    max_concurrency=settings.browser_max_concurrency,
                     profile_dir=Path(settings.browser_profile_dir),
                 ),
                 proxy_provider=provider,
@@ -62,13 +83,23 @@ class EngagementService:
             browser_fallback=browser_fallback,
             session_store=PlatformSessionStore(Path(settings.platform_session_dir)),
         )
-        return cls(crawler, proxy_provider=provider)
+        return cls(
+            crawler,
+            proxy_provider=provider,
+            collection_max_concurrency=settings.collection_max_concurrency,
+            cache_ttl_seconds=settings.engagement_cache_ttl_seconds,
+            cache_max_entries=settings.engagement_cache_max_entries,
+        )
 
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
-        return await self.crawler.fetch(url, comment_limit=comment_limit)
+        async with self._collection_semaphore:
+            return await self.crawler.fetch(url, comment_limit=comment_limit)
 
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
-        return await self.crawler.fetch_interactions(url, media_name)
+        result = await self._fetch_bundle(url, media_name)
+        return InteractionResult.model_validate(
+            result.model_dump(exclude={"comments", "next_cursor"})
+        )
 
     async def fetch_comments(
         self,
@@ -76,7 +107,59 @@ class EngagementService:
         media_name: str,
         page: int,
     ) -> CommentPageResult:
-        return await self.crawler.fetch_comments(url, media_name, page)
+        if page <= 0:
+            raise ValueError("page must be greater than zero")
+        if page == 1:
+            result = await self._fetch_bundle(url, media_name)
+            return CommentPageResult.model_validate({
+                **result.model_dump(exclude={"stats", "next_cursor"}),
+                "page": 1,
+                "next_page": 2 if result.next_cursor is not None else None,
+                "total_comments": result.stats.comments,
+            })
+        async with self._collection_semaphore:
+            return await self.crawler.fetch_comments(url, media_name, page)
+
+    async def _fetch_bundle(self, url: str, media_name: str) -> EngagementResult:
+        key = (normalize_media_name(media_name), url)
+        now = monotonic()
+        async with self._cache_lock:
+            while self._bundle_cache:
+                oldest_key, (expires_at, _) = next(iter(self._bundle_cache.items()))
+                if expires_at > now:
+                    break
+                self._bundle_cache.pop(oldest_key)
+            cached = self._bundle_cache.get(key)
+            if cached is not None and cached[0] > now:
+                self._bundle_cache.move_to_end(key)
+                return cached[1].model_copy(deep=True)
+            task = self._bundle_tasks.get(key)
+            if task is None:
+                task = asyncio.create_task(self._collect_bundle(url, media_name))
+                self._bundle_tasks[key] = task
+        try:
+            result = await asyncio.shield(task)
+        except Exception:
+            async with self._cache_lock:
+                if self._bundle_tasks.get(key) is task:
+                    self._bundle_tasks.pop(key, None)
+            raise
+        async with self._cache_lock:
+            if self._bundle_tasks.get(key) is task:
+                self._bundle_tasks.pop(key, None)
+            if self._cache_ttl_seconds > 0:
+                self._bundle_cache[key] = (
+                    monotonic() + self._cache_ttl_seconds,
+                    result.model_copy(deep=True),
+                )
+                self._bundle_cache.move_to_end(key)
+                while len(self._bundle_cache) > self._cache_max_entries:
+                    self._bundle_cache.popitem(last=False)
+        return result.model_copy(deep=True)
+
+    async def _collect_bundle(self, url: str, media_name: str) -> EngagementResult:
+        async with self._collection_semaphore:
+            return await self.crawler.fetch_bundle(url, media_name)
 
     async def fetch_many(
         self,
@@ -96,6 +179,12 @@ class EngagementService:
         return list(await asyncio.gather(*(fetch_one(url) for url in urls)))
 
     async def aclose(self) -> None:
+        tasks = list(self._bundle_tasks.values())
+        self._bundle_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.crawler.aclose()
         if self.proxy_provider is not None:
             await self.proxy_provider.close()

@@ -81,6 +81,18 @@ class EngagementCrawler:
             include_comments=True,
         )
 
+    async def fetch_bundle(self, url: str, media_name: str) -> EngagementResult:
+        """Collect first-page statistics and comments in one upstream session."""
+
+        return await self._fetch(
+            url,
+            media_name=media_name,
+            limit=COMMENT_PAGE_SIZE,
+            page=1,
+            include_stats=True,
+            include_comments=True,
+        )
+
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
         result = await self._fetch(
             url,
@@ -138,15 +150,28 @@ class EngagementCrawler:
                 f"{platform} protocol collector is not registered",
             )
         else:
-            result = await handler(
-                self,
-                url,
-                work_id,
-                limit,
-                page=page,
-                include_stats=include_stats,
-                include_comments=include_comments,
-            )
+            lease_scope = getattr(self.client, "lease_scope", None)
+            if callable(lease_scope):
+                async with lease_scope():
+                    result = await handler(
+                        self,
+                        url,
+                        work_id,
+                        limit,
+                        page=page,
+                        include_stats=include_stats,
+                        include_comments=include_comments,
+                    )
+            else:
+                result = await handler(
+                    self,
+                    url,
+                    work_id,
+                    limit,
+                    page=page,
+                    include_stats=include_stats,
+                    include_comments=include_comments,
+                )
 
         if self._should_use_browser_fallback(
             result,
