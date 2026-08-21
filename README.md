@@ -59,9 +59,9 @@ conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 注入；为兼容 Stock_Project 现有环境，也接受 `DOUYIN_SESSION_COOKIE` 作为回退变量名。
 该 Cookie 只会注入抖音域名，不会污染快手、小红书等平台的游客会话。
 
-快手公开作品默认使用浏览器自动生成的游客设备会话，不需要账号。小红书游客态可读取公开
-互动量和首屏评论。项目不接入付费数据供应商；小红书评论深分页和任意公众号文章的互动/
-评论没有可验证的免费匿名接口，因此需要时复用调用方自己的平台会话。八个平台都可以在
+快手公开作品默认使用浏览器自动生成的游客设备会话，不需要账号。小红书游客态曾在新鲜
+公开笔记读取到互动量和首屏评论，但当前重复实测并不稳定。项目不接入付费数据供应商；
+小红书稳定首屏/深分页和任意公众号文章的互动/评论需要时复用调用方自己的平台会话。八个平台都可以在
 带桌面环境的本机建立独立 Profile：
 
 ```bash
@@ -98,7 +98,7 @@ LLM、Mongo、51 代理 API 和日志参数。当前代理模式：
 过期排空和供应商 API 限流机制。一次业务接口内部的预热和数据请求可共享代理租约，但每个
 HTTP 调用仍单独计入上游请求数；互动量接口和评论接口分别执行、分别缓存。
 
-服务默认最多同时运行 4 个采集任务、2 个浏览器任务，代理池只保留 2 个 IP；相同接口、
+服务默认最多同时运行 4 个采集任务、1 个浏览器任务，代理池只保留 1 个 IP；相同接口、
 相同 URL 和相同页码的并发重复请求会合并，结果缓存 120 秒（最多 1000 项）。需要更保守的低内存配置时可把
 `BROWSER_MAX_CONCURRENCY=1`。配置项、真实内存测试和 51 代理成本公式见
 [`docs/COST_AND_CAPACITY.md`](docs/COST_AND_CAPACITY.md)。
@@ -135,7 +135,7 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | B 站 | 视频互动/评论；直播当前状态和最近弹幕 | 视频 `x/web-interface/view`、`x/v2/reply/wbi/main`；直播 `Room/get_info`、`dM/gethistory` | 视频支持分页；直播不提供历史弹幕全集 |
 | 微博 | 点赞、评论、转发和匿名评论分页 | `statuses/show`、`comments/hotflow`、`api/comments/show` | 可用，访客态部分覆盖 |
 | 好看 | 播放、点赞、评论总数和一级评论 | 目标页 SSR、`haokan/ui-web/v2/comment/get` | 纯协议匿名可用；收藏/分享未公开 |
-| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 游客 SSR/浏览器首屏；自有会话 `xhshow` | 首屏无需账号；游客态不承诺深分页 |
+| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 游客 SSR/浏览器首屏；自有会话 `xhshow` | 游客首屏曾成功但当前不稳定；稳定采集需要自有会话 |
 | 抖音 | 匿名纯协议互动量和评论分页；浏览器仅作风控兜底 | 第一方访客 `ttwid`、纯 Python `a_bogus`、`/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 真实首屏 20 条、总数 2909；平台隐藏 `play_count` 时播放保持 `null` |
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
 | 公众号 | 页面公开字段；有文章会话时读取互动和评论 | 页面 SSR、`getappmsgext`、`appmsg_comment` | 任意文章匿名互动/评论无稳定免费接口；官方统计只适用于自有公众号授权 |

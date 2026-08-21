@@ -3,14 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>互动量与评论采集成本单</title>
+  <title>互动量与评论采集实测成本单</title>
   <style>
     :root {
-      --blue: #aac2e9;
-      --blue-dark: #355f98;
+      --blue: #a9c1e7;
+      --blue-dark: #244f87;
       --blue-soft: #edf3fc;
+      --green: #e9f6ee;
+      --green-ink: #27633f;
+      --red: #fcecec;
+      --red-ink: #9b3434;
       --ink: #172033;
-      --grid: #2d3542;
+      --grid: #313946;
       --muted: #526071;
     }
 
@@ -24,9 +28,9 @@
     }
 
     .sheet {
-      width: 1280px;
-      margin: 28px auto;
-      padding: 30px 34px 34px;
+      width: 1680px;
+      margin: 24px auto;
+      padding: 28px 30px 30px;
       background: #fff;
       box-shadow: 0 8px 30px rgba(34, 54, 84, 0.14);
     }
@@ -36,7 +40,7 @@
       align-items: flex-end;
       justify-content: space-between;
       gap: 24px;
-      margin-bottom: 18px;
+      margin-bottom: 14px;
     }
 
     h1 {
@@ -62,100 +66,119 @@
       font-weight: 700;
     }
 
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 9px;
+      margin: 0 0 14px;
+    }
+
+    .metric {
+      min-height: 58px;
+      padding: 9px 12px;
+      border: 1px solid #9ab4da;
+      background: #f6f9fe;
+      text-align: center;
+    }
+
+    .metric strong {
+      display: block;
+      color: var(--blue-dark);
+      font-size: 18px;
+      line-height: 1.3;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
     table {
       width: 100%;
       table-layout: fixed;
       border-collapse: collapse;
       border: 2px solid var(--grid);
-      font-size: 16px;
+      font-size: 13px;
     }
 
-    col.product { width: 18%; }
-    col.service { width: 27%; }
-    col.volume { width: 14%; }
-    col.cost { width: 16%; }
-    col.note { width: 25%; }
+    col.platform { width: 7%; }
+    col.service { width: 10%; }
+    col.upstream { width: 25%; }
+    col.direct { width: 9%; }
+    col.proxy { width: 9%; }
+    col.estimate { width: 8%; }
+    col.result { width: 17%; }
+    col.cost { width: 15%; }
 
     th,
     td {
       border: 1px solid var(--grid);
-      padding: 13px 12px;
+      padding: 7px 8px;
       text-align: center;
       vertical-align: middle;
-      line-height: 1.55;
+      line-height: 1.4;
     }
 
     th {
-      padding: 9px 10px;
+      padding: 8px 7px;
       background: var(--blue);
-      font-size: 17px;
+      font-size: 14px;
       font-weight: 800;
     }
 
-    td.product-cell {
-      background: #f8faff;
+    tr.group-even td { background: #f8faff; }
+
+    td.platform-cell {
+      color: var(--blue-dark);
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    td.service-cell { font-weight: 750; }
+
+    td.upstream-cell {
+      text-align: left;
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    }
+
+    td.time-cell strong {
+      display: block;
+      font-size: 14px;
+    }
+
+    td.result-ok {
+      background: var(--green) !important;
+      color: var(--green-ink);
       font-weight: 700;
     }
 
-    .api-line {
-      display: block;
-      margin: 7px 0;
-    }
-
-    td.service-cell {
-      font-weight: 650;
-    }
-
-    td.volume-cell {
-      color: var(--blue-dark);
+    td.result-bad {
+      background: var(--red) !important;
+      color: var(--red-ink);
       font-weight: 700;
     }
 
     td.cost-cell {
-      background: #f2f6fc;
       color: #163f78;
-      font-size: 16px;
-      font-weight: 800;
+      font-weight: 750;
     }
 
-    .cost-cell small,
-    .request-detail {
-      display: block;
-      margin-top: 3px;
+    .notes {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 18px;
+      margin-top: 12px;
       color: var(--muted);
       font-size: 12px;
-      font-weight: 500;
-    }
-
-    td.note-cell {
-      padding: 15px 16px;
-      text-align: left;
-      font-size: 14px;
-      line-height: 1.7;
-    }
-
-    .note-cell ol {
-      margin: 0;
-      padding-left: 22px;
-    }
-
-    .note-cell li + li { margin-top: 7px; }
-
-    .footnote {
-      display: flex;
-      justify-content: space-between;
-      gap: 24px;
-      margin-top: 13px;
-      color: var(--muted);
-      font-size: 13px;
       line-height: 1.55;
     }
 
-    .footnote strong { color: var(--ink); }
+    .notes p { margin: 0; }
+    .notes strong { color: var(--ink); }
 
     @page {
-      size: A4 landscape;
-      margin: 10mm;
+      size: A3 landscape;
+      margin: 8mm;
     }
 
     @media print {
@@ -173,90 +196,142 @@
   <main class="sheet">
     <header class="heading">
       <div>
-        <h1>互动量与公开评论采集成本单</h1>
-        <div class="subtitle">支持：抖音、今日头条、微信公众号、小红书、好看视频、快手、B站、微博</div>
+        <h1>互动量与公开评论采集实测成本单</h1>
+        <div class="subtitle">互动量、评论按独立上游流程分别计数；本次 8 个平台没有可合并为单一响应的项目</div>
       </div>
-      <div class="badge">内部 IP 成本 · 不设请求量阶梯</div>
+      <div class="badge">实测日期 2026-08-22 · MyAgent / Python 3.13</div>
     </header>
 
-    <table aria-label="互动量与公开评论采集成本单">
+    <section class="summary" aria-label="本轮代理成本摘要">
+      <div class="metric"><strong>16 次</strong><span>独立业务接口调用</span></div>
+      <div class="metric"><strong>94.651 秒</strong><span>代理单并发总用时</span></div>
+      <div class="metric"><strong>1 个 IP</strong><span>19 次租约、无换 IP</span></div>
+      <div class="metric"><strong>¥0.00084</strong><span>本批实际 IP 总成本</span></div>
+      <div class="metric"><strong>¥0.0000525</strong><span>本批每次调用平均摊销</span></div>
+    </section>
+
+    <table aria-label="八个平台十六项独立实测明细">
       <colgroup>
-        <col class="product">
-        <col class="service">
-        <col class="volume">
-        <col class="cost">
-        <col class="note">
+        <col class="platform"><col class="service"><col class="upstream"><col class="direct">
+        <col class="proxy"><col class="estimate"><col class="result"><col class="cost">
       </colgroup>
       <thead>
         <tr>
-          <th>数据产品</th>
-          <th>服务内容</th>
-          <th>请求量</th>
-          <th>IP 成本（元）</th>
-          <th>备注</th>
+          <th>平台</th><th>服务内容</th><th>本次实际上游流程</th><th>直连实测</th>
+          <th>代理实测</th><th>规划时间</th><th>本次返回</th><th>本轮平均 IP 成本</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td class="product-cell" rowspan="8">
-            <span class="api-line">接口1：评论内容更新接口</span>
-            <span class="api-line">接口2：互动量更新接口</span>
-          </td>
-          <td class="service-cell">抖音<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
-          <td class="volume-cell">不分级</td>
-          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
-          <td class="note-cell" rowspan="8">
-            <ol>
-              <li>一个上游响应同时包含互动量和评论内容时才能合并；详情接口、评论接口各调用一次时，按两次请求记录。</li>
-              <li>IP 和请求不是一一对应：一个 IP 在有效期内可以承载多次请求，不能把 0.00084 元/IP 直接写成每次请求成本。</li>
-              <li>成本公式：新增代理 IP 数量 × 0.00084 元；平均请求成本再除以该批 IP 实际完成的成功请求数。</li>
-              <li>直连且未调用代理池时，IP 采购成本为 0。公众号 HTML 只有在同时预载统计和精选评论时，才属于同一响应获取两类数据。</li>
-              <li>验证码、代理失效或平台风控导致换 IP 时按实际新增 IP 计；服务器、存储、带宽、维护和人工登录成本不包含在内。</li>
-            </ol>
-          </td>
+          <td class="platform-cell" rowspan="2">抖音</td><td class="service-cell">互动量</td>
+          <td class="upstream-cell">1 GET：<code>aweme/detail</code></td><td class="time-cell"><strong>0.593s</strong></td>
+          <td class="time-cell"><strong>1.441s</strong></td><td class="time-cell"><strong>2s</strong></td>
+          <td class="result-ok">6 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
         </tr>
         <tr>
-          <td class="service-cell">今日头条<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
-          <td class="volume-cell">不分级</td>
-          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
+          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：<code>comment/list</code></td>
+          <td class="time-cell"><strong>0.270s</strong></td><td class="time-cell"><strong>0.773s</strong></td>
+          <td class="time-cell"><strong>1s</strong></td><td class="result-ok">9 条 / 总数 22</td>
+          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+        </tr>
+
+        <tr class="group-even">
+          <td class="platform-cell" rowspan="2">今日头条</td><td class="service-cell">互动量</td>
+          <td class="upstream-cell">1 GET 协议尝试 + 浏览器页面/数据多请求</td><td class="time-cell"><strong>10.165s</strong></td>
+          <td class="time-cell"><strong>10.832s</strong></td><td class="time-cell"><strong>14s</strong></td>
+          <td class="result-ok">5 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+        </tr>
+        <tr class="group-even">
+          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：<code>tab_comments</code></td>
+          <td class="time-cell"><strong>0.330s</strong></td><td class="time-cell"><strong>0.735s</strong></td>
+          <td class="time-cell"><strong>1s</strong></td><td class="result-ok">10 条 / 总数 10</td>
+          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+        </tr>
+
+        <tr>
+          <td class="platform-cell" rowspan="2">公众号</td><td class="service-cell">互动量</td>
+          <td class="upstream-cell">1 GET 协议尝试 + 浏览器页面/数据多请求</td><td class="time-cell"><strong>17.920s</strong></td>
+          <td class="time-cell"><strong>12.255s</strong></td><td class="time-cell"><strong>23s</strong></td>
+          <td class="result-ok">1 个公开互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
         </tr>
         <tr>
-          <td class="service-cell">微信公众号<span class="request-detail">HTML 同时预载两类数据时可共用一次响应</span></td>
-          <td class="volume-cell">不分级</td>
-          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
+          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：文章 HTML 判断评论开关</td>
+          <td class="time-cell"><strong>2.941s</strong></td><td class="time-cell"><strong>2.557s</strong></td>
+          <td class="time-cell"><strong>4s</strong></td><td class="result-ok">作者关闭评论，0 条</td>
+          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+        </tr>
+
+        <tr class="group-even">
+          <td class="platform-cell" rowspan="2">小红书</td><td class="service-cell">互动量</td>
+          <td class="upstream-cell">1 GET 协议尝试 + 浏览器页面/数据多请求</td><td class="time-cell"><strong>26.625s</strong></td>
+          <td class="time-cell"><strong>17.692s</strong></td><td class="time-cell"><strong>34s*</strong></td>
+          <td class="result-bad">当前样本未取到</td><td class="cost-cell">直连 ¥0<br>仍占用本批共享 IP</td>
+        </tr>
+        <tr class="group-even">
+          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">浏览器页面/数据多请求</td>
+          <td class="time-cell"><strong>21.785s</strong></td><td class="time-cell"><strong>21.706s</strong></td>
+          <td class="time-cell"><strong>28s*</strong></td><td class="result-bad">当前样本未取到</td>
+          <td class="cost-cell">直连 ¥0<br>仍占用本批共享 IP</td>
+        </tr>
+
+        <tr>
+          <td class="platform-cell" rowspan="2">好看视频</td><td class="service-cell">互动量</td>
+          <td class="upstream-cell">2 GET：首页预热 + 目标页 SSR</td><td class="time-cell"><strong>0.392s</strong></td>
+          <td class="time-cell"><strong>1.568s</strong></td><td class="time-cell"><strong>2s</strong></td>
+          <td class="result-ok">3 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
         </tr>
         <tr>
-          <td class="service-cell">小红书<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
-          <td class="volume-cell">不分级</td>
-          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
+          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：<code>comment/get</code></td>
+          <td class="time-cell"><strong>0.207s</strong></td><td class="time-cell"><strong>0.408s</strong></td>
+          <td class="time-cell"><strong>1s</strong></td><td class="result-ok">13 条 / 总数 13</td>
+          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+        </tr>
+
+        <tr class="group-even">
+          <td class="platform-cell" rowspan="2">快手</td><td class="service-cell">互动量</td>
+          <td class="upstream-cell">浏览器 GraphQL 详情等数据多请求</td><td class="time-cell"><strong>11.180s</strong></td>
+          <td class="time-cell"><strong>9.893s</strong></td><td class="time-cell"><strong>14s</strong></td>
+          <td class="result-ok">3 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+        </tr>
+        <tr class="group-even">
+          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">浏览器评论接口等数据多请求</td>
+          <td class="time-cell"><strong>12.222s</strong></td><td class="time-cell"><strong>12.230s</strong></td>
+          <td class="time-cell"><strong>16s</strong></td><td class="result-ok">1 条 / 总数 1</td>
+          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+        </tr>
+
+        <tr>
+          <td class="platform-cell" rowspan="2">B站</td><td class="service-cell">互动量</td>
+          <td class="upstream-cell">1 GET：<code>x/web-interface/view</code></td><td class="time-cell"><strong>0.176s</strong></td>
+          <td class="time-cell"><strong>0.878s</strong></td><td class="time-cell"><strong>2s</strong></td>
+          <td class="result-ok">7 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
         </tr>
         <tr>
-          <td class="service-cell">好看视频<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
-          <td class="volume-cell">不分级</td>
-          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
+          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">3 GET：详情 + nav + WBI 评论</td>
+          <td class="time-cell"><strong>0.338s</strong></td><td class="time-cell"><strong>0.840s</strong></td>
+          <td class="time-cell"><strong>2s</strong></td><td class="result-ok">20 条 / 总数 140</td>
+          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
         </tr>
-        <tr>
-          <td class="service-cell">快手<span class="request-detail">详情请求、评论分页请求相互独立</span></td>
-          <td class="volume-cell">不分级</td>
-          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
+
+        <tr class="group-even">
+          <td class="platform-cell" rowspan="2">微博</td><td class="service-cell">互动量</td>
+          <td class="upstream-cell">1 GET：<code>statuses/show</code></td><td class="time-cell"><strong>0.104s</strong></td>
+          <td class="time-cell"><strong>0.477s</strong></td><td class="time-cell"><strong>1s</strong></td>
+          <td class="result-ok">3 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
         </tr>
-        <tr>
-          <td class="service-cell">B站<span class="request-detail">互动量请求、评论/弹幕请求相互独立</span></td>
-          <td class="volume-cell">不分级</td>
-          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
-        </tr>
-        <tr>
-          <td class="service-cell">微博<span class="request-detail">互动量请求、评论分页请求相互独立</span></td>
-          <td class="volume-cell">不分级</td>
-          <td class="cost-cell">直连：0 元<small>代理：按实际 IP 摊销</small></td>
+        <tr class="group-even">
+          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：<code>comments/hotflow</code></td>
+          <td class="time-cell"><strong>0.146s</strong></td><td class="time-cell"><strong>0.361s</strong></td>
+          <td class="time-cell"><strong>1s</strong></td><td class="result-ok">5 条 / 总数 5</td>
+          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
         </tr>
       </tbody>
     </table>
 
-    <div class="footnote">
-      <span><strong>成本口径：</strong>84 元 ÷ 100000 个 IP = 0.00084 元/IP；请求成本按一个 IP 实际承载的成功请求数量摊销。</span>
-      <span>版本日期：2026-08-21</span>
-    </div>
+    <section class="notes">
+      <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。本轮 16 次调用共享 1 个 IP，故平均摊销为 0.0000525 元/次；14 次有效结果的平均成本是 0.00006 元/次。两者都只是本批实测，不是固定报价。</p>
+      <p><strong>时间与负载：</strong>规划时间为直连/代理较慢值加 25% 余量；* 为失败返回时间。浏览器默认单并发，单浏览器实测峰值约 401 MB。页面流包含多个数据响应，未伪装成一次请求。</p>
+    </section>
   </main>
 </body>
 </html>

@@ -34,7 +34,7 @@ class Settings(BaseSettings):
         default="prefer",
         alias="PROXY_MODE",
     )
-    proxy_pool_size: int = Field(default=2, alias="PROXY_POOL_SIZE", ge=1, le=200)
+    proxy_pool_size: int = Field(default=1, alias="PROXY_POOL_SIZE", ge=1, le=200)
     proxy_max_concurrency: int = Field(
         default=2,
         alias="PROXY_MAX_CONCURRENCY",
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     )
     browser_headless: bool = Field(default=True, alias="BROWSER_HEADLESS")
     browser_max_concurrency: int = Field(
-        default=2,
+        default=1,
         alias="BROWSER_MAX_CONCURRENCY",
         ge=1,
     )

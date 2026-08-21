@@ -10,7 +10,7 @@
 - `EngagementService.from_settings()` 创建一个 `BrowserFallback`，与协议客户端共用
   同一个 51 代理池。
 - 浏览器全局并发由 `BROWSER_MAX_CONCURRENCY` 限制；同一平台另外串行执行，避免多个进程
-  同时写一个持久化 Profile。默认最多 2 个浏览器，低内存服务器建议设为 1。
+  同时写一个持久化 Profile。默认最多 1 个浏览器，确认内存充足并压测后才建议设为 2。
 - 互动接口和评论接口分别进入浏览器兜底、分别缓存；不会因为两个请求使用同一个浏览器
   Profile 或同一个代理 IP，就把它们记录成一次上游请求。
 - 每个平台使用独立的 `.local/browser-profiles/<platform>` 持久化 Profile，平台生成的
@@ -34,7 +34,7 @@ BROWSER_FALLBACK_ENABLED=true
 BROWSER_TIMEOUT_SECONDS=35
 BROWSER_CHALLENGE_WAIT_SECONDS=5
 BROWSER_HEADLESS=true
-BROWSER_MAX_CONCURRENCY=2
+BROWSER_MAX_CONCURRENCY=1
 BROWSER_PROFILE_DIR=".local/browser-profiles"
 PLATFORM_SESSION_DIR=".local/platform-sessions"
 ```
