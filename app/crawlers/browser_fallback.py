@@ -33,6 +33,7 @@ class BrowserFallbackSettings:
     headless: bool | str = True
     max_concurrency: int = 2
     profile_dir: Path = Path(".local/browser-profiles")
+    reset_guest_state_on_proxy_change: bool = False
 
 
 class BrowserFallback:
@@ -43,13 +44,16 @@ class BrowserFallback:
         *,
         settings: BrowserFallbackSettings | None = None,
         proxy_provider: Any | None = None,
+        session_store: Any | None = None,
         cookies: str = "",
     ) -> None:
         self.settings = settings or BrowserFallbackSettings()
         self.proxy_provider = proxy_provider
+        self.session_store = session_store
         self.cookies = cookies
         self._locks: dict[EngagementPlatform, asyncio.Lock] = {}
         self._semaphore = asyncio.Semaphore(self.settings.max_concurrency)
+        self._proxy_identities: dict[EngagementPlatform, str] = {}
 
     async def fetch(
         self,
@@ -106,11 +110,17 @@ class BrowserFallback:
                 humanize=True,
                 block_webrtc=True,
                 proxy=proxy,
+                geoip=bool(proxy),
                 persistent_context=True,
                 user_data_dir=str(profile_dir),
                 exclude_addons=[DefaultAddons.UBO],
                 enable_cache=True,
             ) as context:
+                await self._prepare_proxy_bound_guest_state(
+                    context,
+                    platform,
+                    proxy_mapping,
+                )
                 await self._seed_cookies(context, target_url, platform)
                 page_obj = context.pages[0] if context.pages else await context.new_page()
                 responses: list[Any] = []
@@ -153,9 +163,7 @@ class BrowserFallback:
                 # Some platforms defer the first API call until the page has
                 # settled.  One reload is cheap compared with returning an
                 # unexplained empty result from an otherwise valid profile.
-                if result.coverage in {"unsupported", "blocked"} and not result.comments and not any(
-                    value is not None for value in result.stats.model_dump().values()
-                ):
+                if _should_reload_page(platform, result):
                     responses.clear()
                     try:
                         await page_obj.reload(
@@ -182,6 +190,7 @@ class BrowserFallback:
                         include_stats=include_stats,
                         include_comments=include_comments,
                     )
+                await self._persist_session(platform, context)
             lease_ok = True
             return result
         except Exception as exc:
@@ -204,6 +213,44 @@ class BrowserFallback:
                     value = callback(proxy_mapping, RuntimeError("browser fallback failed")) if not lease_ok else callback(proxy_mapping)
                     if asyncio.iscoroutine(value):
                         await value
+
+    async def _persist_session(self, platform: EngagementPlatform, context: Any) -> None:
+        """Persist guest/login state without making collection depend on it."""
+        if self.session_store is None:
+            return
+        try:
+            await self.session_store.save_context(platform, context)
+        except Exception:
+            # A read-only profile or interrupted write must not discard an
+            # otherwise valid collection result.
+            pass
+
+    async def _prepare_proxy_bound_guest_state(
+        self,
+        context: Any,
+        platform: EngagementPlatform,
+        proxy_mapping: dict[str, str] | None,
+    ) -> None:
+        """Reset an explicitly disposable Kuaishou guest profile after IP rotation."""
+        if (
+            not self.settings.reset_guest_state_on_proxy_change
+            or platform != "kuaishou"
+            or not proxy_mapping
+        ):
+            return
+        identity = proxy_mapping.get("https") or proxy_mapping.get("http") or ""
+        if not identity or self._proxy_identities.get(platform) == identity:
+            return
+        await context.clear_cookies()
+        await context.add_init_script(
+            script="""
+            if (location.hostname === 'kuaishou.com' || location.hostname.endsWith('.kuaishou.com')) {
+              try { localStorage.clear(); } catch (_) {}
+              try { sessionStorage.clear(); } catch (_) {}
+            }
+            """
+        )
+        self._proxy_identities[platform] = identity
 
     async def _seed_cookies(self, context: Any, url: str, platform: EngagementPlatform) -> None:
         # The compatibility setting is a Douyin session cookie.  Reusing the
@@ -505,6 +552,20 @@ def _playwright_proxy(proxies: dict[str, str] | None) -> dict[str, str] | None:
         return None
     server = proxies.get("https") or proxies.get("http")
     return {"server": server} if server else None
+
+
+def _should_reload_page(
+    platform: EngagementPlatform,
+    result: EngagementResult,
+) -> bool:
+    """Retry deferred pages, except Kuaishou where an explicit guest API already ran."""
+    if platform == "kuaishou":
+        return False
+    return (
+        result.coverage in {"unsupported", "blocked"}
+        and not result.comments
+        and not any(value is not None for value in result.stats.model_dump().values())
+    )
 
 
 def _browser_target_url(

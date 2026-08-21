@@ -11,6 +11,7 @@ from app.crawlers.browser_fallback import (
     _parse_kuaishou_guest,
     _parse_toutiao,
     _parse_xhs,
+    _should_reload_page,
 )
 from app.crawlers.engagement import EngagementCrawler
 from app.models.engagement import EngagementResult, EngagementStats
@@ -49,9 +50,17 @@ class FakeBrowserFallback:
 class FakeBrowserContext:
     def __init__(self) -> None:
         self.cookies = []
+        self.clear_cookie_calls = 0
+        self.init_scripts = []
 
     async def add_cookies(self, cookies) -> None:
         self.cookies.extend(cookies)
+
+    async def clear_cookies(self) -> None:
+        self.clear_cookie_calls += 1
+
+    async def add_init_script(self, *, script) -> None:
+        self.init_scripts.append(script)
 
 
 def test_browser_fallback_has_a_global_concurrency_limit() -> None:
@@ -131,6 +140,78 @@ def test_caller_cookie_is_only_seeded_into_douyin_profile() -> None:
         "value": "caller-owned",
         "url": "https://www.douyin.com",
     }]
+
+
+def test_browser_fallback_persists_session_without_exposing_state() -> None:
+    class FakeStore:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def save_context(self, platform, context) -> None:
+            self.calls.append((platform, context))
+
+    store = FakeStore()
+    context = object()
+    browser = BrowserFallback(session_store=store)
+
+    asyncio.run(browser._persist_session("xiaohongshu", context))
+
+    assert store.calls == [("xiaohongshu", context)]
+
+
+def test_browser_fallback_session_persistence_is_best_effort() -> None:
+    class FailingStore:
+        async def save_context(self, platform, context) -> None:
+            raise OSError("read-only")
+
+    asyncio.run(
+        BrowserFallback(session_store=FailingStore())._persist_session(
+            "kuaishou",
+            object(),
+        )
+    )
+
+
+def test_kuaishou_does_not_reload_after_explicit_guest_api_misses() -> None:
+    empty = EngagementResult(
+        platform="kuaishou",
+        canonical_url="https://www.kuaishou.com/short-video/1",
+        work_id="1",
+        coverage="unsupported",
+    )
+    deferred = empty.model_copy(update={"platform": "wechat"})
+
+    assert _should_reload_page("kuaishou", empty) is False
+    assert _should_reload_page("wechat", deferred) is True
+
+
+def test_disposable_kuaishou_guest_state_resets_only_when_proxy_changes() -> None:
+    context = FakeBrowserContext()
+    browser = BrowserFallback(settings=BrowserFallbackSettings(
+        reset_guest_state_on_proxy_change=True,
+    ))
+    first = {"https": "http://127.0.0.1:1001"}
+    second = {"https": "http://127.0.0.1:1002"}
+
+    asyncio.run(browser._prepare_proxy_bound_guest_state(context, "kuaishou", first))
+    asyncio.run(browser._prepare_proxy_bound_guest_state(context, "kuaishou", first))
+    asyncio.run(browser._prepare_proxy_bound_guest_state(context, "wechat", second))
+    asyncio.run(browser._prepare_proxy_bound_guest_state(context, "kuaishou", second))
+
+    assert context.clear_cookie_calls == 2
+    assert len(context.init_scripts) == 2
+
+
+def test_authenticated_profile_is_not_reset_by_default() -> None:
+    context = FakeBrowserContext()
+
+    asyncio.run(BrowserFallback()._prepare_proxy_bound_guest_state(
+        context,
+        "kuaishou",
+        {"https": "http://127.0.0.1:1001"},
+    ))
+
+    assert context.clear_cookie_calls == 0
 
 
 def test_browser_parser_accepts_real_douyin_detail_shape() -> None:

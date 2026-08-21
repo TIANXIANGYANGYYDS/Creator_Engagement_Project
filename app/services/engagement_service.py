@@ -67,6 +67,7 @@ class EngagementService:
                 max_concurrency_per_proxy=settings.proxy_max_concurrency,
                 api_url=settings.proxy_51_api_url,
             )
+        session_store = PlatformSessionStore(Path(settings.platform_session_dir))
         browser_fallback = None
         if settings.browser_fallback_enabled:
             browser_fallback = BrowserFallback(
@@ -76,8 +77,12 @@ class EngagementService:
                     headless=settings.browser_headless,
                     max_concurrency=settings.browser_max_concurrency,
                     profile_dir=Path(settings.browser_profile_dir),
+                    reset_guest_state_on_proxy_change=(
+                        settings.browser_reset_guest_state_on_proxy_change
+                    ),
                 ),
                 proxy_provider=provider,
+                session_store=session_store,
                 cookies=settings.creator_engagement_cookie.get_secret_value(),
             )
         crawler = EngagementCrawler(
@@ -86,7 +91,7 @@ class EngagementService:
             proxy_provider=provider,
             proxy_mode=active_mode,
             browser_fallback=browser_fallback,
-            session_store=PlatformSessionStore(Path(settings.platform_session_dir)),
+            session_store=session_store,
         )
         return cls(
             crawler,

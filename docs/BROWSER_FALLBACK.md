@@ -15,6 +15,11 @@
   Profile 或同一个代理 IP，就把它们记录成一次上游请求。
 - 每个平台使用独立的 `.local/browser-profiles/<platform>` 持久化 Profile，平台生成的
   `ttwid`、`msToken`、`UIFID`、`x-s` 等状态由浏览器自己维护并自然过期。
+- 浏览器退出前把当前 storage-state 以 0600 权限同步到 `.local/platform-sessions`，后续
+  协议请求可直接复用刚建立的游客/登录会话，避免每次都重新启动浏览器。
+- 使用代理时启用 Camoufox GeoIP/时区对齐，browser 可选依赖包含免费的 `maxminddb`。
+  可丢弃的快手游客压测 Profile 可在 IP 变化时重建设备状态；该开关默认关闭，不会清除
+  用户的真实登录会话。
 - `CREATOR_ENGAGEMENT_COOKIE` 是兼容 Stock 配置的抖音会话，只注入抖音域名，既不打印也
   不持久化到源码；其他平台复用各自 Profile，避免跨域 Cookie 污染游客设备状态。
 - 页面加载后监听 `document/xhr/fetch` 响应，优先解析真实 JSON。评论请求没有响应体时，
@@ -35,6 +40,7 @@ BROWSER_TIMEOUT_SECONDS=35
 BROWSER_CHALLENGE_WAIT_SECONDS=5
 BROWSER_HEADLESS=true
 BROWSER_MAX_CONCURRENCY=1
+BROWSER_RESET_GUEST_STATE_ON_PROXY_CHANGE=false
 BROWSER_PROFILE_DIR=".local/browser-profiles"
 PLATFORM_SESSION_DIR=".local/platform-sessions"
 ```
@@ -50,7 +56,8 @@ Xvfb 的运行环境单独配置，不要把人工验证码结果提交到仓库
 本兜底；安全验证或验证码页会报告阻断，不会把推荐流或无关页面文案当成目标作品数据。
 
 快手游客页会自动生成 `kwssectoken/kwscode` 等设备状态；项目在同一页面上下文请求目标
-`visionVideoDetail` 和一级评论 REST 接口，无需用户登录。小红书游客页可返回首屏评论，
+`visionVideoDetail` 和一级评论 REST 接口，无需用户登录。全量旧 URL 实测表明成功响应
+数据可信，但游客态覆盖率仍低，不能写成稳定全覆盖。小红书游客页可返回首屏评论，
 出现“登录查看全部评论”时会停止分页，绝不把首屏重复标成后续页。深分页只能复用调用方
 自己的有效会话。公众号文章的 `show_comment=0` 会直接判定为作者关闭评论；其他文章若
 没有微信文章短时会话，会明确返回 `unsupported/blocked`。

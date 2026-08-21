@@ -81,6 +81,10 @@ class Settings(BaseSettings):
         alias="BROWSER_MAX_CONCURRENCY",
         ge=1,
     )
+    browser_reset_guest_state_on_proxy_change: bool = Field(
+        default=False,
+        alias="BROWSER_RESET_GUEST_STATE_ON_PROXY_CHANGE",
+    )
     browser_profile_dir: str = Field(
         default=".local/browser-profiles",
         alias="BROWSER_PROFILE_DIR",
