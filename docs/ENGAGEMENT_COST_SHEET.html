@@ -199,16 +199,16 @@
         <h1>互动量与公开评论采集实测成本单</h1>
         <div class="subtitle">按独立业务接口列示真实成功率、耗时和 IP 成本；互动量与评论按实际上游响应分别计数</div>
       </div>
-      <div class="badge">实测日期 2026-08-22 · MyAgent / Python 3.13</div>
+      <div class="badge">更新 2026-08-23 · MyAgent / Python 3.13</div>
     </header>
 
     <section class="summary" aria-label="本轮代理成本摘要">
+      <div class="metric"><strong>16 项</strong><span>八个平台独立接口成本</span></div>
       <div class="metric"><strong>796 次</strong><span>快手企业独立接口实测</span></div>
-      <div class="metric"><strong>398 个 URL</strong><span>互动量与评论各调用一次</span></div>
       <div class="metric"><strong>64 个 IP</strong><span>两个接口独立实耗</span></div>
       <div class="metric"><strong>¥0.05376</strong><span>快手两接口 IP 总成本</span></div>
-      <div class="metric"><strong>约 9.20 分钟</strong><span>两项独立长跑 + 补齐</span></div>
-      <div class="metric"><strong>100% 有数据</strong><span>快手 398 + 398 / 零浏览器</span></div>
+      <div class="metric"><strong>100 / 100</strong><span>小红书互动匿名 SSR</span></div>
+      <div class="metric"><strong>1 GET · ¥0</strong><span>小红书互动单次成本</span></div>
     </section>
 
     <table aria-label="八个平台十六项独立接口成本明细">
@@ -263,10 +263,10 @@
         </tr>
 
         <tr class="group-even">
-          <td class="platform-cell">小红书</td><td class="service-cell">互动量</td><td>20</td>
-          <td class="upstream-cell">每次 2 POST 签名详情 + 1 GET SSR；最多 3 轮</td><td class="result-bad">0 / 20<br>0%</td>
-          <td class="time-cell"><strong>14.356 / 15.978s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>当前不可用；60 次详情均 HTTP 461，代理+浏览器仍验证码</td>
+          <td class="platform-cell">小红书</td><td class="service-cell">互动量</td><td>100</td>
+          <td class="upstream-cell">1 GET：匿名笔记 SSR；自动补 <code>xsec_source</code></td><td class="result-ok">100 / 100<br>100%</td>
+          <td class="time-cell"><strong>0.419 / 1.123s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；无需登录/签名/浏览器，URL 需有效 token</td>
         </tr>
         <tr class="group-even">
           <td class="platform-cell">小红书</td><td class="service-cell">评论第 1 页</td><td>20</td>
@@ -331,7 +331,7 @@
 
     <section class="notes">
       <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。快手互动实耗 41 IP / ¥0.03444，评论实耗 23 IP / ¥0.01932；两个独立接口合计 <strong>64 IP / ¥0.05376</strong>，按 398 个 URL 各调两项摊销 ¥0.00013508/URL。其余表内正式流程直连，IP 采购成本为 ¥0。</p>
-      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存。快手互动的 41 IP 包含全量 36 IP 和 13 条专项补齐 5 IP，最终代码已合入补齐重试；两项全程零浏览器。小红书互动的代理+浏览器单测仍失败。互动量和评论是不同上游流程，因此保持 16 行。</p>
+      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存。小红书互动百测为 100 个当前有效 token URL，每次 1 个匿名 SSR GET；默认 prefer 也自动直连，IP 成本 ¥0。评论仍是带 web_session 的独立签名 GET，不能与互动合并。快手两项全程零浏览器。</p>
     </section>
   </main>
 </body>
