@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import html
-import json
 import re
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
@@ -35,7 +34,7 @@ async def fetch(
     del limit  # The signed endpoint controls its own public page size.
     parsed = urlparse(url)
     token = parse_qs(parsed.query).get("xsec_token", [""])[0]
-    source = parse_qs(parsed.query).get("xsec_source", ["pc_search"])[0] or "pc_search"
+    source = parse_qs(parsed.query).get("xsec_source", [""])[0]
     cookie = crawler._platform_cookie("xiaohongshu")
     canonical_url = f"https://www.xiaohongshu.com/explore/{work_id}"
     try:
@@ -43,31 +42,44 @@ async def fetch(
         comments: list[EngagementComment] = []
         next_cursor: str | None = None
         sources: list[str] = []
-        feed_error = ""
 
         if include_stats:
-            if cookie and token:
-                feed_payload = {
-                    "source_note_id": work_id,
-                    "image_formats": ["jpg", "webp", "avif"],
-                    "extra": {"need_body_topic": 1},
-                    "xsec_source": source,
-                    "xsec_token": token,
-                }
-                try:
-                    feed = await _post(crawler, "/api/sns/web/v1/feed", feed_payload, cookie, url)
-                    stats = stats_from_note(note_card(feed))
-                    if _has_stats(stats):
-                        sources.append("api/sns/web/v1/feed")
-                except PlatformCrawlerError as exc:
-                    feed_error = str(exc)
-            if not _has_stats(stats):
-                response = await crawler._get_response(
-                    url,
-                    headers={"Referer": "https://www.xiaohongshu.com/explore"},
-                )
-                stats = parse_stats(str(getattr(response, "text", "")), work_id)
+            # A direct note-page visit embeds the target note and its public
+            # counters in ``window.__INITIAL_STATE__``.  Prefer that single
+            # unsigned request: the signed feed endpoint is account-gated and
+            # currently returns an empty HTTP 461 response to guest sessions.
+            request_url = url
+            if token and not source:
+                query = f"{parsed.query}&xsec_source=pc_feed"
+                request_url = parsed._replace(query=query).geturl()
+            page_headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "User-Agent": DESKTOP_USER_AGENT,
+            }
+            response = await crawler._get_response(
+                request_url,
+                headers=page_headers,
+                force_direct=True,
+            )
+            stats = parse_stats(str(getattr(response, "text", "")), work_id)
+            if _has_stats(stats):
                 sources.append("note SSR noteDetailMap")
+            elif not token:
+                return result_error(
+                    "xiaohongshu",
+                    url,
+                    work_id,
+                    "unsupported",
+                    "小红书公开笔记页需要 URL 中当前有效的 xsec_token",
+                )
+            else:
+                return result_error(
+                    "xiaohongshu",
+                    url,
+                    work_id,
+                    "blocked",
+                    "小红书 SSR 未返回目标笔记；当前出口受限或 URL 中的 xsec_token 已失效",
+                )
 
         if include_comments:
             if not cookie:
@@ -157,7 +169,6 @@ async def fetch(
                 "blocked" if has_detail_session else "unsupported",
                 (
                     "小红书详情会话未返回目标数据"
-                    + (f"（{feed_error}）" if feed_error else "")
                     if has_detail_session
                     else "小红书笔记页面未返回可验证互动或评论数据，URL 可能已失效或需要登录验证"
                 ),
@@ -171,7 +182,7 @@ async def fetch(
             reason=(
                 "小红书会话和动态签名已生效；评论仅返回指定公开页"
                 if include_comments
-                else "小红书互动量来自签名详情接口或笔记 SSR"
+                else "小红书互动量来自公开笔记页 SSR"
             ),
             source=" + ".join(sources),
             stats=stats,
@@ -209,36 +220,6 @@ async def _get(
                 headers=headers,
             )
             return unwrap_data(payload)
-        except PlatformCrawlerError:
-            if sign_format == "xyw":
-                raise
-    raise AssertionError("unreachable")
-
-
-async def _post(
-    crawler: PlatformCrawlerContext,
-    uri: str,
-    payload: dict[str, Any],
-    cookie: str,
-    referer: str,
-) -> dict[str, Any]:
-    for sign_format in ("xys", "xyw"):
-        headers = signed_headers(
-            uri,
-            cookie,
-            payload=payload,
-            sign_format=sign_format,
-            x_rap=uri == "/api/sns/web/v1/feed",
-        )
-        headers.update(authenticated_headers(cookie, referer))
-        headers["Content-Type"] = "application/json;charset=UTF-8"
-        try:
-            response = await crawler._post_json(
-                f"https://edith.xiaohongshu.com{uri}",
-                headers=headers,
-                data=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
-            )
-            return unwrap_data(response)
         except PlatformCrawlerError:
             if sign_format == "xyw":
                 raise
@@ -311,24 +292,6 @@ def unwrap_data(payload: dict[str, Any]) -> dict[str, Any]:
         data = payload.get("data")
         return data if isinstance(data, dict) else {}
     return payload
-
-
-def note_card(payload: dict[str, Any]) -> dict[str, Any]:
-    items = payload.get("items") or []
-    if isinstance(items, list) and items and isinstance(items[0], dict):
-        card = items[0].get("note_card") or items[0].get("noteCard") or items[0]
-        return card if isinstance(card, dict) else {}
-    return payload.get("note_card") or payload.get("noteCard") or payload
-
-
-def stats_from_note(note: dict[str, Any]) -> EngagementStats:
-    interact = note.get("interact_info") or note.get("interactInfo") or note
-    return EngagementStats(
-        likes=to_int(first_present(interact, "liked_count", "likedCount")),
-        favorites=to_int(first_present(interact, "collected_count", "collectedCount")),
-        shares=to_int(first_present(interact, "share_count", "shareCount")),
-        comments=to_int(first_present(interact, "comment_count", "commentCount")),
-    )
 
 
 def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:

@@ -46,6 +46,7 @@ class PlatformCrawlerContext(Protocol):
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         include_cookies: bool = False,
+        force_direct: bool = False,
     ) -> Any: ...
 
     def _platform_cookie(self, platform: EngagementPlatform) -> str: ...

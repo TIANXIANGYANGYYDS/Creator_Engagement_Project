@@ -583,6 +583,10 @@ def _browser_target_url(
         return f"https://m.weibo.cn/detail/{work_id}"
     if platform == "bilibili" and work_id.startswith("live:"):
         return f"https://live.bilibili.com/{work_id.removeprefix('live:')}"
+    if platform == "xiaohongshu" and "xsec_token=" in url and "xsec_source=" not in url:
+        parsed = urlparse(url)
+        query = f"{parsed.query}&xsec_source=pc_feed"
+        return parsed._replace(query=query).geturl()
     return url
 
 

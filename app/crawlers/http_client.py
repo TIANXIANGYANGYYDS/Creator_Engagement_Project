@@ -78,6 +78,20 @@ class CurlAsyncHttpClient:
             "creator_engagement_proxy_lease",
             default=None,
         )
+        self._force_direct: ContextVar[bool] = ContextVar(
+            "creator_engagement_force_direct",
+            default=False,
+        )
+
+    @asynccontextmanager
+    async def direct_scope(self) -> AsyncIterator[None]:
+        """Temporarily bypass a configured preferred proxy for one request path."""
+
+        token = self._force_direct.set(True)
+        try:
+            yield
+        finally:
+            self._force_direct.reset(token)
 
     @asynccontextmanager
     async def lease_scope(self) -> AsyncIterator[None]:
@@ -150,14 +164,17 @@ class CurlAsyncHttpClient:
         json: dict[str, Any] | None = None,
     ) -> Any:
         lease_state = self._lease_state.get()
+        force_direct = self._force_direct.get() and self.proxy_mode != "required"
         attempts = (
             1
-            if lease_state is not None
+            if lease_state is not None or force_direct
             else (2 if self.proxy_provider is not None and self.proxy_mode != "direct" else 1)
         )
         last_error: Exception | None = None
         for attempt in range(attempts):
-            if lease_state is not None:
+            if force_direct:
+                proxies = None
+            elif lease_state is not None:
                 if not lease_state.acquired:
                     lease_state.proxies = await self._acquire_proxy()
                     lease_state.acquired = True

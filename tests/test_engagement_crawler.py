@@ -157,6 +157,86 @@ def test_protocol_does_not_retry_intrinsic_unsupported_result(monkeypatch) -> No
     assert client.invalidations == []
 
 
+def test_xiaohongshu_interaction_wall_does_not_retry_fixed_direct_exit(
+    monkeypatch,
+) -> None:
+    calls = 0
+    note_id = "6a5585c000000000080326ac"
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        nonlocal calls
+        calls += 1
+        return EngagementResult(
+            platform="xiaohongshu",
+            canonical_url=f"https://www.xiaohongshu.com/explore/{note_id}",
+            work_id=note_id,
+            coverage="blocked",
+            reason="note-page wall",
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "xiaohongshu", handler)
+    crawler = EngagementCrawler(
+        client=LeaseAwareClient(),
+        max_protocol_attempts=3,
+    )
+
+    result = asyncio.run(crawler.fetch_interactions(
+        f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token=token",
+        "xiaohongshu",
+    ))
+
+    assert result.coverage == "blocked"
+    assert result.protocol_attempts == 1
+    assert calls == 1
+
+
+def test_xiaohongshu_interaction_wall_retries_with_required_proxy(
+    monkeypatch,
+) -> None:
+    calls = 0
+    note_id = "6a5585c000000000080326ac"
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return EngagementResult(
+                platform="xiaohongshu",
+                canonical_url=f"https://www.xiaohongshu.com/explore/{note_id}",
+                work_id=note_id,
+                coverage="blocked",
+                reason="note-page wall",
+            )
+        return EngagementResult(
+            platform="xiaohongshu",
+            canonical_url=f"https://www.xiaohongshu.com/explore/{note_id}",
+            work_id=note_id,
+            coverage="partial",
+            stats=EngagementStats(likes=9),
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "xiaohongshu", handler)
+    client = LeaseAwareClient()
+    client.proxy_mode = "required"
+    crawler = EngagementCrawler(
+        client=client,
+        proxy_provider=object(),
+        max_protocol_attempts=3,
+        protocol_retry_base_seconds=10,
+    )
+
+    result = asyncio.run(crawler.fetch_interactions(
+        f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token=token",
+        "xiaohongshu",
+    ))
+
+    assert result.stats.likes == 9
+    assert result.protocol_attempts == 2
+    assert calls == 2
+    assert client.lease_count == 2
+    assert len(client.invalidations) == 1
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [

@@ -34,10 +34,16 @@ CacheKey = tuple[str, str, str, int]
 class PlatformTrafficPolicy:
     max_concurrency: int
     min_interval_seconds: float
+    interactions_min_interval_seconds: float | None = None
+    comments_min_interval_seconds: float | None = None
 
 
 ENTERPRISE_PLATFORM_POLICIES: dict[EngagementPlatform, PlatformTrafficPolicy] = {
-    "xiaohongshu": PlatformTrafficPolicy(max_concurrency=1, min_interval_seconds=4),
+    "xiaohongshu": PlatformTrafficPolicy(
+        max_concurrency=1,
+        min_interval_seconds=4,
+        interactions_min_interval_seconds=1,
+    ),
     "kuaishou": PlatformTrafficPolicy(max_concurrency=1, min_interval_seconds=0.5),
     "wechat": PlatformTrafficPolicy(max_concurrency=1, min_interval_seconds=0.5),
 }
@@ -78,15 +84,37 @@ class EngagementService:
                 raise ValueError("platform max_concurrency must be greater than zero")
             if policy.min_interval_seconds < 0:
                 raise ValueError("platform min_interval_seconds must not be negative")
+            if any(
+                interval is not None and interval < 0
+                for interval in (
+                    policy.interactions_min_interval_seconds,
+                    policy.comments_min_interval_seconds,
+                )
+            ):
+                raise ValueError("operation min interval must not be negative")
         self._platform_semaphores = {
             platform: asyncio.Semaphore(policy.max_concurrency)
             for platform, policy in policies.items()
         }
-        self._platform_rate_limiters = {
-            platform: AsyncRequestRateLimiter(1 / policy.min_interval_seconds)
-            for platform, policy in policies.items()
-            if policy.min_interval_seconds > 0
-        }
+        self._platform_rate_limiters = {}
+        for platform, policy in policies.items():
+            intervals = {
+                "interactions": (
+                    policy.interactions_min_interval_seconds
+                    if policy.interactions_min_interval_seconds is not None
+                    else policy.min_interval_seconds
+                ),
+                "comments": (
+                    policy.comments_min_interval_seconds
+                    if policy.comments_min_interval_seconds is not None
+                    else policy.min_interval_seconds
+                ),
+            }
+            for operation, interval in intervals.items():
+                if interval > 0:
+                    self._platform_rate_limiters[(platform, operation)] = (
+                        AsyncRequestRateLimiter(1 / interval)
+                    )
 
     @classmethod
     def from_settings(
@@ -206,7 +234,9 @@ class EngagementService:
                 return cached[1].model_copy(deep=True)
             task = self._result_tasks.get(key)
             if task is None:
-                task = asyncio.create_task(self._collect_cached(key[1], collect))
+                task = asyncio.create_task(
+                    self._collect_cached(key[0], key[1], collect)
+                )
                 self._result_tasks[key] = task
         try:
             result = await asyncio.shield(task)
@@ -230,6 +260,7 @@ class EngagementService:
 
     async def _collect_cached(
         self,
+        operation: str,
         platform: str,
         collect: Callable[[], Awaitable[CachedResult]],
     ) -> CachedResult:
@@ -238,7 +269,7 @@ class EngagementService:
             async with self._collection_semaphore:
                 return await collect()
         async with platform_semaphore:
-            limiter = self._platform_rate_limiters.get(platform)
+            limiter = self._platform_rate_limiters.get((platform, operation))
             if limiter is not None:
                 await limiter.acquire()
             async with self._collection_semaphore:

@@ -116,10 +116,6 @@ def test_xiaohongshu_retries_blocked_xys_with_xyw() -> None:
 def test_xiaohongshu_empty_authenticated_detail_is_retryable_block() -> None:
     client = DualFakeClient(
         gets=[FakeResponse(text="<html></html>")],
-        posts=[
-            FakeResponse({"success": False, "msg": "verify required"}),
-            FakeResponse({"success": False, "msg": "verify required"}),
-        ],
     )
     result = asyncio.run(EngagementCrawler(
         client=client,
@@ -130,9 +126,39 @@ def test_xiaohongshu_empty_authenticated_detail_is_retryable_block() -> None:
     ))
 
     assert result.coverage == "blocked"
-    assert "verify required" in result.reason
-    assert len(client.post_calls) == 2
+    assert "xsec_token" in result.reason
+    assert len(client.post_calls) == 0
     assert len(client.get_calls) == 1
+
+
+def test_xiaohongshu_interactions_prefer_one_unsigned_ssr_request() -> None:
+    note_id = "6a5585c000000000080326ac"
+    text = (
+        '<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"'
+        + note_id
+        + '":{"note":{"noteId":"'
+        + note_id
+        + '","interactInfo":{"likedCount":"1.9万",'
+        '"collectedCount":"246","shareCount":"523",'
+        '"commentCount":"168"}}}}}}</script>'
+    )
+    client = DualFakeClient(gets=[FakeResponse(text=text)])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"xiaohongshu": "a1=a1-value; web_session=session-value"},
+    ).fetch_interactions(
+        f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token=token",
+        "小红书",
+    ))
+
+    assert result.stats.likes == 19000
+    assert result.stats.comments == 168
+    assert result.source == "note SSR noteDetailMap"
+    assert len(client.get_calls) == 1
+    assert "xsec_source=pc_feed" in client.get_calls[0][0]
+    assert "Cookie" not in client.get_calls[0][1]["headers"]
+    assert "Referer" not in client.get_calls[0][1]["headers"]
+    assert client.post_calls == []
 
 
 def test_kuaishou_detail_and_rest_comments_validate_target_id() -> None:

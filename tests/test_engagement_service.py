@@ -206,7 +206,8 @@ def test_platform_policy_serializes_and_spaces_request_starts() -> None:
             platform_policies={
                 "xiaohongshu": PlatformTrafficPolicy(
                     max_concurrency=1,
-                    min_interval_seconds=0.02,
+                    min_interval_seconds=1,
+                    interactions_min_interval_seconds=0.02,
                 ),
             },
         )

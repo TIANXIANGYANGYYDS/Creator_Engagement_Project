@@ -2,9 +2,8 @@
 
 最后验证：2026-08-22，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先、浏览器
 持久化会话接管，不接入付费数据供应商。快手企业协议链路最新全量为互动/评论均
-398/398 有数据；小红书低频评论最新 20/20，但互动在协议三试及浏览器后仍 0/20，不能承诺
-当前匿名稳定性。公众号
-任意文章互动/评论及小红书深分页不存在
+398/398 有数据；小红书互动已修正为匿名 SSR 100/100，低频评论为 20/20。公众号
+任意文章互动/评论及小红书无会话深分页不存在
 已验证的免费匿名协议，不硬编码浏览器 Cookie/签名。
 
 状态含义：
@@ -24,7 +23,7 @@
 | 头条 | 评论 | 可用（部分覆盖） | `/article/v4/tab_comments/`，参数 `aid/app_name/offset/count/group_id/item_id` | 只能说明指定公开页，不保证评论全集 |
 | 公众号 | 互动量 | 无会话无法稳定获取 | 匿名 SSR、`/mp/getappmsgext`；官方统计 API 需要自有公众号授权 | 匿名页通常不下发计数，不能仅凭文章 URL 获取任意账号数据 |
 | 公众号 | 评论 | 页面预载首屏可直接取 | `preload_comment_list`、`cgiDataNew.show_comment`、`/mp/appmsg_comment` | 只有页面实际预载的精选评论免会话；开启评论但无预载/文章会话时仍返回 `ret=-3 no session` |
-| 小红书 | 互动量 | 当前受阻（0/20） | Cookie + `xsec_token` 签名 feed、SSR、4/8 秒重试和浏览器均已执行 | 60 次详情尝试均 HTTP 461；代理+浏览器单测仍是验证码，不能报价为可用 |
+| 小红书 | 互动量 | 匿名纯协议可用（100/100） | 当前有效 `xsec_token` + `xsec_source=pc_feed` 直访笔记 SSR；自动补来源参数，不带评论 Cookie | 100 条新鲜 URL 各 1 GET，94 条返回赞/藏/评/分享四项、6 条返回页面公开的三项；过期或缺 token 不能恢复任意旧 URL |
 | 小红书 | 评论 | 低频首屏可用（20/20） | 会话 + `xhshow` 请求 `/api/sns/web/v2/comment/page` | 本轮 4 秒启动间隔返回 200 行；需要完整 `xsec_token`，深分页和长期持续性未证明 |
 | 好看 | 互动量 | 纯协议可用（字段不完整） | 首页匿名 Cookie → 目标页 SSR；精确播放、点赞、评论数 | 收藏、分享没有公开数字时保持 `null` |
 | 好看 | 评论 | 可用（部分覆盖） | `/haokan/ui-web/v2/comment/get`，`rn/url_key/pn/child_rn` | 只能说明指定页，不保证评论全集 |
@@ -39,7 +38,8 @@
 
 当前无需平台账号即可验证：抖音 2 项、B 站 2 项、微博 2 项、头条评论、好看互动量/评论、
 快手互动量/一级评论，快手企业全量两项均达到 398/398 有数据，但互动中 34 条只剩评论数。
-小红书评论本轮低频 20/20，互动量 0/20，不能把历史短时成功冒充当前稳定能力；
+小红书互动量本轮新鲜 URL 100/100，评论低频 20/20；两者分别使用匿名 SSR 与带会话签名
+评论端点，不能合并为一次上游请求；
 小红书后续评论页和公众号任意文章互动/评论没有接入付费接口。公众号接口仍区分作者关闭
 评论与原生会话 `no session`。
 
@@ -66,9 +66,9 @@ Cookie 交给服务端配置。
 
 - 微博 `api/comments/show?id&page` 确实可在无账号时读取第 2 页，已作为 `hotflow`
   登录跳转后的纯协议降级；访客 `SUB/SUBP` 即使完成 `incarnate`，仍不能解除更深页限制。
-- 小红书首页可纯协议生成 `a1/webId` 并取得新鲜 `note_id+xsec_token`，但匿名状态下
-  `xhshow 0.2.0` 的 `XYS_` 与 `XYW_` 均返回 HTTP 406；因此只把双格式重试用于调用方
-  自己的会话，不虚构匿名深分页。
+- 小红书推荐页可匿名下发新鲜 `note_id+xsec_token`；笔记详情必须补
+  `xsec_source=pc_feed`，且不能错误携带评论会话 Cookie。修正后匿名 SSR 百次为 100/100。
+  `xhshow 0.2.0` 双格式签名仍只用于带 `web_session` 的评论分页，不虚构匿名深分页。
 - 公众号匿名 `/mp/getappmsgext` 可能返回 `ret=0` 但不含统计，`/mp/appmsg_comment`
   无文章会话返回 `ret=-3`；只有 HTML 已预载的精选评论可直接解析。
 - 抖音按公开实现交叉还原后，用当前 UA、请求参数顺序、第一方 `ttwid` 和本地 `a_bogus`
@@ -77,6 +77,7 @@ Cookie 交给服务端配置。
   SSR，且可用 `og:url` 校验没有误读推荐视频。
 
 - <https://github.com/mashukui/xhs_search_comment_tool>
+- <https://github.com/tamnd/xiaohongshu-cli>
 - <https://github.com/shuicici/xiaohongshu-scraper>
 - <https://github.com/openweb-org/openweb/blob/main/src/sites/xiaohongshu/adapters/xiaohongshu-web.ts>
 - <https://github.com/Cloxl/xhshow/issues/104>

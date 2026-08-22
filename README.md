@@ -60,9 +60,9 @@ conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 该 Cookie 只会注入抖音域名，不会污染快手、小红书等平台的游客会话。
 
 快手公开作品默认复用本地游客设备状态走纯协议详情和评论接口，状态失效时才由浏览器重新
-生成，不需要账号。小红书游客态曾在新鲜
-公开笔记读取到互动量和首屏评论，但当前重复实测并不稳定。项目不接入付费数据供应商；
-小红书稳定首屏/深分页和任意公众号文章的互动/评论需要时复用调用方自己的平台会话。八个平台都可以在
+生成，不需要账号。小红书互动对带当前有效 `xsec_token` 的 URL 使用匿名 SSR，最新百测
+100/100；评论则单独复用调用方自己的平台会话。项目不接入付费数据供应商；小红书评论
+分页和任意公众号文章的互动/评论仍受各自会话边界约束。八个平台都可以在
 带桌面环境的本机建立独立 Profile：
 
 ```bash
@@ -92,7 +92,8 @@ conda run -n MyAgent uvicorn app.api.app:create_app --factory --host 0.0.0.0 --p
 LLM、Mongo、51 代理 API 和日志参数。当前代理模式：
 
 - `PROXY_MODE=direct`：只使用本机直连。
-- `PROXY_MODE=prefer`：配置 51 代理时使用 `AsyncDailiProxyPool`，没有代理时允许直连。
+- `PROXY_MODE=prefer`：配置 51 代理时通常使用 `AsyncDailiProxyPool`；小红书互动按百测结果
+  自动直连，其他路径没有代理时允许直连。
 - `PROXY_MODE=required`：必须取得代理，否则请求直接失败，不会静默直连。
 
 51 代理池沿用 Stock_Project 的 3 分钟 IP TTL、批量补池、单 IP 并发上限、失败淘汰、
@@ -138,7 +139,7 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | B 站 | 视频互动/评论；直播当前状态和最近弹幕 | 视频 `x/web-interface/view`、`x/v2/reply/wbi/main`；直播 `Room/get_info`、`dM/gethistory` | 视频支持分页；直播不提供历史弹幕全集 |
 | 微博 | 点赞、评论、转发和匿名评论分页 | `statuses/show`、`comments/hotflow`、`api/comments/show` | 可用，访客态部分覆盖 |
 | 好看 | 播放、点赞、评论总数和一级评论 | 目标页 SSR、`haokan/ui-web/v2/comment/get` | 纯协议匿名可用；收藏/分享未公开 |
-| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 签名 feed/评论接口、SSR、浏览器兜底 | 低频评论最新 20/20；互动最新 0/20 且代理+浏览器仍验证码，稳定互动需要更有效的调用方会话 |
+| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 互动匿名 SSR；评论 `xhshow` 动态签名 | 互动新鲜 URL 100/100、无需登录；评论低频 20/20，仍需要 `web_session` 与有效 token |
 | 抖音 | 匿名纯协议互动量和评论分页；浏览器仅作风控兜底 | 第一方访客 `ttwid`、纯 Python `a_bogus`、`/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 真实首屏 20 条、总数 2909；平台隐藏 `play_count` 时播放保持 `null` |
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
 | 公众号 | 页面公开字段；有文章会话时读取互动和评论 | 页面 SSR、`getappmsgext`、`appmsg_comment` | 任意文章匿名互动/评论无稳定免费接口；官方统计只适用于自有公众号授权 |
@@ -165,4 +166,8 @@ Cookie。
 详情传输失败时解析目标页 `__APOLLO_STATE__`；所有结果必须严格匹配 `photoId`。游客状态
 自然过期后才由浏览器重新生成，不把 `kww/kwssectoken` 写入代码。
 
-小红书评论接口已经定位到 `api/sns/web/v2/comment/page`。未登录网页会建立游客会话并返回首屏评论，但 UI 会阻止继续翻页；项目不会把第一页冒充成第二页。自有登录态可使用 `xhshow==0.2.0` 动态签名继续按游标请求；旧 `XYS_` 返回 406 时会自动重试 `XYW_`，两种格式均失败才标记受阻。
+小红书互动量使用 URL 中的当前有效 `xsec_token` 匿名读取笔记 SSR，自动补
+`xsec_source=pc_feed`，每次只有 1 个 GET，且不会混入评论 Cookie。评论接口是独立的
+`api/sns/web/v2/comment/page`：使用 `xhshow==0.2.0` 和调用方自己的 `web_session` 动态
+签名并按游标请求；旧 `XYS_` 返回 406 时自动重试 `XYW_`。游客 UI 阻止继续翻页时，项目
+不会把第一页冒充成第二页。

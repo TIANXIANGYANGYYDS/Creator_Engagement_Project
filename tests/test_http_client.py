@@ -114,6 +114,54 @@ def test_prefer_mode_uses_and_releases_proxy_lease() -> None:
     assert provider.failures == []
 
 
+def test_direct_scope_bypasses_preferred_proxy_inside_lease() -> None:
+    proxies = {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
+    provider = CountingProxyProvider(proxies)
+    session = FakeSession()
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=provider,
+        proxy_mode="prefer",
+        session=session,
+    )
+
+    async def run() -> None:
+        async with client.lease_scope():
+            async with client.direct_scope():
+                await client.get("https://example.com")
+
+    asyncio.run(run())
+
+    assert session.calls[0]["proxy"] is None
+    assert provider.acquisitions == 0
+    assert provider.successes == []
+    assert provider.failures == []
+
+
+def test_direct_scope_respects_required_proxy_mode() -> None:
+    proxies = {"https": "http://127.0.0.1:8080"}
+    provider = CountingProxyProvider(proxies)
+    session = FakeSession()
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=provider,
+        proxy_mode="required",
+        session=session,
+    )
+
+    async def run() -> None:
+        async with client.direct_scope():
+            await client.get("https://example.com")
+
+    asyncio.run(run())
+
+    assert session.calls[0]["proxy"] == proxies["https"]
+    assert provider.acquisitions == 1
+    assert provider.successes == [proxies]
+
+
 def test_post_uses_and_releases_proxy_lease() -> None:
     proxies = {"https": "http://127.0.0.1:8080"}
     provider = FakeProxyProvider(proxies)

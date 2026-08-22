@@ -57,14 +57,16 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 
 代码：`app/crawlers/platforms/xiaohongshu.py`
 
-- 互动量：有 Cookie 和 `xsec_token` 时优先签名请求 `/api/sns/web/v1/feed`；否则解析
-  笔记 SSR `noteDetailMap`。
+- 互动量：使用 URL 中当前有效的 `xsec_token` 匿名直访笔记页，缺少时自动补
+  `xsec_source=pc_feed`，从 SSR `noteDetailMap` 解析点赞、收藏、评论和分享；严格不携带
+  评论 Cookie。真实百测为 1 GET/次、100/100 有数据。
 - 评论：使用 `xhshow` 为 `/api/sns/web/v2/comment/page` 动态生成完整签名头，按 cursor
   遍历到指定页。旧 `XYS_` 被 HTTP 406 拒绝时自动重试 `XYW_`。
-- 详情：`/api/sns/web/v1/feed` 同时生成当前版本需要的 `x-rap-param`。
-- 失败处理：缺 Cookie/token 是不可重试的能力边界；会话齐全但详情返回 HTTP 461 或空目标
-  数据时标记 `blocked`，企业模式按 4/8 秒退避重试，再进入游客浏览器。
-- 会话边界：首屏可游客访问；稳定深分页需要调用方自己的会话和有效 `xsec_token`。
+- 失败处理：缺/过期 token 是 URL 本身的能力边界；匿名 SSR 无目标数据时直接返回明确状态，
+  不再启动高成本浏览器或把同一固定出口无意义重试三次。默认 `prefer` 模式绕过已实测不适合
+  此路径的代理；只有调用方明确指定 `required` 时才使用代理并按语义失败换出口。
+- 会话边界：互动量无需账号；评论仍需要可用 `web_session` 与有效 `xsec_token`。SSR HTML
+  没有评论正文，因此互动量和评论必须保持两个独立上游请求。
 
 ## 好看视频
 

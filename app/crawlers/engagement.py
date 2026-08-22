@@ -234,10 +234,25 @@ class EngagementCrawler:
                 include_stats=include_stats,
                 include_comments=include_comments,
             )
+            if (
+                should_retry
+                and platform == "xiaohongshu"
+                and include_stats
+                and not include_comments
+                and getattr(self.client, "proxy_mode", "direct") != "required"
+            ):
+                # A fixed direct exit cannot recover from the note-page wall.
+                # Retrying is useful only when the next attempt can rotate IP.
+                return result
             if not should_retry or attempt == self.max_protocol_attempts:
                 return result
 
-            delay = self._retry_delay(platform, attempt)
+            delay = self._retry_delay(
+                platform,
+                attempt,
+                include_stats=include_stats,
+                include_comments=include_comments,
+            )
             logger.warning(
                 "protocol_retry platform=%s work_id=%s attempt=%s/%s delay=%.2f coverage=%s reason=%s",
                 platform,
@@ -254,8 +269,21 @@ class EngagementCrawler:
         assert result is not None
         return result
 
-    def _retry_delay(self, platform: EngagementPlatform, attempt: int) -> float:
-        empirical_floor = 4.0 if platform == "xiaohongshu" else 0.0
+    def _retry_delay(
+        self,
+        platform: EngagementPlatform,
+        attempt: int,
+        *,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> float:
+        if platform == "xiaohongshu" and include_stats and not include_comments:
+            # Each failed SSR attempt invalidates its proxy lease. A new exit
+            # does not benefit from waiting on the old exit's rate limit.
+            return 0.0
+        empirical_floor = (
+            4.0 if platform == "xiaohongshu" and include_comments else 0.0
+        )
         base = max(self.protocol_retry_base_seconds, empirical_floor)
         return base * (2 ** (attempt - 1))
 
@@ -287,6 +315,11 @@ class EngagementCrawler:
         include_stats: bool,
         include_comments: bool,
     ) -> bool:
+        if result.platform == "xiaohongshu" and include_stats and not include_comments:
+            # A valid tokenized note URL is fully served by one SSR request.
+            # Browser navigation uses the same egress budget and turns a wall
+            # into a costly login/captcha flow without recovering counters.
+            return False
         if result.coverage in {"unsupported", "blocked", "failed"}:
             return True
         if include_stats and not any(
@@ -381,12 +414,26 @@ class EngagementCrawler:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         include_cookies: bool = False,
+        force_direct: bool = False,
     ) -> Any:
         request_headers = dict(headers or {})
         if include_cookies and self.cookies:
             request_headers["Cookie"] = self.cookies
         try:
-            response = await self.client.get(url, params=params, headers=request_headers)
+            direct_scope = getattr(self.client, "direct_scope", None)
+            if force_direct and callable(direct_scope):
+                async with direct_scope():
+                    response = await self.client.get(
+                        url,
+                        params=params,
+                        headers=request_headers,
+                    )
+            else:
+                response = await self.client.get(
+                    url,
+                    params=params,
+                    headers=request_headers,
+                )
         except Exception as exc:
             raise PlatformCrawlerError("engagement request failed") from exc
         status = int(getattr(response, "status_code", 0))

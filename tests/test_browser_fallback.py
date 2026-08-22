@@ -355,6 +355,11 @@ def test_browser_normalizes_share_and_desktop_content_urls() -> None:
         "weibo",
         "5333205569766651",
     ) == "https://m.weibo.cn/detail/5333205569766651"
+    assert _browser_target_url(
+        "https://www.xiaohongshu.com/explore/6a5585c000000000080326ac?xsec_token=token",
+        "xiaohongshu",
+        "6a5585c000000000080326ac",
+    ).endswith("xsec_token=token&xsec_source=pc_feed")
 
 
 def test_xhs_guest_does_not_mislabel_first_page_as_page_two() -> None:
