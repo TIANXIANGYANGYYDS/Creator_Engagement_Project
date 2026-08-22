@@ -37,6 +37,7 @@ class AsyncHttpClient(Protocol):
         *,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        discard_cookies: bool = False,
     ) -> Any:
         ...
 
@@ -132,8 +133,15 @@ class CurlAsyncHttpClient:
         *,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        discard_cookies: bool = False,
     ) -> Any:
-        return await self._request("GET", url, params=params, headers=headers)
+        return await self._request(
+            "GET",
+            url,
+            params=params,
+            headers=headers,
+            discard_cookies=discard_cookies,
+        )
 
     async def post(
         self,
@@ -162,6 +170,7 @@ class CurlAsyncHttpClient:
         headers: dict[str, str] | None = None,
         data: str | bytes | dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        discard_cookies: bool = False,
     ) -> Any:
         lease_state = self._lease_state.get()
         force_direct = self._force_direct.get() and self.proxy_mode != "required"
@@ -193,6 +202,7 @@ class CurlAsyncHttpClient:
                         data=data,
                         json=json,
                         proxy=proxy_url,
+                        discard_cookies=discard_cookies,
                     )
                 elif method == "GET":
                     response = await self._session.get(
@@ -200,6 +210,7 @@ class CurlAsyncHttpClient:
                         params=params,
                         headers=headers,
                         proxy=proxy_url,
+                        discard_cookies=discard_cookies,
                     )
                 else:
                     response = await self._session.post(

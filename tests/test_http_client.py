@@ -114,6 +114,20 @@ def test_prefer_mode_uses_and_releases_proxy_lease() -> None:
     assert provider.failures == []
 
 
+def test_get_can_discard_response_cookies() -> None:
+    session = FakeSession()
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_mode="direct",
+        session=session,
+    )
+
+    asyncio.run(client.get("https://example.com", discard_cookies=True))
+
+    assert session.calls[0]["discard_cookies"] is True
+
+
 def test_direct_scope_bypasses_preferred_proxy_inside_lease() -> None:
     proxies = {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
     provider = CountingProxyProvider(proxies)

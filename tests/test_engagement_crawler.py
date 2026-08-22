@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
 from typing import Any
 
 import pytest
@@ -28,11 +29,13 @@ class FakeResponse:
         text: str = "",
         status_code: int = 200,
         cookies: dict[str, str] | None = None,
+        url: str = "",
     ) -> None:
         self._payload = payload
         self.text = text
         self.status_code = status_code
         self.cookies = cookies or {}
+        self.url = url
 
     def json(self) -> dict[str, Any]:
         if self._payload is None:
@@ -242,7 +245,10 @@ def test_xiaohongshu_interaction_wall_retries_with_required_proxy(
     [
         ("https://www.bilibili.com/video/BV1abc123", ("bilibili", "BV1abc123")),
         ("https://www.bilibili.com/video/av12345", ("bilibili", "12345")),
-        ("https://live.bilibili.com/22595201#pub=1787011298", ("bilibili", "live:22595201")),
+        ("https://www.bilibili.com/read/cv34832696/", ("bilibili", "article:34832696")),
+        ("https://www.bilibili.com/read/mobile?id=34832696", ("bilibili", "article:34832696")),
+        ("https://www.bilibili.com/opus/907932915033178114", ("bilibili", "opus:907932915033178114")),
+        ("https://live.bilibili.com/22595201#pub=1787011298", ("bilibili", "")),
         ("https://m.weibo.cn/detail/5301066679190033", ("weibo", "5301066679190033")),
         ("http://weibo.com/6539142196/RdVPmEYKD", ("weibo", "5333205569766651")),
         ("https://www.xiaohongshu.com/explore/6a5585c000000000080326ac", ("xiaohongshu", "6a5585c000000000080326ac")),
@@ -264,52 +270,126 @@ def test_weibo_desktop_bid_conversion() -> None:
     assert weibo_bid_to_mid("RdVPmEYKD") == "5333205569766651"
 
 
-def test_bilibili_live_interactions_use_room_info() -> None:
+def test_bilibili_article_interactions_use_public_viewinfo() -> None:
     client = FakeClient(FakeResponse(payload={
         "code": 0,
         "data": {
-            "room_id": 22595201,
-            "online": 439,
-            "attention": 1666281,
-            "live_status": 1,
+            "stats": {
+                "view": 7163,
+                "favorite": 709,
+                "like": 422,
+                "reply": 23,
+                "share": 34,
+                "coin": 68,
+                "dynamic": 42,
+            },
         },
     }))
 
     result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
-        "https://live.bilibili.com/22595201#pub=1787011298",
+        "https://www.bilibili.com/read/cv34832696/",
         "B站",
     ))
 
-    assert result.work_id == "22595201"
-    assert result.stats.online == 439
-    assert result.stats.followers == 1666281
-    assert result.stats.live_status == 1
-    assert client.calls[0][0].endswith("/room/v1/Room/get_info")
+    assert result.work_id == "cv34832696"
+    assert result.stats.views == 7163
+    assert result.stats.likes == 422
+    assert result.stats.comments == 23
+    assert result.stats.reposts == 42
+    assert client.calls[0][0].endswith("/x/article/viewinfo")
 
 
-def test_bilibili_live_comments_return_recent_danmaku_window() -> None:
-    client = FakeClient(FakeResponse(payload={
-        "code": 0,
-        "data": {
-            "admin": [],
-            "room": [{
-                "id_str": "comment-1",
-                "nickname": "直播用户",
-                "text": "直播弹幕",
-            }],
-        },
-    }))
+def test_bilibili_article_comments_use_type_12_without_detail_request() -> None:
+    client = FakeClient(
+        FakeResponse(payload={
+            "code": 0,
+            "data": {"wbi_img": {
+                "img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz0123456789abcdefgh.png",
+                "sub_url": "https://i0.hdslb.com/bfs/wbi/ZYXWVUTSRQPONMLKJIHGFEDCBA987654321zyxwvutsrqponmlk.png",
+            }},
+        }),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {
+                "cursor": {"next": 2, "all_count": 23},
+                "replies": [{
+                    "rpid": "comment-1",
+                    "member": {"uname": "专栏读者"},
+                    "content": {"message": "专栏评论"},
+                }],
+            },
+        }),
+    )
 
     result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
-        "https://live.bilibili.com/22595201#pub=1787011298",
+        "https://www.bilibili.com/read/cv34832696/",
         "bilibili",
         1,
     ))
 
     assert result.comments[0].comment_id == "comment-1"
-    assert result.comments[0].text == "直播弹幕"
+    assert result.comments[0].text == "专栏评论"
+    assert result.total_comments == 23
     assert result.next_page is None
-    assert client.calls[0][0].endswith("/xlive/web-room/v1/dM/gethistory")
+    assert len(client.calls) == 2
+    assert client.calls[1][1]["params"]["type"] == "12"
+    assert client.calls[1][1]["params"]["oid"] == "34832696"
+
+
+def test_bilibili_opus_uses_page_comment_target_and_stats() -> None:
+    initial_state = {
+        "detail": {
+            "id_str": "907932915033178114",
+            "basic": {"comment_type": 12, "comment_id_str": "33179525"},
+            "modules": [{
+                "module_stat": {
+                    "forward": {"count": 1},
+                    "comment": {"count": 2},
+                    "like": {"count": 3},
+                    "coin": {"count": 4},
+                    "favorite": {"count": 5},
+                },
+            }],
+        },
+    }
+    html = f"<script>window.__INITIAL_STATE__ = {json.dumps(initial_state)};</script>"
+    client = FakeClient(
+        FakeResponse(text=html),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {"wbi_img": {
+                "img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz0123456789abcdefgh.png",
+                "sub_url": "https://i0.hdslb.com/bfs/wbi/ZYXWVUTSRQPONMLKJIHGFEDCBA987654321zyxwvutsrqponmlk.png",
+            }},
+        }),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {"cursor": {"all_count": 2, "next": 0}, "replies": []},
+        }),
+    )
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch(
+        "https://www.bilibili.com/opus/907932915033178114"
+    ))
+
+    assert result.stats.likes == 3
+    assert result.stats.comments == 2
+    assert result.stats.favorites == 5
+    assert client.calls[0][1]["discard_cookies"] is True
+    assert client.calls[2][1]["params"]["type"] == "12"
+    assert client.calls[2][1]["params"]["oid"] == "33179525"
+
+
+def test_bilibili_live_url_is_outside_content_scope() -> None:
+    client = FakeClient()
+
+    with pytest.raises(ValueError, match="cannot extract bilibili content id"):
+        asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+            "https://live.bilibili.com/22595201",
+            "B站",
+        ))
+
+    assert client.calls == []
 
 
 @pytest.mark.parametrize(
@@ -530,7 +610,12 @@ def test_bilibili_fetches_stats_and_comments() -> None:
         FakeResponse(payload={
             "code": 0,
             "data": {
-                "cursor": {"next": 2, "all_count": 21},
+                "cursor": {
+                    "next": 2,
+                    "all_count": 21,
+                    "is_end": False,
+                    "pagination_reply": {"next_offset": "token-2"},
+                },
                 "replies": [{
                     "rpid": 9,
                     "ctime": 1700000000,

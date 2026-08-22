@@ -83,9 +83,15 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
     query = parse_qs(parsed.query)
     if "bilibili.com" in host:
         if host == "live.bilibili.com":
-            room_match = re.search(r"/(\d+)(?:/|$)", path)
-            room_id = room_match.group(1) if room_match else ""
-            return "bilibili", f"live:{room_id}" if room_id else ""
+            return "bilibili", ""
+        article_match = re.search(r"/read/cv(\d+)(?:/|$)", path, re.I)
+        if article_match:
+            return "bilibili", f"article:{article_match.group(1)}"
+        if path.rstrip("/") == "/read/mobile" and query.get("id", [""])[0].isdigit():
+            return "bilibili", f"article:{query['id'][0]}"
+        opus_match = re.search(r"/opus/(\d+)(?:/|$)", path)
+        if opus_match:
+            return "bilibili", f"opus:{opus_match.group(1)}"
         match = re.search(r"/(BV[0-9A-Za-z]+|av\d+)(?:/|$)", path)
         work_id = match.group(1) if match else query.get("bvid", [""])[0]
         return "bilibili", work_id[2:] if work_id.startswith("av") else work_id

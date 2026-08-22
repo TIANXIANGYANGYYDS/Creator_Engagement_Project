@@ -1,6 +1,6 @@
 # 八个平台 16 项协议能力矩阵
 
-最后验证：2026-08-22，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先、浏览器
+最后验证：2026-08-23，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先、浏览器
 持久化会话接管，不接入付费数据供应商。快手企业协议链路最新全量为互动/评论均
 398/398 有数据；小红书互动已修正为匿名 SSR 100/100，低频评论为 20/20。公众号
 任意文章互动/评论及小红书无会话深分页不存在
@@ -21,16 +21,16 @@
 | 抖音 | 评论 | 匿名纯协议分页可用（已实测） | 同一访客/IP 请求 `/aweme/v1/web/comment/list/`；首屏/第 2 页各 20 条、总数 2909 | 只能说明公开页；签名/访客规则变化或风控空包时进入浏览器兜底 |
 | 头条 | 互动量 | 受 SSR/挑战影响 | 文章 SSR 中的 `itemCounter`/`likeData`；无 `_signature` 的评论接口可用 | 直接协议首包可能是 JSVM 挑战，统计字段可能为空 |
 | 头条 | 评论 | 可用（部分覆盖） | `/article/v4/tab_comments/`，参数 `aid/app_name/offset/count/group_id/item_id` | 只能说明指定公开页，不保证评论全集 |
-| 公众号 | 互动量 | 无会话无法稳定获取 | 匿名 SSR、`/mp/getappmsgext`；官方统计 API 需要自有公众号授权 | 匿名页通常不下发计数，不能仅凭文章 URL 获取任意账号数据 |
-| 公众号 | 评论 | 页面预载首屏可直接取 | `preload_comment_list`、`cgiDataNew.show_comment`、`/mp/appmsg_comment` | 只有页面实际预载的精选评论免会话；开启评论但无预载/文章会话时仍返回 `ret=-3 no session` |
+| 公众号 | 互动量 | 无会话无法稳定获取 | 匿名 SSR（含 V2/零值字段）、`/mp/getappmsgext`；官方统计 API 需要自有公众号授权 | 匿名页通常不下发计数；批量访问还可能重定向 `wappoc_appmsgcaptcha`，现已明确标记 `blocked` |
+| 公众号 | 评论 | 页面预载首屏可直接取 | `preload_comment_list`、`cgiDataNew.show_comment`、`/mp/appmsg_comment` | 页面预载精选评论免会话；作者关闭返回完整空页；开启但无文章会话仍返回 `ret=-3 no session` |
 | 小红书 | 互动量 | 匿名纯协议可用（100/100） | 当前有效 `xsec_token` + `xsec_source=pc_feed` 直访笔记 SSR；自动补来源参数，不带评论 Cookie | 100 条新鲜 URL 各 1 GET，94 条返回赞/藏/评/分享四项、6 条返回页面公开的三项；过期或缺 token 不能恢复任意旧 URL |
 | 小红书 | 评论 | 低频首屏可用（20/20） | 会话 + `xhshow` 请求 `/api/sns/web/v2/comment/page` | 本轮 4 秒启动间隔返回 200 行；需要完整 `xsec_token`，深分页和长期持续性未证明 |
 | 好看 | 互动量 | 纯协议可用（字段不完整） | 首页匿名 Cookie → 目标页 SSR；精确播放、点赞、评论数 | 收藏、分享没有公开数字时保持 `null` |
 | 好看 | 评论 | 可用（部分覆盖） | `/haokan/ui-web/v2/comment/get`，`rn/url_key/pn/child_rn` | 只能说明指定页，不保证评论全集 |
 | 快手 | 互动量 | 企业协议可用（398/398） | `visionVideoDetail` + SSR Apollo + REST/GraphQL 评论总数；语义失败换 IP | 364 条拿齐播放/点赞/评论；34 条详情不可用，仅返回评论数，不伪造旧点赞 |
 | 快手 | 评论 | 企业协议可用（398/398） | `/rest/v/photo/comment/list`，验证码时回退 `commentListQuery`，按 `pcursor` 分页 | 首页共 854 行；只返回一级评论，子回复数量保留但正文需独立 sublist 语义 |
-| B 站 | 互动量 | 可用（部分覆盖） | 视频 `/x/web-interface/view`；直播 `Room/get_info` | 直播只返回当前在线、关注和开播状态，不等同于累计互动 |
-| B 站 | 评论 | 可用（部分覆盖） | 视频 `/x/v2/reply/wbi/main`；直播 `dM/gethistory` | 视频支持游标分页；直播只提供最近弹幕窗口，不能回溯历史全集 |
+| B 站 | 互动量 | 视频和专栏匿名纯协议可用 | 视频 `/x/web-interface/view`；`cv` `/x/article/viewinfo`；Opus `__INITIAL_STATE__.module_stat` | Opus 页面未公开阅读数时 `views=null`，其余公开赞/评/转/藏/币照实返回；直播不在范围内 |
+| B 站 | 评论 | 视频和专栏匿名分页可用 | WBI `/x/v2/reply/wbi/main`：视频 `type=1`、专栏 `type=12`，`mode=2` + `next_offset` | 只返回一级公开评论；WBI 受限时旧接口回退可能只给少量当前可见评论 |
 | 微博 | 互动量 | 可用（部分覆盖） | `m.weibo.cn/statuses/show?id=...` | 访客态字段受限流和可见性影响 |
 | 微博 | 评论 | 前两页匿名可用（部分覆盖） | 首屏 `comments/hotflow`；登录跳转时降级 `api/comments/show?page=N` | 两个接口排序和总数口径不同；本轮第 2 页成功，第 3 页仍可能 `ok=-100` |
 
@@ -70,7 +70,11 @@ Cookie 交给服务端配置。
   `xsec_source=pc_feed`，且不能错误携带评论会话 Cookie。修正后匿名 SSR 百次为 100/100。
   `xhshow 0.2.0` 双格式签名仍只用于带 `web_session` 的评论分页，不虚构匿名深分页。
 - 公众号匿名 `/mp/getappmsgext` 可能返回 `ret=0` 但不含统计，`/mp/appmsg_comment`
-  无文章会话返回 `ret=-3`；只有 HTML 已预载的精选评论可直接解析。
+  无文章会话返回 `ret=-3`；只有 HTML 已预载的精选评论可直接解析。批量全参数文章实测还会
+  进入 `/mp/wappoc_appmsgcaptcha`，现已作为风控而非空数据返回。
+- B 站当前专栏实测：`cv34832696` 一次详情 GET 返回 7 类互动字段；WBI 使用 `type=12`
+  返回 18 条一级评论、总计数 23。另测 4 个 Opus，5/5 互动有数据、5/5 评论有正文；页面
+  直接提供每篇的评论 oid/type，无需登录或浏览器。直播 URL 已从路由和成本口径移除。
 - 抖音按公开实现交叉还原后，用当前 UA、请求参数顺序、第一方 `ttwid` 和本地 `a_bogus`
   完成真实验收；详情和评论均在同一匿名会话返回有效数据，浏览器降为备用路径。
 - 好看视频无需复制第三方算法：同一纯协议会话先访问首页，再访问目标页即可得到目标
@@ -87,6 +91,8 @@ Cookie 交给服务端配置。
 - <https://github.com/Moore-developers/moore-wechat-article-downloader>
 - <https://greasyfork.org/scripts/535482-wechat-plus/code>
 - <https://developers.weixin.qq.com/doc/offiaccount/Analytics/Graphic_Analysis_Data_Interface.html>
+- <https://www.bilibili.com/read/cv34832696/>
+- <https://www.bilibili.com/opus/907932915033178114>
 - <https://github.com/intAV/Douyin_live_like>
 - <https://github.com/tamnd/douyin-cli>
 - <https://github.com/Johnserf-Seed/f2/blob/main/f2/utils/abogus.py>

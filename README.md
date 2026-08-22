@@ -136,7 +136,7 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 
 | 平台 | 当前能力 | 协议证据 | 状态 |
 |---|---|---|---|
-| B 站 | 视频互动/评论；直播当前状态和最近弹幕 | 视频 `x/web-interface/view`、`x/v2/reply/wbi/main`；直播 `Room/get_info`、`dM/gethistory` | 视频支持分页；直播不提供历史弹幕全集 |
+| B 站 | 视频、专栏/图文互动量和一级评论 | 视频 `x/web-interface/view`；专栏 `x/article/viewinfo` 或 Opus SSR；评论 `x/v2/reply/wbi/main` | 匿名纯协议可用；直播 URL 不在本项目业务范围 |
 | 微博 | 点赞、评论、转发和匿名评论分页 | `statuses/show`、`comments/hotflow`、`api/comments/show` | 可用，访客态部分覆盖 |
 | 好看 | 播放、点赞、评论总数和一级评论 | 目标页 SSR、`haokan/ui-web/v2/comment/get` | 纯协议匿名可用；收藏/分享未公开 |
 | 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 互动匿名 SSR；评论 `xhshow` 动态签名 | 互动新鲜 URL 100/100、无需登录；评论低频 20/20，仍需要 `web_session` 与有效 token |
@@ -146,8 +146,9 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | 快手 | 播放、点赞、评论总数和一级评论 | `visionVideoDetail`、SSR Apollo、REST/GraphQL 评论双通道 | 无需账号；398 条互动和 398 条评论企业实测均有数据，详情已下线时仅返回可验证评论数 |
 
 真实输入 URL 同时兼容头条 `/i{id}`、快手 `c.kuaishou.com/fw/photo/{id}`、微博桌面端
-`/用户ID/base62短ID` 和 `live.bilibili.com/{room_id}`。这些变体只在路由层规范化，平台
-采集器仍使用同一套目标 ID 校验，不会把用户 ID、推荐内容或其他房间数据当成目标作品。
+`/用户ID/base62短ID`，以及 B 站 `/read/cv{id}`、`/read/mobile?id=...`、`/opus/{id}`。
+这些变体只在路由层规范化，平台采集器仍校验目标 ID，不会把用户 ID 或推荐内容当成目标作品；
+`live.bilibili.com` 会在请求上游前拒绝。
 
 不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音的
 访客状态由运行时向第一方初始化，`a_bogus` 由本地算法按请求即时计算；若协议受风控，

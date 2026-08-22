@@ -49,6 +49,9 @@ async def fetch(
             },
         )
         text = str(getattr(article_response, "text", "") or "")
+        response_url = str(getattr(article_response, "url", "") or "")
+        if "/mp/wappoc_appmsgcaptcha" in response_url:
+            raise PlatformBlockedError("公众号文章触发访问环境验证码")
         metadata = parse_metadata(text, url)
         stats = parse_stats(text) if include_stats else EngagementStats()
         if include_stats and not _has_stats(stats) and cookie:
@@ -243,11 +246,13 @@ def parse_metadata(text: str, url: str) -> dict[str, str]:
         )
         if match:
             values[key] = html.unescape(match.group(1))
-    if "biz" not in values:
-        values["biz"] = values.get("bizuin", "")
     parsed = urlparse(url)
-    values.setdefault("mid", parse_qs(parsed.query).get("mid", [""])[0])
-    values.setdefault("idx", parse_qs(parsed.query).get("idx", ["1"])[0])
+    query = parse_qs(parsed.query)
+    if not values.get("biz"):
+        values["biz"] = values.get("bizuin") or query.get("__biz", [""])[0]
+    values.setdefault("sn", query.get("sn", [""])[0])
+    values.setdefault("mid", query.get("mid", [""])[0])
+    values.setdefault("idx", query.get("idx", ["1"])[0])
     return values
 
 
@@ -255,22 +260,38 @@ def parse_stats(text: str) -> EngagementStats:
     decoded = html.unescape(text).replace(r"\u0022", '"').replace(r'\"', '"')
     values: dict[str, int | None] = {}
     for key in (
-        "read_num", "readCount", "like_num", "old_like_num",
+        "read_num", "read_num_v2", "readCount",
+        "like_num", "like_num_v2", "old_like_num", "old_like_num_v2", "likeCount",
         "comment_count", "commentCount", "share_count", "shareCount",
     ):
-        match = re.search(rf"[\"']{re.escape(key)}[\"']\s*[:=]\s*[\"']?([0-9]+)", decoded)
+        match = re.search(
+            rf"(?<![\w])[\"']?{re.escape(key)}[\"']?\s*[:=]\s*[\"']?([0-9]+)",
+            decoded,
+        )
         if match:
             values[key] = to_int(match.group(1))
     return EngagementStats(
-        views=values.get("read_num") or values.get("readCount"),
-        likes=values.get("like_num") or values.get("old_like_num"),
-        comments=values.get("comment_count") or values.get("commentCount"),
-        shares=values.get("share_count") or values.get("shareCount"),
+        views=to_int(first_present(values, "read_num", "read_num_v2", "readCount")),
+        likes=to_int(first_present(
+            values,
+            "like_num",
+            "like_num_v2",
+            "old_like_num",
+            "old_like_num_v2",
+            "likeCount",
+        )),
+        comments=to_int(first_present(values, "comment_count", "commentCount")),
+        shares=to_int(first_present(values, "share_count", "shareCount")),
     )
 
 
 def parse_stats_payload(payload: dict[str, Any]) -> EngagementStats:
     nested = payload.get("appmsgstat") or payload.get("appmsg_stat") or payload
+    if isinstance(nested, str):
+        try:
+            nested = json.loads(html.unescape(nested))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            nested = {}
     if not isinstance(nested, dict):
         return EngagementStats()
     return EngagementStats(
@@ -294,6 +315,10 @@ def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
         payload.get("elected_comment")
         or payload.get("comment")
         or payload.get("comments")
+        or find_nested_value(
+            payload,
+            {"elected_comment", "comment_list", "comments"},
+        )
         or []
     )
     if isinstance(candidates, dict):
@@ -350,6 +375,7 @@ def parse_preloaded_comment_payload(text: str) -> dict[str, Any]:
             if string_match is None:
                 return {}
             decoded = ast.literal_eval(quote + string_match.group(1) + quote)
+            decoded = html.unescape(decoded)
             value = json.loads(decoded) if decoded else {}
         elif tail[0] in {"{", "["}:
             value, _ = json.JSONDecoder().raw_decode(tail)
@@ -364,7 +390,9 @@ def parse_preloaded_comment_payload(text: str) -> dict[str, Any]:
 
 def parse_preloaded_comment_total(text: str) -> int | None:
     match = re.search(
-        r"(?:\bvar\s+|\bwindow\.)?preload_comment_total_cnt\s*=\s*[\"']?([0-9]+)",
+        r"(?:\bvar\s+|\bwindow\.)?"
+        r"(?:preload_comment_total_cnt|elected_comment_total_cnt)"
+        r"\s*=\s*[\"']?([0-9]+)",
         text,
         re.I,
     )

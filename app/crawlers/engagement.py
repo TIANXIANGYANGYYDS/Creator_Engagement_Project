@@ -415,25 +415,24 @@ class EngagementCrawler:
         headers: dict[str, str] | None = None,
         include_cookies: bool = False,
         force_direct: bool = False,
+        discard_cookies: bool = False,
     ) -> Any:
         request_headers = dict(headers or {})
         if include_cookies and self.cookies:
             request_headers["Cookie"] = self.cookies
+        request_kwargs: dict[str, Any] = {
+            "params": params,
+            "headers": request_headers,
+        }
+        if discard_cookies:
+            request_kwargs["discard_cookies"] = True
         try:
             direct_scope = getattr(self.client, "direct_scope", None)
             if force_direct and callable(direct_scope):
                 async with direct_scope():
-                    response = await self.client.get(
-                        url,
-                        params=params,
-                        headers=request_headers,
-                    )
+                    response = await self.client.get(url, **request_kwargs)
             else:
-                response = await self.client.get(
-                    url,
-                    params=params,
-                    headers=request_headers,
-                )
+                response = await self.client.get(url, **request_kwargs)
         except Exception as exc:
             raise PlatformCrawlerError("engagement request failed") from exc
         status = int(getattr(response, "status_code", 0))

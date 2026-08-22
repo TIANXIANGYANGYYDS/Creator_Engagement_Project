@@ -302,16 +302,16 @@
         </tr>
 
         <tr>
-          <td class="platform-cell">B站</td><td class="service-cell">互动量</td><td>9</td>
-          <td class="upstream-cell">1 GET：<code>x/web-interface/view</code></td><td class="result-ok">9 / 9<br>100%</td>
-          <td class="time-cell"><strong>0.091 / 0.177s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>可用；样本较少，直播字段口径另计</td>
+          <td class="platform-cell">B站</td><td class="service-cell">互动量</td><td>5</td>
+          <td class="upstream-cell">1 GET：视频详情 / 专栏 viewinfo / Opus SSR</td><td class="result-ok">5 / 5<br>100%</td>
+          <td class="time-cell"><strong>0.157 / 0.716s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；1 个 cv + 4 个 Opus，直播不在业务范围</td>
         </tr>
         <tr>
-          <td class="platform-cell">B站</td><td class="service-cell">评论第 1 页</td><td>9</td>
-          <td class="upstream-cell">3 GET：详情 + nav + WBI 评论</td><td class="result-bad">6 / 9<br>66.7%</td>
-          <td class="time-cell"><strong>0.489 / 23.332s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>部分可用；返回 42 行，含直播/失效内容边界</td>
+          <td class="platform-cell">B站</td><td class="service-cell">评论第 1 页</td><td>5</td>
+          <td class="upstream-cell">cv 2 GET；Opus/视频 3 GET；WBI 风控时 +1</td><td class="result-ok">5 / 5<br>100%</td>
+          <td class="time-cell"><strong>0.389 / 0.508s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；共 61 行，type=12 + 最新排序分页</td>
         </tr>
 
         <tr class="group-even">

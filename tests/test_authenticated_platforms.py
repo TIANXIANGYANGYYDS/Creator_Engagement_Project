@@ -6,13 +6,21 @@ from typing import Any
 
 from app.crawlers.engagement import EngagementCrawler
 from app.crawlers.platform_session import PlatformSessionStore
+from app.crawlers.platforms.wechat import parse_metadata as parse_wechat_metadata
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, Any] | None = None, text: str = "", status_code: int = 200) -> None:
+    def __init__(
+        self,
+        payload: dict[str, Any] | None = None,
+        text: str = "",
+        status_code: int = 200,
+        url: str = "",
+    ) -> None:
         self.payload = payload
         self.text = text
         self.status_code = status_code
+        self.url = url
 
     def json(self) -> dict[str, Any]:
         if self.payload is None:
@@ -530,6 +538,57 @@ def test_wechat_reads_preloaded_first_page_without_session() -> None:
     assert result.comments[0].text == "预载评论"
     assert result.total_comments == 7
     assert result.next_page == 2
+
+
+def test_wechat_reads_unquoted_zero_and_v2_stats() -> None:
+    html = """
+    <script>
+      window.appmsgstat = {
+        read_num_v2: 1234,
+        like_num_v2: 0,
+        comment_count: 8,
+        share_count: 9
+      };
+    </script>
+    """
+    result = asyncio.run(EngagementCrawler(
+        client=DualFakeClient(gets=[FakeResponse(text=html)]),
+    ).fetch_interactions(
+        "https://mp.weixin.qq.com/s?__biz=MzA=&mid=20&idx=1&sn=abc",
+        "公众号",
+    ))
+
+    assert result.stats.views == 1234
+    assert result.stats.likes == 0
+    assert result.stats.comments == 8
+    assert result.stats.shares == 9
+
+
+def test_wechat_metadata_uses_full_article_query_when_html_omits_biz() -> None:
+    metadata = parse_wechat_metadata(
+        "<script>window.cgiDataNew = {show_comment: 1, comment_id: 10};</script>",
+        "https://mp.weixin.qq.com/s?__biz=MzA=&mid=20&idx=2&sn=abc",
+    )
+
+    assert metadata["biz"] == "MzA="
+    assert metadata["mid"] == "20"
+    assert metadata["idx"] == "2"
+    assert metadata["sn"] == "abc"
+
+
+def test_wechat_captcha_redirect_is_reported_as_blocked() -> None:
+    result = asyncio.run(EngagementCrawler(
+        client=DualFakeClient(gets=[FakeResponse(
+            text="<html></html>",
+            url="https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?poc_token=token",
+        )]),
+    ).fetch_interactions(
+        "https://mp.weixin.qq.com/s/article-token",
+        "公众号",
+    ))
+
+    assert result.coverage == "blocked"
+    assert "验证码" in result.reason
 
 
 def test_weibo_falls_back_to_anonymous_numbered_page() -> None:

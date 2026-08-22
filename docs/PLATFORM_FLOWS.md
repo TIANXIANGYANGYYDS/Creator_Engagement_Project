@@ -45,12 +45,13 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 代码：`app/crawlers/platforms/wechat.py`
 
 - 互动量：先解析文章页 `appmsgstat/cgiDataNew`，有自有文章会话时再尝试
-  `/mp/getappmsgext`。
+  `/mp/getappmsgext`。页面解析兼容未加引号字段、`read_num_v2/like_num_v2` 和数值 `0`。
 - 评论：先解析页面直接下发的 `preload_comment_list`；首屏有精选评论时无需额外会话。
   否则检查 `show_comment`；作者关闭评论时返回 `complete` 空结果。开启评论时，使用文章
   参数和自有会话请求 `/mp/appmsg_comment`，页码转换为 offset。
-- 失败处理：缺参数、`ret=-3 no session` 和平台阻断分别返回 `unsupported/blocked`，随后
-  可由浏览器验证当前会话可见内容。
+- 失败处理：作者关闭评论、缺参数、`ret=-3 no session` 和
+  `/mp/wappoc_appmsgcaptcha` 验证码重定向分别返回可区分的状态，随后可由浏览器验证当前
+  会话可见内容，不再把验证码页误报成“文章无数据”。
 - 会话边界：任意公众号文章不存在已验证的免费匿名互动/评论接口，不伪造手机微信会话。
 
 ## 小红书
@@ -101,12 +102,20 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 代码：`app/crawlers/platforms/bilibili.py`
 
 - 视频互动量：请求 `/x/web-interface/view`，解析播放、点赞、评论、分享、收藏、投币和弹幕。
+- 专栏/图文互动量：`/read/cv{id}` 使用 `/x/article/viewinfo`；新版 `/opus/{id}` 解析页面
+  `window.__INITIAL_STATE__` 的 `module_stat`。两种 URL 都只需要 1 个匿名 GET。
 - 评论：从 `/x/web-interface/nav` 动态提取 WBI key，签名请求
-  `/x/v2/reply/wbi/main`，把公开页码转换为内部 cursor；旧 reply 接口仅作兼容回退。
-- 直播：`live.bilibili.com/{room_id}` 使用 `Room/get_info` 返回当前在线、关注和开播状态；
-  `dM/gethistory` 只返回最近弹幕窗口，不将其伪装为历史评论全集。
+  `/x/v2/reply/wbi/main`。视频使用 `type=1`；专栏使用页面或 URL 确认的 `type=12/oid`。
+  排序固定为 `mode=2`（最新评论），按 `pagination_reply.next_offset` 转换页码；旧 reply 接口
+  仅作 WBI 风控回退。
+- 请求数：视频评论是详情 + nav + WBI 共 3 GET；`cv` 评论已知 oid，只需 nav + WBI 共
+  2 GET；Opus 评论需先读页面映射 oid/type，再加 nav + WBI，共 3 GET。
+- 会话隔离：Opus 映射页只用于解析公开 SSR，其响应 Cookie 不写入共享协议会话；否则实测
+  老专栏一级评论会从 20 条收缩为 3 条并丢失 `next_offset`。
 - 失败处理：WBI key 轮换、接口限流或数据缺失时进入浏览器兜底。
 - 会话边界：当前公开路径无需账号，不保存 WBI 临时密钥。
+- 业务边界：只接受视频和专栏/图文 URL；`live.bilibili.com` 在上游请求前拒绝，不采集直播
+  在线人数或弹幕。
 
 ## 微博
 
@@ -125,7 +134,7 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 ## 共享边界
 
 - `platforms/registry.py` 只负责媒体别名、URL 平台和作品 ID 识别，包括头条 `/i{id}`、
-  快手分享链接、微博 base62 短 ID 和 B站直播房间。
+  快手分享链接、微博 base62 短 ID，以及 B 站专栏/Opus URL。
 - `platforms/common.py` 只包含无平台状态的数值、时间及失败结果转换。
 - `engagement.py` 只负责统一接口、路由、HTTP 客户端和是否进入浏览器兜底。
 - `browser_fallback.py` 只管理持久化浏览器、目标页操作和网络响应收集，不作为首选协议。

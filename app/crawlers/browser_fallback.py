@@ -496,7 +496,13 @@ class BrowserFallback:
             elif platform == "kuaishou":
                 stats, comments, total_comments, source = _parse_kuaishou(response_url, payload, work_id, stats, comments)
             elif platform == "bilibili":
-                stats, comments, total_comments, source = _parse_bilibili(response_url, payload, stats, comments)
+                stats, comments, total_comments, source = _parse_bilibili(
+                    response_url,
+                    text,
+                    payload,
+                    stats,
+                    comments,
+                )
             elif platform == "weibo":
                 stats, comments, total_comments, source = _parse_weibo(response_url, payload, stats, comments)
             else:
@@ -581,8 +587,6 @@ def _browser_target_url(
         return f"https://www.toutiao.com/article/{work_id}/"
     if platform == "weibo":
         return f"https://m.weibo.cn/detail/{work_id}"
-    if platform == "bilibili" and work_id.startswith("live:"):
-        return f"https://live.bilibili.com/{work_id.removeprefix('live:')}"
     if platform == "xiaohongshu" and "xsec_token=" in url and "xsec_source=" not in url:
         parsed = urlparse(url)
         query = f"{parsed.query}&xsec_source=pc_feed"
@@ -855,14 +859,42 @@ def _parse_kuaishou_guest(
     return stats, comments, total, next_available, source
 
 
-def _parse_bilibili(url: str, payload: Any, stats: EngagementStats, comments: list[EngagementComment]):
+def _parse_bilibili(
+    url: str,
+    text: str,
+    payload: Any,
+    stats: EngagementStats,
+    comments: list[EngagementComment],
+):
+    if "window.__INITIAL_STATE__" in text:
+        try:
+            from app.crawlers.platforms.bilibili import (
+                parse_opus_initial_state,
+                parse_opus_stats,
+            )
+
+            detail = parse_opus_initial_state(text).get("detail") or {}
+            parsed_stats = parse_opus_stats(detail)
+            if any(value is not None for value in parsed_stats.model_dump().values()):
+                return (
+                    parsed_stats,
+                    comments,
+                    parsed_stats.comments,
+                    "bilibili opus SSR",
+                )
+        except Exception:
+            pass
     if not isinstance(payload, dict):
         return stats, comments, stats.comments, ""
     if "reply" in url and isinstance(payload.get("data"), dict):
         parsed = _walk_comments(payload.get("data", {}).get("replies") or [])
         return stats, parsed, _number(_find_key(payload, {"all_count", "total"})), "bilibili replies"
     data = payload.get("data") or {}
-    stat = data.get("stat") if isinstance(data, dict) else None
+    stat = (
+        data.get("stat") or data.get("stats")
+        if isinstance(data, dict)
+        else None
+    )
     if isinstance(stat, dict):
         return EngagementStats(views=_number(stat.get("view")), likes=_number(stat.get("like")), comments=_number(stat.get("reply")), shares=_number(stat.get("share")), favorites=_number(stat.get("favorite")), coins=_number(stat.get("coin")), danmaku=_number(stat.get("danmaku"))), comments, _number(stat.get("reply")), "bilibili view"
     return stats, comments, stats.comments, ""
