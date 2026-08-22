@@ -1,9 +1,10 @@
-# 八个平台 16 项协议能力矩阵
+# 九个平台 18 项协议能力矩阵
 
 最后验证：2026-08-23，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先、浏览器
 持久化会话接管，不接入付费数据供应商。快手企业协议链路最新全量为互动/评论均
-398/398 有数据；小红书互动已修正为匿名 SSR 100/100，低频评论为 20/20。公众号
-任意文章互动/评论及小红书无会话深分页不存在
+398/398 有数据；小红书互动已修正为匿名 SSR 100/100，低频评论为 20/20；视频号公开
+互动量为 100/100，评论总数为 100/100。公众号任意第三方文章互动/评论、视频号评论正文
+及小红书无会话深分页不存在
 已验证的免费匿名协议，不硬编码浏览器 Cookie/签名。
 
 状态含义：
@@ -21,8 +22,10 @@
 | 抖音 | 评论 | 匿名纯协议分页可用（已实测） | 同一访客/IP 请求 `/aweme/v1/web/comment/list/`；首屏/第 2 页各 20 条、总数 2909 | 只能说明公开页；签名/访客规则变化或风控空包时进入浏览器兜底 |
 | 头条 | 互动量 | 受 SSR/挑战影响 | 文章 SSR 中的 `itemCounter`/`likeData`；无 `_signature` 的评论接口可用 | 直接协议首包可能是 JSVM 挑战，统计字段可能为空 |
 | 头条 | 评论 | 可用（部分覆盖） | `/article/v4/tab_comments/`，参数 `aid/app_name/offset/count/group_id/item_id` | 只能说明指定公开页，不保证评论全集 |
-| 公众号 | 互动量 | 无会话无法稳定获取 | 匿名 SSR（含 V2/零值字段）、`/mp/getappmsgext`；官方统计 API 需要自有公众号授权 | 匿名页通常不下发计数；批量访问还可能重定向 `wappoc_appmsgcaptcha`，现已明确标记 `blocked` |
-| 公众号 | 评论 | 页面预载首屏可直接取 | `preload_comment_list`、`cgiDataNew.show_comment`、`/mp/appmsg_comment` | 页面预载精选评论免会话；作者关闭返回完整空页；开启但无文章会话仍返回 `ret=-3 no session` |
+| 公众号 | 互动量 | 自有公众号官方授权可用；第三方文章受会话影响 | 当前 `/datacube/getarticletotaldetail`；匿名 SSR（含 V2/零值字段）、`/mp/getappmsgext` | 官方 API 只能读取凭据所属公众号且受日期/权限/IP 白名单约束；匿名页通常不下发计数，验证码标记 `blocked` |
+| 公众号 | 评论 | 自有公众号官方授权可分页；页面预载首屏可直接取 | 官方 `/cgi-bin/comment/list`；`preload_comment_list`、`cgiDataNew.show_comment`、`/mp/appmsg_comment` | 官方 API 不能跨公众号；作者关闭返回完整空页；第三方文章开启但无文章会话仍返回 `ret=-3 no session` |
+| 微信视频号 | 互动量 | 匿名公开接口可用（100/100） | 1 POST：`/finder-preview/api/feed/get_feed_info`；解析点赞、评论总数、转发和收藏显示值 | `万/亿/+` 是页面格式化数字，只能返回显示精度或下限；无精确播放量 |
+| 微信视频号 | 评论 | 仅总数可用，正文不可匿名获取 | 同一公开预览端点 100/100 返回 `commentCountFmt`；公开页面不请求正文 | 正文来自微信客户端 `finderGetCommentList` 会话，不属于匿名网页协议；当前返回 `unsupported` 而非成功空页 |
 | 小红书 | 互动量 | 匿名纯协议可用（100/100） | 当前有效 `xsec_token` + `xsec_source=pc_feed` 直访笔记 SSR；自动补来源参数，不带评论 Cookie | 100 条新鲜 URL 各 1 GET，94 条返回赞/藏/评/分享四项、6 条返回页面公开的三项；过期或缺 token 不能恢复任意旧 URL |
 | 小红书 | 评论 | 低频首屏可用（20/20） | 会话 + `xhshow` 请求 `/api/sns/web/v2/comment/page` | 本轮 4 秒启动间隔返回 200 行；需要完整 `xsec_token`，深分页和长期持续性未证明 |
 | 好看 | 互动量 | 纯协议可用（字段不完整） | 首页匿名 Cookie → 目标页 SSR；精确播放、点赞、评论数 | 收藏、分享没有公开数字时保持 `null` |
@@ -40,10 +43,11 @@
 快手互动量/一级评论，快手企业全量两项均达到 398/398 有数据，但互动中 34 条只剩评论数。
 小红书互动量本轮新鲜 URL 100/100，评论低频 20/20；两者分别使用匿名 SSR 与带会话签名
 评论端点，不能合并为一次上游请求；
-小红书后续评论页和公众号任意文章互动/评论没有接入付费接口。公众号接口仍区分作者关闭
-评论与原生会话 `no session`。
+小红书后续评论页和公众号任意第三方文章互动/评论没有接入付费接口。公众号接口仍区分
+自有公众号官方授权、作者关闭评论与原生会话 `no session`。视频号与公众号不是一个渠道：
+视频号互动公开端点已接入，但评论正文仍需微信客户端会话桥接。
 
-仍不应硬编码或伪造：公众号文章会话参数、小红书动态签名、快手短期游客验证状态和抖音
+仍不应硬编码或伪造：公众号文章/视频号客户端会话参数、小红书动态签名、快手短期游客验证状态和抖音
 临时 Cookie。抖音签名和第一方访客标识现已在运行时生成；其他游客状态由浏览器生成。遇到
 验证码或空响应时，接口返回 `blocked/unsupported` 与原因。
 
@@ -53,7 +57,7 @@
 在本机建立 Profile。运行时协议客户端和浏览器模拟会复用该平台状态，不要求把密码或
 Cookie 交给服务端配置。
 
-完整测试命令、16 条真实请求结果和分页边界见 [`TEST_REPORT.md`](TEST_REPORT.md)。
+完整测试命令、18 条能力结果和分页边界见 [`TEST_REPORT.md`](TEST_REPORT.md)。
 
 ## 公开资料交叉验证
 
@@ -69,9 +73,14 @@ Cookie 交给服务端配置。
 - 小红书推荐页可匿名下发新鲜 `note_id+xsec_token`；笔记详情必须补
   `xsec_source=pc_feed`，且不能错误携带评论会话 Cookie。修正后匿名 SSR 百次为 100/100。
   `xhshow 0.2.0` 双格式签名仍只用于带 `web_session` 的评论分页，不虚构匿名深分页。
-- 公众号匿名 `/mp/getappmsgext` 可能返回 `ret=0` 但不含统计，`/mp/appmsg_comment`
+- 公众号官方路径使用 2026 年当前的 `getarticletotaldetail` 与 `comment/list`，令牌由
+  `stable_token` 缓存；它解决自有公众号，不扩大到任意第三方文章。匿名
+  `/mp/getappmsgext` 可能返回 `ret=0` 但不含统计，`/mp/appmsg_comment`
   无文章会话返回 `ret=-3`；只有 HTML 已预载的精选评论可直接解析。批量全参数文章实测还会
   进入 `/mp/wappoc_appmsgcaptcha`，现已作为风控而非空数据返回。
+- 视频号公开分享 URL 可匿名 POST `get_feed_info`。三条有效分享 URL 轮换百测，互动计数
+  100/100；评论接口也 100/100 取得总数，但正文 0/100。公开前端点击评论只引导回微信，
+  开源客户端方案同样要求运行微信视频号客户端和会话桥接，因此当前不声称匿名正文可用。
 - B 站当前专栏实测：`cv34832696` 一次详情 GET 返回 7 类互动字段；WBI 使用 `type=12`
   返回 18 条一级评论、总计数 23。另测 4 个 Opus，5/5 互动有数据、5/5 评论有正文；页面
   直接提供每篇的评论 oid/type，无需登录或浏览器。直播 URL 已从路由和成本口径移除。
@@ -91,6 +100,12 @@ Cookie 交给服务端配置。
 - <https://github.com/Moore-developers/moore-wechat-article-downloader>
 - <https://greasyfork.org/scripts/535482-wechat-plus/code>
 - <https://developers.weixin.qq.com/doc/offiaccount/Analytics/Graphic_Analysis_Data_Interface.html>
+- <https://developers.weixin.qq.com/doc/service/api/wedata/news/api_getarticletotaldetail>
+- <https://developers.weixin.qq.com/doc/service/api/leaving/api_listcomment>
+- <https://developers.weixin.qq.com/doc/service/api/base/api_getstableaccesstoken.html>
+- <https://github.com/fatecannotbealtered/wechat-mp-cli/blob/main/docs/OFFICIAL_ENDPOINT_COVERAGE_zh.md>
+- <https://github.com/nobiyou/wx_channel/blob/main/docs/API_QUICK_START.md>
+- <https://github.com/ltaoo/wx_channels_download/blob/main/internal/api/sph.go>
 - <https://www.bilibili.com/read/cv34832696/>
 - <https://www.bilibili.com/opus/907932915033178114>
 - <https://github.com/intAV/Douyin_live_like>

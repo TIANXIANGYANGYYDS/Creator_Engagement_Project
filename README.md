@@ -7,7 +7,7 @@
 
 ## 项目结构
 
-统一接口和八个平台实现已经分开。调用链保持为：
+统一接口和九个平台实现已经分开。微信公众号与微信视频号是两个独立渠道。调用链保持为：
 
 ```text
 app/api                 HTTP 参数和响应
@@ -18,6 +18,7 @@ app/api                 HTTP 参数和响应
        douyin.py         抖音协议流程
        toutiao.py        头条协议流程
        wechat.py         公众号协议流程
+       wechat_channels.py 视频号公开分享流程
        xiaohongshu.py    小红书协议和签名流程
        haokan.py         好看协议流程
        kuaishou.py       快手协议流程
@@ -30,7 +31,7 @@ app/api                 HTTP 参数和响应
 ```
 
 新增或调整某个平台时，只修改对应的 `platforms/<media>.py`；统一 API、服务层和其他
-平台不需要跟着变化。八个平台各自的互动量、评论、分页、会话和兜底流程见
+平台不需要跟着变化。九个平台各自的互动量、评论、分页、会话和兜底流程见
 [`docs/PLATFORM_FLOWS.md`](docs/PLATFORM_FLOWS.md)。
 
 ## 运行
@@ -62,15 +63,16 @@ conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 快手公开作品默认复用本地游客设备状态走纯协议详情和评论接口，状态失效时才由浏览器重新
 生成，不需要账号。小红书互动对带当前有效 `xsec_token` 的 URL 使用匿名 SSR，最新百测
 100/100；评论则单独复用调用方自己的平台会话。项目不接入付费数据供应商；小红书评论
-分页和任意公众号文章的互动/评论仍受各自会话边界约束。八个平台都可以在
+分页和任意第三方公众号文章的互动/评论仍受各自会话边界约束。视频号公开分享链接的
+点赞、评论总数、转发和收藏可匿名直连获取，但评论正文不在公开预览响应中。九个平台都可以在
 带桌面环境的本机建立独立 Profile：
 
 ```bash
 conda run -n MyAgent creator-engagement-login <platform>
 ```
 
-`platform` 可选 `douyin / toutiao / wechat / xiaohongshu / haokan / kuaishou /
-bilibili / weibo`。需要在具体内容页完成登录或安全验证时传入同平台 URL：
+`platform` 可选 `douyin / toutiao / wechat / wechat_channels / xiaohongshu / haokan /
+kuaishou / bilibili / weibo`。需要在具体内容页完成登录或安全验证时传入同平台 URL：
 
 ```bash
 conda run -n MyAgent creator-engagement-login xiaohongshu --url '<小红书笔记 URL>'
@@ -79,6 +81,11 @@ conda run -n MyAgent creator-engagement-login xiaohongshu --url '<小红书笔�
 登录完成后按 Enter，状态只写入 `.local/browser-profiles/<platform>` 和
 `.local/platform-sessions/<platform>.json`。公众号还要求文章本身开启评论；微信网页会话
 不能保证等价于手机微信文章会话，接口会如实返回 `blocked/unsupported`。
+
+自有公众号可在 `.local/env/.env` 配置 `WECHAT_MP_APP_ID` 与
+`WECHAT_MP_APP_SECRET`，或注入已有 `WECHAT_MP_ACCESS_TOKEN`。服务通过微信
+`stable_token` 缓存令牌，互动量使用当前 `getarticletotaldetail`，评论使用官方
+`comment/list`；该授权只能读取凭据所属公众号，不能读取任意第三方公众号文章。
 
 启动 API：
 
@@ -102,7 +109,7 @@ HTTP 调用仍单独计入上游请求数；互动量接口和评论接口分别
 
 默认启用 `RELIABILITY_MODE=enterprise`：最多 3 次协议尝试，HTTP 200 但业务空包/验证码
 也会淘汰当前代理；失败结果不写入 120 秒缓存。服务最多同时运行 4 个采集任务、1 个浏览器
-任务，代理池维护 4 个 IP 且每个 IP 单并发。小红书、快手和公众号另有平台级串行与启动
+任务，代理池维护 4 个 IP 且每个 IP 单并发。小红书、快手、公众号和视频号另有平台级串行与启动
 间隔，避免全局 4 并发直接压到单个平台。相同接口、相同 URL 和相同页码的并发重复请求会
 合并，成功或有效部分结果缓存 120 秒（最多 1000 项）。配置项、真实内存测试和 51 代理成本公式见
 [`docs/COST_AND_CAPACITY.md`](docs/COST_AND_CAPACITY.md)。
@@ -120,9 +127,9 @@ HTTP 调用仍单独计入上游请求数；互动量接口和评论接口分别
 - `GET /api/v1/interactions?url=<URL>&media_name=<MEDIA>`
 - `GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1`
 
-`media_name` 的规范值为 `douyin / toutiao / wechat / xiaohongshu / haokan /
-kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小红书、好看、
-快手、B站、微博等中文名称。服务会同时识别 URL 所属平台；如果 URL 与
+`media_name` 的规范值为 `douyin / toutiao / wechat / wechat_channels / xiaohongshu /
+haokan / kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、视频号/微信视频号、
+小红书、好看、快手、B站、微博等中文名称。服务会同时识别 URL 所属平台；如果 URL 与
 `media_name` 不一致，接口返回 HTTP 422，不会把请求转给错误的平台适配器。
 
 ## 能力范围
@@ -142,7 +149,8 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 互动匿名 SSR；评论 `xhshow` 动态签名 | 互动新鲜 URL 100/100、无需登录；评论低频 20/20，仍需要 `web_session` 与有效 token |
 | 抖音 | 匿名纯协议互动量和评论分页；浏览器仅作风控兜底 | 第一方访客 `ttwid`、纯 Python `a_bogus`、`/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 真实首屏 20 条、总数 2909；平台隐藏 `play_count` 时播放保持 `null` |
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
-| 公众号 | 页面公开字段；有文章会话时读取互动和评论 | 页面 SSR、`getappmsgext`、`appmsg_comment` | 任意文章匿名互动/评论无稳定免费接口；官方统计只适用于自有公众号授权 |
+| 公众号 | 自有公众号互动量和留言；第三方文章仅取页面/当前会话公开值 | 官方 `getarticletotaldetail`、`comment/list`；页面 SSR、`getappmsgext`、`appmsg_comment` | 自有公众号授权路径可用；任意第三方文章无稳定匿名完整接口 |
+| 微信视频号 | 点赞、评论总数、转发、收藏 | 公开预览 `finder-preview/api/feed/get_feed_info` | 互动量匿名 100/100；评论总数可取，评论正文需微信客户端会话，当前明确不可用 |
 | 快手 | 播放、点赞、评论总数和一级评论 | `visionVideoDetail`、SSR Apollo、REST/GraphQL 评论双通道 | 无需账号；398 条互动和 398 条评论企业实测均有数据，详情已下线时仅返回可验证评论数 |
 
 真实输入 URL 同时兼容头条 `/i{id}`、快手 `c.kuaishou.com/fw/photo/{id}`、微博桌面端
@@ -157,7 +165,7 @@ Cookie。
 
 逐项证据和“无法稳定获取”的阻断原因见 [`docs/PROTOCOL_MATRIX.md`](docs/PROTOCOL_MATRIX.md)，
 代码入口和执行顺序见 [`docs/PLATFORM_FLOWS.md`](docs/PLATFORM_FLOWS.md)。
-本轮自动化、API、CLI、代理和八个平台真实 URL 的验证结果见
+本轮自动化、API、CLI、代理和九个平台真实 URL 的验证结果见
 [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md)。
 
 头条评论接口已验证：`/article/v4/tab_comments/` 使用 `aid/app_name/offset/count/group_id/item_id` 即可返回 `err_no=0`、`total_number`、`has_more` 和评论列表，不需要把浏览器请求里的 `_signature` 写入代码。

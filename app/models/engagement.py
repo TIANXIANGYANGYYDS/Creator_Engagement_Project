@@ -10,6 +10,7 @@ EngagementPlatform = Literal[
     "douyin",
     "toutiao",
     "wechat",
+    "wechat_channels",
     "xiaohongshu",
     "haokan",
     "kuaishou",
@@ -36,6 +37,7 @@ class EngagementStats(BaseModel):
     coins: int | None = Field(default=None, ge=0)
     danmaku: int | None = Field(default=None, ge=0)
     reposts: int | None = Field(default=None, ge=0)
+    recommendations: int | None = Field(default=None, ge=0)
 
 
 class EngagementComment(BaseModel):

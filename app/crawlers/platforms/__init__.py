@@ -7,6 +7,7 @@ from app.crawlers.platforms import (
     kuaishou,
     toutiao,
     wechat,
+    wechat_channels,
     weibo,
     xiaohongshu,
 )
@@ -18,6 +19,7 @@ PLATFORM_HANDLERS: dict[EngagementPlatform, PlatformFetchHandler] = {
     "douyin": douyin.fetch,
     "toutiao": toutiao.fetch,
     "wechat": wechat.fetch,
+    "wechat_channels": wechat_channels.fetch,
     "xiaohongshu": xiaohongshu.fetch,
     "haokan": haokan.fetch,
     "kuaishou": kuaishou.fetch,

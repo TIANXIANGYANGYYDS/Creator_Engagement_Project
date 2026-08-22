@@ -18,6 +18,7 @@ from app.crawlers.platforms.registry import (
 from app.crawlers.platforms.toutiao import parse_stats as parse_toutiao_stats
 from app.crawlers.platforms.haokan import parse_ssr_stats as parse_haokan_stats
 from app.crawlers.platforms.xiaohongshu import parse_stats as parse_xhs_stats
+from app.crawlers.platforms.wechat_channels import parse_formatted_count
 from app.models.engagement import EngagementResult, EngagementStats
 
 
@@ -48,6 +49,7 @@ def test_all_supported_platforms_have_independent_handlers() -> None:
         "douyin",
         "toutiao",
         "wechat",
+        "wechat_channels",
         "xiaohongshu",
         "haokan",
         "kuaishou",
@@ -260,6 +262,8 @@ def test_xiaohongshu_interaction_wall_retries_with_required_proxy(
         ("https://c.kuaishou.com/fw/photo/3x4zebgce2jutx2", ("kuaishou", "3x4zebgce2jutx2")),
         ("https://mp.weixin.qq.com/s?mid=2247504578", ("wechat", "2247504578")),
         ("https://mp.weixin.qq.com/s/XKB0QLWfxHAJrOo-QvHsVw", ("wechat", "XKB0QLWfxHAJrOo-QvHsVw")),
+        ("https://weixin.qq.com/sph/AoPX5bEBDd", ("wechat_channels", "AoPX5bEBDd")),
+        ("https://channels.weixin.qq.com/finder-preview/pages/sph?id=Ali0QjN99U", ("wechat_channels", "Ali0QjN99U")),
     ],
 )
 def test_identify_url(url: str, expected: tuple[str, str]) -> None:
@@ -399,6 +403,7 @@ def test_bilibili_live_url_is_outside_content_scope() -> None:
         ("抖音", "douyin"),
         ("今日头条", "toutiao"),
         ("公众号", "wechat"),
+        ("微信视频号", "wechat_channels"),
         ("小红书", "xiaohongshu"),
         ("好看视频", "haokan"),
         ("快手", "kuaishou"),
@@ -420,6 +425,72 @@ def test_media_name_must_match_url_before_request() -> None:
         ))
 
     assert client.calls == []
+
+
+def test_wechat_channels_public_preview_returns_displayed_counters() -> None:
+    client = FakeClient(FakeResponse(payload={
+        "errCode": 0,
+        "errMsg": "",
+        "data": {
+            "feedInfo": {
+                "description": "视频号测试视频",
+                "likeCountFmt": "5.2万",
+                "commentCountFmt": "4044",
+                "forwardCountFmt": "3.8万",
+                "favCountFmt": "10万+",
+            },
+            "sceneInfo": {"dynamicExportId": "export/id"},
+            "errMsg": {"type": 0},
+        },
+    }))
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        "https://weixin.qq.com/sph/AoPX5bEBDd",
+        "视频号",
+    ))
+
+    assert result.platform == "wechat_channels"
+    assert result.stats.likes == 52_000
+    assert result.stats.comments == 4_044
+    assert result.stats.shares == 38_000
+    assert result.stats.favorites == 100_000
+    assert len(client.calls) == 1
+    assert client.calls[0][0].endswith("/finder-preview/api/feed/get_feed_info")
+    assert client.calls[0][1]["json"]["shortUri"] == "AoPX5bEBDd"
+
+
+def test_wechat_channels_comment_api_reports_count_without_fake_bodies() -> None:
+    client = FakeClient(FakeResponse(payload={
+        "errCode": 0,
+        "errMsg": "",
+        "data": {
+            "feedInfo": {
+                "description": "视频号测试视频",
+                "commentCountFmt": "1530",
+            },
+            "sceneInfo": {"dynamicExportId": "export/id"},
+            "errMsg": {"type": 0},
+        },
+    }))
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "https://weixin.qq.com/sph/Ali0QjN99U",
+        "wechat_channels",
+        1,
+    ))
+
+    assert result.coverage == "unsupported"
+    assert result.comments == []
+    assert result.total_comments == 1530
+    assert "微信客户端" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("1", 1), ("1.2万", 12_000), ("3.8W", 38_000), ("2亿+", 200_000_000), ("--", None)],
+)
+def test_wechat_channels_formatted_count(raw: str, expected: int | None) -> None:
+    assert parse_formatted_count(raw) == expected
 
 
 def test_bilibili_interactions_skip_comment_endpoint() -> None:
@@ -640,6 +711,7 @@ def test_bilibili_fetches_stats_and_comments() -> None:
         "coins": 6,
         "danmaku": 7,
         "reposts": None,
+        "recommendations": None,
     }
     assert result.comments[0].text == "评论"
     assert result.next_cursor == "2"
@@ -940,6 +1012,7 @@ def test_xhs_stats_missing_note_is_empty_not_fabricated() -> None:
         "coins": None,
         "danmaku": None,
         "reposts": None,
+        "recommendations": None,
     }
 
 

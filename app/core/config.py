@@ -48,6 +48,15 @@ class Settings(BaseSettings):
             "DOUYIN_SESSION_COOKIE",
         ),
     )
+    wechat_mp_app_id: str = Field(default="", alias="WECHAT_MP_APP_ID")
+    wechat_mp_app_secret: SecretStr = Field(
+        default=SecretStr(""),
+        alias="WECHAT_MP_APP_SECRET",
+    )
+    wechat_mp_access_token: SecretStr = Field(
+        default=SecretStr(""),
+        alias="WECHAT_MP_ACCESS_TOKEN",
+    )
     request_timeout_seconds: float = Field(
         default=20,
         alias="REQUEST_TIMEOUT_SECONDS",

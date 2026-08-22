@@ -46,6 +46,10 @@ ENTERPRISE_PLATFORM_POLICIES: dict[EngagementPlatform, PlatformTrafficPolicy] = 
     ),
     "kuaishou": PlatformTrafficPolicy(max_concurrency=1, min_interval_seconds=0.5),
     "wechat": PlatformTrafficPolicy(max_concurrency=1, min_interval_seconds=0.5),
+    "wechat_channels": PlatformTrafficPolicy(
+        max_concurrency=2,
+        min_interval_seconds=0.2,
+    ),
 }
 
 
@@ -165,6 +169,11 @@ class EngagementService:
                 else 1
             ),
             protocol_retry_base_seconds=settings.protocol_retry_base_seconds,
+            wechat_mp_app_id=settings.wechat_mp_app_id,
+            wechat_mp_app_secret=settings.wechat_mp_app_secret.get_secret_value(),
+            wechat_mp_access_token=(
+                settings.wechat_mp_access_token.get_secret_value()
+            ),
         )
         return cls(
             crawler,

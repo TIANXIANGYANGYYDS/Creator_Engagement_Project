@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from app.crawlers.http_client import (
@@ -54,6 +55,9 @@ class EngagementCrawler:
         platform_cookies: dict[EngagementPlatform, str] | None = None,
         max_protocol_attempts: int = 1,
         protocol_retry_base_seconds: float = 1,
+        wechat_mp_app_id: str = "",
+        wechat_mp_app_secret: str = "",
+        wechat_mp_access_token: str = "",
     ) -> None:
         if max_protocol_attempts <= 0:
             raise ValueError("max_protocol_attempts must be greater than zero")
@@ -78,6 +82,12 @@ class EngagementCrawler:
         self.platform_cookies = platform_cookies or {}
         self.max_protocol_attempts = max_protocol_attempts
         self.protocol_retry_base_seconds = protocol_retry_base_seconds
+        self.wechat_mp_app_id = wechat_mp_app_id.strip()
+        self.wechat_mp_app_secret = wechat_mp_app_secret.strip()
+        self._configured_wechat_mp_access_token = wechat_mp_access_token.strip()
+        self._cached_wechat_mp_access_token = ""
+        self._wechat_mp_token_expires_at = 0.0
+        self._wechat_mp_token_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -315,6 +325,10 @@ class EngagementCrawler:
         include_stats: bool,
         include_comments: bool,
     ) -> bool:
+        if result.platform == "wechat_channels" and include_comments:
+            # The public preview UI intentionally redirects comment clicks to
+            # WeChat and never requests comment bodies in the browser page.
+            return False
         if result.platform == "xiaohongshu" and include_stats and not include_comments:
             # A valid tokenized note URL is fully served by one SSR request.
             # Browser navigation uses the same egress budget and turns a wall
@@ -391,6 +405,7 @@ class EngagementCrawler:
         headers: dict[str, str] | None = None,
         data: str | bytes | dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        force_direct: bool = False,
     ) -> dict[str, Any]:
         response = await self._post_response(
             url,
@@ -398,6 +413,7 @@ class EngagementCrawler:
             headers=headers,
             data=data,
             json_body=json_body,
+            force_direct=force_direct,
         )
         try:
             payload = response.json()
@@ -450,18 +466,30 @@ class EngagementCrawler:
         headers: dict[str, str] | None = None,
         data: str | bytes | dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        force_direct: bool = False,
     ) -> Any:
         post = getattr(self.client, "post", None)
         if post is None:
             raise PlatformCrawlerError("HTTP client does not support POST")
         try:
-            response = await post(
-                url,
-                params=params,
-                headers=dict(headers or {}),
-                data=data,
-                json=json_body,
-            )
+            direct_scope = getattr(self.client, "direct_scope", None)
+            if force_direct and callable(direct_scope):
+                async with direct_scope():
+                    response = await post(
+                        url,
+                        params=params,
+                        headers=dict(headers or {}),
+                        data=data,
+                        json=json_body,
+                    )
+            else:
+                response = await post(
+                    url,
+                    params=params,
+                    headers=dict(headers or {}),
+                    data=data,
+                    json=json_body,
+                )
         except Exception as exc:
             raise PlatformCrawlerError("engagement request failed") from exc
         status = int(getattr(response, "status_code", 0))
@@ -480,6 +508,58 @@ class EngagementCrawler:
             if stored:
                 return stored
         return self.cookies.strip() if platform == "douyin" else ""
+
+    async def _wechat_mp_access_token(self) -> str:
+        if self._configured_wechat_mp_access_token:
+            return self._configured_wechat_mp_access_token
+        if not self.wechat_mp_app_id or not self.wechat_mp_app_secret:
+            return ""
+        if (
+            self._cached_wechat_mp_access_token
+            and monotonic() < self._wechat_mp_token_expires_at
+        ):
+            return self._cached_wechat_mp_access_token
+        async with self._wechat_mp_token_lock:
+            if (
+                self._cached_wechat_mp_access_token
+                and monotonic() < self._wechat_mp_token_expires_at
+            ):
+                return self._cached_wechat_mp_access_token
+            payload = await self._post_json(
+                "https://api.weixin.qq.com/cgi-bin/stable_token",
+                headers={"Content-Type": "application/json"},
+                json_body={
+                    "grant_type": "client_credential",
+                    "appid": self.wechat_mp_app_id,
+                    "secret": self.wechat_mp_app_secret,
+                    "force_refresh": False,
+                },
+                force_direct=True,
+            )
+            token = str(payload.get("access_token") or "").strip()
+            if not token:
+                code = payload.get("errcode")
+                message = payload.get("errmsg") or "missing access_token"
+                raise PlatformCrawlerError(
+                    f"公众号稳定 access_token 获取失败: {code}: {message}"
+                )
+            try:
+                expires_in = int(payload.get("expires_in") or 7200)
+            except (TypeError, ValueError):
+                expires_in = 7200
+            self._cached_wechat_mp_access_token = token
+            self._wechat_mp_token_expires_at = monotonic() + max(
+                60,
+                expires_in - 300,
+            )
+            return token
+
+    def _invalidate_wechat_mp_access_token(self) -> None:
+        # A caller-supplied token may expire too.  Drop it so configured
+        # AppID/AppSecret credentials can refresh it, if available.
+        self._configured_wechat_mp_access_token = ""
+        self._cached_wechat_mp_access_token = ""
+        self._wechat_mp_token_expires_at = 0.0
 
 
 async def fetch_engagement(

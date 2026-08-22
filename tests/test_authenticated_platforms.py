@@ -591,6 +591,145 @@ def test_wechat_captcha_redirect_is_reported_as_blocked() -> None:
     assert "验证码" in result.reason
 
 
+def test_wechat_owned_article_uses_current_official_analytics_api() -> None:
+    html = """
+    <script>
+      window.cgiDataNew = {show_comment: 1, comment_id: 10, bizuin: 'MzA=', mid: 20, idx: 1};
+      var ct = 1761926400;
+    </script>
+    """
+    client = DualFakeClient(
+        gets=[FakeResponse(text=html)],
+        posts=[
+            FakeResponse({"access_token": "stable-token", "expires_in": 7200}),
+            FakeResponse({
+                "list": [{
+                    "msgid": "20_1",
+                    "detail_list": [{
+                        "stat_date": "2025-11-30",
+                        "read_user": 4123,
+                        "like_user": 386,
+                        "zaikan_user": 191,
+                        "share_user": 366,
+                        "comment_count": 33,
+                        "collection_user": 233,
+                    }],
+                }],
+                "is_delay": False,
+            }),
+        ],
+    )
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        wechat_mp_app_id="wx-app-id",
+        wechat_mp_app_secret="app-secret",
+    ).fetch_interactions(
+        "https://mp.weixin.qq.com/s?__biz=MzA=&mid=20&idx=1&sn=abc",
+        "公众号",
+    ))
+
+    assert result.source.endswith("/datacube/getarticletotaldetail")
+    assert result.stats.views == 4123
+    assert result.stats.likes == 386
+    assert result.stats.recommendations == 191
+    assert result.stats.shares == 366
+    assert result.stats.comments == 33
+    assert result.stats.favorites == 233
+    assert client.post_calls[0][0].endswith("/cgi-bin/stable_token")
+    assert client.post_calls[1][1]["json"] == {
+        "begin_date": "2025-11-01",
+        "end_date": "2025-11-01",
+    }
+
+
+def test_wechat_owned_article_uses_official_comment_pagination() -> None:
+    html = """
+    <script>
+      window.cgiDataNew = {show_comment: 1, comment_id: 10, bizuin: 'MzA=', mid: 20, idx: 2};
+    </script>
+    """
+    client = DualFakeClient(
+        gets=[FakeResponse(text=html)],
+        posts=[
+            FakeResponse({"access_token": "stable-token", "expires_in": 7200}),
+            FakeResponse({
+                "errcode": 0,
+                "errmsg": "ok",
+                "total": 25,
+                "comment": [{
+                    "user_comment_id": 998,
+                    "openid": "reader-openid",
+                    "content": "官方留言正文",
+                    "create_time": 1761926400,
+                    "reply": {"content": "作者回复", "create_time": 1761926500},
+                }],
+            }),
+        ],
+    )
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        wechat_mp_app_id="wx-app-id",
+        wechat_mp_app_secret="app-secret",
+    ).fetch_comments(
+        "https://mp.weixin.qq.com/s?__biz=MzA=&mid=20&idx=2&sn=abc",
+        "公众号",
+        2,
+    ))
+
+    assert result.coverage == "complete"
+    assert result.total_comments == 25
+    assert result.next_page == 3
+    assert result.comments[0].comment_id == "998"
+    assert result.comments[0].author == "reader-openid"
+    assert result.comments[0].replies == 1
+    assert client.post_calls[1][1]["json"] == {
+        "msg_data_id": 20,
+        "index": 1,
+        "begin": 20,
+        "count": 20,
+        "type": 0,
+    }
+
+
+def test_wechat_official_api_refreshes_an_expired_supplied_token() -> None:
+    html = """
+    <script>
+      window.cgiDataNew = {show_comment: 1, comment_id: 10, bizuin: 'MzA=', mid: 20, idx: 1};
+      var ct = 1761926400;
+    </script>
+    """
+    client = DualFakeClient(
+        gets=[FakeResponse(text=html)],
+        posts=[
+            FakeResponse({"errcode": 40014, "errmsg": "invalid access_token"}),
+            FakeResponse({"access_token": "refreshed-token", "expires_in": 7200}),
+            FakeResponse({
+                "list": [{
+                    "msgid": "20_1",
+                    "detail_list": [{"stat_date": "2025-11-01", "read_user": 99}],
+                }],
+            }),
+        ],
+    )
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        wechat_mp_app_id="wx-app-id",
+        wechat_mp_app_secret="app-secret",
+        wechat_mp_access_token="expired-token",
+    ).fetch_interactions(
+        "https://mp.weixin.qq.com/s?__biz=MzA=&mid=20&idx=1&sn=abc",
+        "公众号",
+    ))
+
+    assert result.stats.views == 99
+    assert client.post_calls[0][1]["params"]["access_token"] == "expired-token"
+    assert client.post_calls[1][0].endswith("/cgi-bin/stable_token")
+    assert client.post_calls[2][1]["params"]["access_token"] == "refreshed-token"
+
+
 def test_weibo_falls_back_to_anonymous_numbered_page() -> None:
     client = DualFakeClient(gets=[
         FakeResponse({

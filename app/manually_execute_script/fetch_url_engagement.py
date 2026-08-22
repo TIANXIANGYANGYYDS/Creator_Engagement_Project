@@ -14,7 +14,10 @@ from app.services.engagement_service import EngagementService
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="按内容 URL 获取互动量或公开评论分页")
     parser.add_argument("resource", choices=("interactions", "comments"), help="要获取的数据类型")
-    parser.add_argument("url", help="抖音、头条、公众号、小红书、好看、快手、B站或微博 URL")
+    parser.add_argument(
+        "url",
+        help="抖音、头条、公众号、微信视频号、小红书、好看、快手、B站或微博 URL",
+    )
     parser.add_argument("media_name", help="媒体规范名或中文名，例如 bilibili/B站")
     parser.add_argument("--page", type=int, default=1, help="评论页码，仅 comments 模式使用")
     parser.add_argument("--direct", action="store_true", help="本次强制直连，忽略代理配置")

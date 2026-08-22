@@ -27,6 +27,7 @@ class PlatformCrawlerContext(Protocol):
         headers: dict[str, str] | None = None,
         data: str | bytes | dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        force_direct: bool = False,
     ) -> dict[str, Any]: ...
 
     async def _post_response(
@@ -37,6 +38,7 @@ class PlatformCrawlerContext(Protocol):
         headers: dict[str, str] | None = None,
         data: str | bytes | dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        force_direct: bool = False,
     ) -> Any: ...
 
     async def _get_response(
@@ -51,6 +53,10 @@ class PlatformCrawlerContext(Protocol):
     ) -> Any: ...
 
     def _platform_cookie(self, platform: EngagementPlatform) -> str: ...
+
+    async def _wechat_mp_access_token(self) -> str: ...
+
+    def _invalidate_wechat_mp_access_token(self) -> None: ...
 
 
 class PlatformFetchHandler(Protocol):

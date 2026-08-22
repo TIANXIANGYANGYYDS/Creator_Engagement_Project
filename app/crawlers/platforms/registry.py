@@ -22,6 +22,11 @@ MEDIA_ALIASES: dict[str, EngagementPlatform] = {
     "微信": "wechat",
     "公众号": "wechat",
     "微信公众号": "wechat",
+    "wechat_channels": "wechat_channels",
+    "wechat-channels": "wechat_channels",
+    "channels": "wechat_channels",
+    "视频号": "wechat_channels",
+    "微信视频号": "wechat_channels",
     "xiaohongshu": "xiaohongshu",
     "xhs": "xiaohongshu",
     "小红书": "xiaohongshu",
@@ -42,7 +47,7 @@ def normalize_media_name(media_name: str) -> EngagementPlatform:
     platform = MEDIA_ALIASES.get(normalized)
     if platform is None:
         supported = ", ".join((
-            "douyin", "toutiao", "wechat", "xiaohongshu",
+            "douyin", "toutiao", "wechat", "wechat_channels", "xiaohongshu",
             "haokan", "kuaishou", "bilibili", "weibo",
         ))
         raise ValueError(f"unsupported media_name; expected one of: {supported}")
@@ -117,6 +122,19 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
     if "kuaishou.com" in host:
         match = re.search(r"/(?:short-video|profile|fw/photo)/([^/?]+)", path)
         return "kuaishou", match.group(1) if match else ""
+    if host == "weixin.qq.com":
+        match = re.search(r"/sph/([0-9A-Za-z_-]+)(?:/|$)", path)
+        if match:
+            return "wechat_channels", match.group(1)
+    if host == "channels.weixin.qq.com":
+        short_match = re.search(r"/finder-preview/pages/sph(?:/|$)", path)
+        if short_match:
+            return "wechat_channels", query.get("id", [""])[0]
+        if path in {"/finder-preview/pages/feed", "/web/pages/feed"}:
+            return "wechat_channels", (
+                query.get("eid", [""])[0]
+                or query.get("oid", [""])[0]
+            )
     if "mp.weixin.qq.com" in host:
         path_match = re.search(r"/s/([^/?]+)", path)
         return "wechat", (

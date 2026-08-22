@@ -10,6 +10,7 @@ def test_login_command_supports_all_collection_platforms() -> None:
         "douyin",
         "toutiao",
         "wechat",
+        "wechat_channels",
         "xiaohongshu",
         "haokan",
         "kuaishou",

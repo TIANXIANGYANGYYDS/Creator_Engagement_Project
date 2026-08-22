@@ -1,6 +1,7 @@
-# 八个平台独立执行流程
+# 九个平台独立执行流程
 
-本文对应 `app/crawlers/platforms/` 下的八个实现文件。公共 API 不包含平台条件分支；
+本文对应 `app/crawlers/platforms/` 下的九个实现文件。微信公众号和微信视频号各有独立
+适配器、URL 路由与能力边界。公共 API 不包含平台条件分支；
 `EngagementCrawler` 根据 `media_name + URL` 选择一个处理器，协议结果不可用时再进入统一
 Camoufox 兜底。互动量和评论是两条独立接口，也分别执行上游请求：
 
@@ -44,15 +45,39 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 
 代码：`app/crawlers/platforms/wechat.py`
 
-- 互动量：先解析文章页 `appmsgstat/cgiDataNew`，有自有文章会话时再尝试
+- 自有公众号互动量：配置 AppID/AppSecret 或 access token 后，通过官方 `stable_token`
+  获取并缓存令牌；按文章发布日期请求当前 `/datacube/getarticletotaldetail`，用 URL 的
+  `mid_idx` 匹配 `msgid`，返回阅读、点赞、在看、分享、留言和收藏。
+- 自有公众号评论：请求官方 `/cgi-bin/comment/list`，将外部页码转换为 `begin/count`。
+  该接口只对凭据所属公众号和已开通留言权限的文章生效。
+- 任意文章互动量：先解析文章页 `appmsgstat/cgiDataNew`，有调用方自己的文章会话时再尝试
   `/mp/getappmsgext`。页面解析兼容未加引号字段、`read_num_v2/like_num_v2` 和数值 `0`。
-- 评论：先解析页面直接下发的 `preload_comment_list`；首屏有精选评论时无需额外会话。
+- 任意文章评论：先解析页面直接下发的 `preload_comment_list`；首屏有精选评论时无需额外会话。
   否则检查 `show_comment`；作者关闭评论时返回 `complete` 空结果。开启评论时，使用文章
   参数和自有会话请求 `/mp/appmsg_comment`，页码转换为 offset。
 - 失败处理：作者关闭评论、缺参数、`ret=-3 no session` 和
   `/mp/wappoc_appmsgcaptcha` 验证码重定向分别返回可区分的状态，随后可由浏览器验证当前
   会话可见内容，不再把验证码页误报成“文章无数据”。
-- 会话边界：任意公众号文章不存在已验证的免费匿名互动/评论接口，不伪造手机微信会话。
+- 会话边界：官方凭据不能跨公众号读取第三方文章；任意公众号文章不存在已验证的免费匿名
+  完整互动/评论接口，不伪造手机微信会话。服务器出口还需加入公众号后台 IP 白名单。
+
+## 微信视频号
+
+代码：`app/crawlers/platforms/wechat_channels.py`
+
+- URL：独立识别 `weixin.qq.com/sph/{shortUri}`、公开预览 `pages/sph?id=...`，以及带
+  `eid/token` 的预览链接；不会再路由到微信公众号适配器。
+- 互动量：一次匿名 POST 请求腾讯公开预览端点
+  `/finder-preview/api/feed/get_feed_info`，返回页面展示的点赞、评论总数、转发和收藏。
+  `万/W/亿/+` 按公开显示值转换为整数；带 `+` 时仅代表可验证下限，因此标记 `partial`。
+- 评论：同一个公开预览响应只能取得评论总数，不含评论正文。评论业务接口仍独立执行一次
+  上游请求，返回 `unsupported`、准确总数和原因，不把总数伪装成评论行。
+- 失败处理：目标分享已失效或响应没有目标 feed 时明确返回 `unsupported`；默认
+  `direct/prefer` 绕过代理，不消耗采购 IP，也不启动 Camoufox；显式 `required` 仍尊重
+  运维要求使用代理。
+- 会话边界：全网可复现的评论正文方案依赖微信视频号客户端及其
+  `finderGetCommentList` 会话（objectId、objectNonceId、lastBuffer）。这不是匿名网页请求，
+  当前纯服务端实现不注入微信客户端，也不采集或硬编码个人凭据。
 
 ## 小红书
 
@@ -134,7 +159,7 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 ## 共享边界
 
 - `platforms/registry.py` 只负责媒体别名、URL 平台和作品 ID 识别，包括头条 `/i{id}`、
-  快手分享链接、微博 base62 短 ID，以及 B 站专栏/Opus URL。
+  快手分享链接、微博 base62 短 ID、B 站专栏/Opus URL，以及视频号 sph/eid 分享 URL。
 - `platforms/common.py` 只包含无平台状态的数值、时间及失败结果转换。
 - `engagement.py` 只负责统一接口、路由、HTTP 客户端和是否进入浏览器兜底。
 - `browser_fallback.py` 只管理持久化浏览器、目标页操作和网络响应收集，不作为首选协议。

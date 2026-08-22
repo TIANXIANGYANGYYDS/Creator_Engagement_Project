@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timedelta, timezone
 import html
 import json
 import re
@@ -39,6 +40,8 @@ async def fetch(
     include_comments: bool,
 ) -> EngagementResult:
     cookie = crawler._platform_cookie("wechat")
+    official_issue = ""
+    official_stats: EngagementStats | None = None
     try:
         article_response = await crawler._get_response(
             url,
@@ -60,25 +63,83 @@ async def fetch(
                 stats = parse_stats_payload(ext_payload)
             except PlatformCrawlerError:
                 pass
+        if include_stats:
+            try:
+                official_stats = await fetch_official_stats(crawler, metadata)
+                if official_stats is not None:
+                    stats = official_stats
+            except PlatformCrawlerError as exc:
+                official_issue = str(exc)
 
         if not include_comments:
             has_stats = _has_stats(stats)
+            official = official_stats is not None
             return EngagementResult(
                 platform="wechat",
                 canonical_url=url,
                 work_id=work_id,
                 coverage="partial" if has_stats else "unsupported",
                 reason=(
-                    "公众号文章页面返回了当前会话可见互动量"
-                    if has_stats
-                    else "公众号匿名文章页未下发阅读/点赞统计；免费原生接口需要文章会话或自有公众号授权"
+                    "自有公众号官方接口返回阅读人数、赞、分享、留言和收藏数据"
+                    if official
+                    else (
+                        "公众号文章页面返回了当前会话可见互动量"
+                        if has_stats
+                        else (
+                            "公众号匿名文章页未下发阅读/点赞统计；任意第三方文章仍需微信文章短时会话，"
+                            "自有公众号可配置官方 API 授权"
+                            + (f"；官方接口尝试失败: {official_issue}" if official_issue else "")
+                        )
+                    )
                 ),
-                source="mp article appmsgstat/cgiDataNew",
+                source=(
+                    "api.weixin.qq.com/datacube/getarticletotaldetail"
+                    if official
+                    else "mp article appmsgstat/cgiDataNew"
+                ),
                 stats=stats,
             )
 
         preloaded_payload = parse_preloaded_comment_payload(text)
         preloaded_comments = parse_comments(preloaded_payload)
+        try:
+            official_comments = await fetch_official_comments(
+                crawler,
+                metadata,
+                page=page,
+                limit=limit,
+            )
+        except PlatformCrawlerError as exc:
+            official_issue = str(exc)
+            official_comments = None
+        if official_comments is not None:
+            comments = parse_comments(official_comments)
+            total = to_int(official_comments.get("total"))
+            offset = (page - 1) * min(limit, COMMENT_PAGE_SIZE)
+            has_more = total is not None and offset + len(comments) < total
+            return EngagementResult(
+                platform="wechat",
+                canonical_url=url,
+                work_id=work_id,
+                coverage="complete",
+                reason="自有公众号官方留言接口返回该文章指定页",
+                source="api.weixin.qq.com/cgi-bin/comment/list",
+                stats=EngagementStats(comments=total),
+                comments=comments[:limit],
+                next_cursor=str(page + 1) if has_more else None,
+            )
+
+        if metadata.get("show_comment") == "0":
+            return EngagementResult(
+                platform="wechat",
+                canonical_url=url,
+                work_id=work_id,
+                coverage="complete",
+                reason="该公众号文章由作者关闭评论，登录账号也不会产生可抓取评论",
+                source="cgiDataNew.show_comment",
+                stats=stats,
+            )
+
         if page == 1 and preloaded_comments:
             total = (
                 parse_preloaded_comment_total(text)
@@ -103,16 +164,6 @@ async def fetch(
                 ),
             )
 
-        if metadata.get("show_comment") == "0":
-            return EngagementResult(
-                platform="wechat",
-                canonical_url=url,
-                work_id=work_id,
-                coverage="complete",
-                reason="该公众号文章由作者关闭评论，登录账号也不会产生可抓取评论",
-                source="cgiDataNew.show_comment",
-                stats=stats,
-            )
         required = ("biz", "mid", "idx", "comment_id")
         if any(not metadata.get(key) for key in required):
             return result_error(
@@ -124,7 +175,8 @@ async def fetch(
                 url,
                 work_id,
                 "unsupported",
-                "公众号原生评论接口需要微信文章短时会话；未发现稳定、免费且免登录的任意文章评论接口",
+                "公众号任意第三方文章评论需要微信文章短时会话；自有公众号可用官方留言授权"
+                + (f"；官方接口尝试失败: {official_issue}" if official_issue else ""),
             )
         params = {
             "action": "getcomment",
@@ -233,11 +285,120 @@ async def fetch_appmsgext(
     )
 
 
+async def fetch_official_stats(
+    crawler: PlatformCrawlerContext,
+    metadata: dict[str, str],
+) -> EngagementStats | None:
+    mid = metadata.get("mid", "")
+    idx = metadata.get("idx", "1")
+    publish_date = metadata_publish_date(metadata)
+    if not mid or not publish_date:
+        return None
+    payload = await _post_official_api(
+        crawler,
+        "/datacube/getarticletotaldetail",
+        {"begin_date": publish_date, "end_date": publish_date},
+    )
+    if payload is None:
+        return None
+    target = f"{mid}_{idx}"
+    for item in payload.get("list") or []:
+        if not isinstance(item, dict) or str(item.get("msgid") or "") != target:
+            continue
+        details = [
+            detail
+            for detail in (item.get("detail_list") or [])
+            if isinstance(detail, dict)
+        ]
+        if not details:
+            return None
+        latest = max(details, key=lambda value: str(value.get("stat_date") or ""))
+        return EngagementStats(
+            views=to_int(latest.get("read_user")),
+            likes=to_int(latest.get("like_user")),
+            comments=to_int(latest.get("comment_count")),
+            shares=to_int(latest.get("share_user")),
+            favorites=to_int(latest.get("collection_user")),
+            recommendations=to_int(latest.get("zaikan_user")),
+        )
+    return None
+
+
+async def fetch_official_comments(
+    crawler: PlatformCrawlerContext,
+    metadata: dict[str, str],
+    *,
+    page: int,
+    limit: int,
+) -> dict[str, Any] | None:
+    mid = metadata.get("mid", "")
+    if not mid.isdigit():
+        return None
+    try:
+        index = max(0, int(metadata.get("idx", "1")) - 1)
+    except ValueError:
+        index = 0
+    page_size = min(limit, COMMENT_PAGE_SIZE)
+    return await _post_official_api(
+        crawler,
+        "/cgi-bin/comment/list",
+        {
+            "msg_data_id": int(mid),
+            "index": index,
+            "begin": (page - 1) * page_size,
+            "count": page_size,
+            "type": 0,
+        },
+    )
+
+
+async def _post_official_api(
+    crawler: PlatformCrawlerContext,
+    path: str,
+    body: dict[str, Any],
+) -> dict[str, Any] | None:
+    token = await crawler._wechat_mp_access_token()
+    if not token:
+        return None
+    for attempt in range(2):
+        payload = await crawler._post_json(
+            f"https://api.weixin.qq.com{path}",
+            params={"access_token": token},
+            headers={"Content-Type": "application/json"},
+            json_body=body,
+            force_direct=True,
+        )
+        errcode = to_int(payload.get("errcode")) or 0
+        if errcode == 0:
+            return payload
+        if errcode in {40001, 40014, 42001} and attempt == 0:
+            crawler._invalidate_wechat_mp_access_token()
+            token = await crawler._wechat_mp_access_token()
+            if token:
+                continue
+        message = str(payload.get("errmsg") or "unknown error")
+        if errcode in {40164, 45009, 45011}:
+            raise PlatformBlockedError(f"公众号官方 API {errcode}: {message}")
+        raise PlatformCrawlerError(f"公众号官方 API {errcode}: {message}")
+    return None
+
+
+def metadata_publish_date(metadata: dict[str, str]) -> str:
+    raw = metadata.get("ct") or metadata.get("publish_time") or ""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return ""
+    china_tz = timezone(timedelta(hours=8))
+    return datetime.fromtimestamp(value, tz=china_tz).date().isoformat()
+
+
 def parse_metadata(text: str, url: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for key in (
         "show_comment", "comment_id", "bizuin", "__biz", "mid", "idx", "sn",
         "appmsg_token", "uin", "key", "pass_ticket", "devicetype", "clientversion",
+        "ct", "publish_time",
     ):
         match = re.search(
             rf"(?:[\"']{re.escape(key)}[\"']|\b{re.escape(key)})\s*[:=]\s*[\"']?([^,;\"'\s}}]+)",
@@ -327,7 +488,13 @@ def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        comment_id = str(item.get("comment_id") or item.get("content_id") or item.get("id") or "")
+        comment_id = str(
+            item.get("comment_id")
+            or item.get("content_id")
+            or item.get("user_comment_id")
+            or item.get("id")
+            or ""
+        )
         text = str(item.get("content") or item.get("text") or "")
         if not comment_id or not text:
             continue
@@ -340,6 +507,7 @@ def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
                 item.get("nick_name")
                 or item.get("nickname")
                 or item.get("user_name")
+                or item.get("openid")
                 or user.get("nickname")
                 or ""
             ),
@@ -348,7 +516,11 @@ def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
                 item.get("create_time") or item.get("createTime") or item.get("created_at")
             ),
             likes=to_int(first_present(item, "like_num", "like_count", "liked_count")),
-            replies=to_int(first_present(item, "reply_count", "reply_num")),
+            replies=(
+                to_int(first_present(item, "reply_count", "reply_num"))
+                or (1 if isinstance(item.get("reply"), dict)
+                    and str(item["reply"].get("content") or "").strip() else None)
+            ),
         ))
     return result
 

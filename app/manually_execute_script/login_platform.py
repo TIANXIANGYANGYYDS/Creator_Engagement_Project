@@ -21,6 +21,7 @@ LOGIN_URLS = {
     "douyin": "https://www.douyin.com/",
     "toutiao": "https://www.toutiao.com/",
     "wechat": "https://mp.weixin.qq.com/",
+    "wechat_channels": "https://channels.weixin.qq.com/platform/post/list",
     "xiaohongshu": "https://www.xiaohongshu.com/",
     "haokan": "https://haokan.baidu.com/",
     "kuaishou": "https://www.kuaishou.com/",

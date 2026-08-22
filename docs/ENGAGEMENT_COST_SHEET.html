@@ -203,7 +203,7 @@
     </header>
 
     <section class="summary" aria-label="本轮代理成本摘要">
-      <div class="metric"><strong>16 项</strong><span>八个平台独立接口成本</span></div>
+      <div class="metric"><strong>18 项</strong><span>九个平台独立接口成本</span></div>
       <div class="metric"><strong>796 次</strong><span>快手企业独立接口实测</span></div>
       <div class="metric"><strong>64 个 IP</strong><span>两个接口独立实耗</span></div>
       <div class="metric"><strong>¥0.05376</strong><span>快手两接口 IP 总成本</span></div>
@@ -211,7 +211,7 @@
       <div class="metric"><strong>1 GET · ¥0</strong><span>小红书互动单次成本</span></div>
     </section>
 
-    <table aria-label="八个平台十六项独立接口成本明细">
+    <table aria-label="九个平台十八项独立接口成本明细">
       <colgroup>
         <col class="platform"><col class="service"><col class="sample"><col class="upstream">
         <col class="result"><col class="time"><col class="cost"><col class="verdict">
@@ -253,74 +253,87 @@
           <td class="platform-cell">公众号</td><td class="service-cell">互动量</td><td>100</td>
           <td class="upstream-cell">协议请求 + 每次浏览器页面多请求</td><td class="result-bad">34 / 100<br>34%</td>
           <td class="time-cell"><strong>21.828 / 27.973s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>不稳定；仅已知页面公开 1 个字段，负载高</td>
+          <td>第三方匿名样本不稳定；自有号已接官方 API，待用户凭据实测</td>
         </tr>
         <tr>
           <td class="platform-cell">公众号</td><td class="service-cell">评论第 1 页</td><td>100</td>
           <td class="upstream-cell">文章 HTML 全局量 + 独立评论接口</td><td class="result-bad">0 / 100<br>0%</td>
           <td class="time-cell"><strong>0.747 / 0.955s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>缺口大；98 次作者关闭，其余无匿名正文</td>
+          <td>第三方匿名缺口大；自有号已接官方 comment/list</td>
         </tr>
 
         <tr class="group-even">
+          <td class="platform-cell">微信视频号</td><td class="service-cell">互动量</td><td>100</td>
+          <td class="upstream-cell">1 POST：<code>get_feed_info</code></td><td class="result-ok">100 / 100<br>100%</td>
+          <td class="time-cell"><strong>0.063 / 0.088s‡</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；匿名公开计数；百任务队列 P95 21.663s</td>
+        </tr>
+        <tr class="group-even">
+          <td class="platform-cell">微信视频号</td><td class="service-cell">评论第 1 页</td><td>100</td>
+          <td class="upstream-cell">1 POST：仅返回评论总数</td><td class="result-bad">正文 0 / 100<br>总数 100 / 100</td>
+          <td class="time-cell"><strong>同端点 0.063 / 0.088s‡</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>正文不可用；百任务队列 P95 22.348s；需微信客户端会话</td>
+        </tr>
+
+        <tr>
           <td class="platform-cell">小红书</td><td class="service-cell">互动量</td><td>100</td>
           <td class="upstream-cell">1 GET：匿名笔记 SSR；自动补 <code>xsec_source</code></td><td class="result-ok">100 / 100<br>100%</td>
           <td class="time-cell"><strong>0.419 / 1.123s</strong></td><td class="cost-cell">直连：¥0</td>
           <td>可用；无需登录/签名/浏览器，URL 需有效 token</td>
         </tr>
-        <tr class="group-even">
+        <tr>
           <td class="platform-cell">小红书</td><td class="service-cell">评论第 1 页</td><td>20</td>
           <td class="upstream-cell">1 GET：动态签名 <code>comment/page</code></td><td class="result-ok">20 / 20<br>100%</td>
           <td class="time-cell"><strong>0.300 / 0.723s</strong></td><td class="cost-cell">直连：¥0</td>
           <td>低频可用；4 秒启动间隔，共返回 200 行</td>
         </tr>
 
-        <tr>
+        <tr class="group-even">
           <td class="platform-cell">好看视频</td><td class="service-cell">互动量</td><td>100</td>
           <td class="upstream-cell">2 GET：首页预热 + 目标页 SSR</td><td class="result-ok">100 / 100<br>100%</td>
           <td class="time-cell"><strong>0.402 / 0.550s</strong></td><td class="cost-cell">直连：¥0</td>
           <td>可用；一次业务调用实际包含 2 次请求</td>
         </tr>
-        <tr>
+        <tr class="group-even">
           <td class="platform-cell">好看视频</td><td class="service-cell">评论第 1 页</td><td>100</td>
           <td class="upstream-cell">1 GET：<code>comment/get</code></td><td class="result-ok">100 / 100<br>100%</td>
           <td class="time-cell"><strong>0.148 / 0.204s</strong></td><td class="cost-cell">直连：¥0</td>
           <td>可用；共返回 1076 行，独立评论响应</td>
         </tr>
 
-        <tr class="group-even">
+        <tr>
           <td class="platform-cell">快手</td><td class="service-cell">互动量</td><td>398</td>
           <td class="upstream-cell">GraphQL 详情 + 评论总数；必要时 SSR/GraphQL/换 IP</td><td class="result-ok">398 / 398<br>100%</td>
           <td class="time-cell"><strong>0.643 / 8.547s</strong></td><td class="cost-cell">¥0.00008653/次*</td>
           <td>364 条完整公开字段；34 条详情失效，仅返回评论数</td>
         </tr>
-        <tr class="group-even">
+        <tr>
           <td class="platform-cell">快手</td><td class="service-cell">评论第 1 页</td><td>398</td>
           <td class="upstream-cell">REST 评论；验证码时 GraphQL + 换 IP</td><td class="result-ok">398 / 398<br>100%</td>
           <td class="time-cell"><strong>0.123 / 1.555s</strong></td><td class="cost-cell">¥0.00004854/次*</td>
           <td>共 854 行；378/398 个总数与外部旧快照一致</td>
         </tr>
 
-        <tr>
+        <tr class="group-even">
           <td class="platform-cell">B站</td><td class="service-cell">互动量</td><td>5</td>
           <td class="upstream-cell">1 GET：视频详情 / 专栏 viewinfo / Opus SSR</td><td class="result-ok">5 / 5<br>100%</td>
           <td class="time-cell"><strong>0.157 / 0.716s</strong></td><td class="cost-cell">直连：¥0</td>
           <td>可用；1 个 cv + 4 个 Opus，直播不在业务范围</td>
         </tr>
-        <tr>
+        <tr class="group-even">
           <td class="platform-cell">B站</td><td class="service-cell">评论第 1 页</td><td>5</td>
           <td class="upstream-cell">cv 2 GET；Opus/视频 3 GET；WBI 风控时 +1</td><td class="result-ok">5 / 5<br>100%</td>
           <td class="time-cell"><strong>0.389 / 0.508s</strong></td><td class="cost-cell">直连：¥0</td>
           <td>可用；共 61 行，type=12 + 最新排序分页</td>
         </tr>
 
-        <tr class="group-even">
+        <tr>
           <td class="platform-cell">微博</td><td class="service-cell">互动量</td><td>20</td>
           <td class="upstream-cell">1 GET：<code>statuses/show</code></td><td class="result-ok">20 / 20<br>100%</td>
           <td class="time-cell"><strong>0.057 / 0.091s</strong></td><td class="cost-cell">直连：¥0</td>
           <td>可用；单独状态响应</td>
         </tr>
-        <tr class="group-even">
+        <tr>
           <td class="platform-cell">微博</td><td class="service-cell">评论第 1 页</td><td>20</td>
           <td class="upstream-cell">1 GET：<code>comments/hotflow</code></td><td class="result-ok">20 / 20<br>100%</td>
           <td class="time-cell"><strong>0.125 / 0.179s</strong></td><td class="cost-cell">直连：¥0</td>
@@ -330,8 +343,8 @@
     </table>
 
     <section class="notes">
-      <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。快手互动实耗 41 IP / ¥0.03444，评论实耗 23 IP / ¥0.01932；两个独立接口合计 <strong>64 IP / ¥0.05376</strong>，按 398 个 URL 各调两项摊销 ¥0.00013508/URL。其余表内正式流程直连，IP 采购成本为 ¥0。</p>
-      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存。小红书互动百测为 100 个当前有效 token URL，每次 1 个匿名 SSR GET；默认 prefer 也自动直连，IP 成本 ¥0。评论仍是带 web_session 的独立签名 GET，不能与互动合并。快手两项全程零浏览器。</p>
+      <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。快手互动实耗 41 IP / ¥0.03444，评论实耗 23 IP / ¥0.01932；两个独立接口合计 <strong>64 IP / ¥0.05376</strong>，按 398 个 URL 各调两项摊销 ¥0.00013508/URL。视频号本次直连且默认 prefer 绕过代理，实际 IP 成本 ¥0；显式 required 除外。</p>
+      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存。‡ 视频号单请求耗时来自最终采集器 20 次顺序探针（20/20）；另有互动/评论各 100 个任务同时入队的企业节奏实测，队列 P95 为 21.663/22.348 秒。互动计数可用，评论正文不可用。公众号两行是任意第三方文章匿名历史实测；自有公众号官方接口已实现但尚无用户凭据，未虚构成功率和单价。</p>
     </section>
   </main>
 </body>
