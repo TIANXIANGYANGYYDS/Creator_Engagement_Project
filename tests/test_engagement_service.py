@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from time import monotonic
 
 import pytest
 
 from app.core.config import Settings
 from app.models.engagement import CommentPageResult, EngagementComment, EngagementResult, InteractionResult
-from app.services.engagement_service import EngagementService
+from app.services.engagement_service import (
+    EngagementService,
+    PlatformTrafficPolicy,
+)
 
 
 class FakeCrawler:
@@ -145,3 +149,74 @@ def test_required_proxy_mode_requires_api_url() -> None:
 
     with pytest.raises(ValueError, match="PROXY_51_API_URL"):
         EngagementService.from_settings(settings)
+
+
+def test_retryable_failure_is_not_cached() -> None:
+    class BlockedCrawler(FakeCrawler):
+        async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+            self.calls.append((f"{media_name}:{url}", 0))
+            return InteractionResult(
+                platform="toutiao",
+                canonical_url=url,
+                work_id="123",
+                coverage="blocked",
+                reason="temporary challenge",
+            )
+
+    crawler = BlockedCrawler()
+    service = EngagementService(crawler)  # type: ignore[arg-type]
+
+    asyncio.run(service.fetch_interactions("same-url", "toutiao"))
+    asyncio.run(service.fetch_interactions("same-url", "toutiao"))
+
+    assert len(crawler.calls) == 2
+
+
+def test_meaningful_result_is_cached() -> None:
+    crawler = FakeCrawler()
+    service = EngagementService(crawler)  # type: ignore[arg-type]
+
+    asyncio.run(service.fetch_interactions("same-url", "toutiao"))
+    asyncio.run(service.fetch_interactions("same-url", "toutiao"))
+
+    assert crawler.calls == [("toutiao:same-url", 0)]
+
+
+def test_platform_policy_serializes_and_spaces_request_starts() -> None:
+    class TimedCrawler(FakeCrawler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started: list[float] = []
+            self.active = 0
+            self.max_active = 0
+
+        async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+            self.started.append(monotonic())
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0.005)
+            self.active -= 1
+            return await super().fetch_interactions(url, media_name)
+
+    async def run() -> TimedCrawler:
+        crawler = TimedCrawler()
+        service = EngagementService(  # type: ignore[arg-type]
+            crawler,
+            collection_max_concurrency=4,
+            platform_policies={
+                "xiaohongshu": PlatformTrafficPolicy(
+                    max_concurrency=1,
+                    min_interval_seconds=0.02,
+                ),
+            },
+        )
+        await asyncio.gather(
+            service.fetch_interactions("url-1", "xiaohongshu"),
+            service.fetch_interactions("url-2", "xiaohongshu"),
+        )
+        return crawler
+
+    crawler = asyncio.run(run())
+
+    assert crawler.max_active == 1
+    assert crawler.started[1] - crawler.started[0] >= 0.018

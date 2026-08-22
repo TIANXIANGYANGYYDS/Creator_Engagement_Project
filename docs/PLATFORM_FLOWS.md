@@ -12,9 +12,10 @@ GET /api/v1/comments?url=...&media_name=...&page=N
   -> include_stats=false, include_comments=true
 ```
 
-只有接口类型、媒体、URL 和页码都相同的重复请求才会合并任务并命中 120 秒缓存。互动量
-接口不会提前抓评论，评论接口也不会提前抓互动量。一个代理 IP 可以承载多次 HTTP 请求；
-共用代理租约不等于合并请求。
+只有接口类型、媒体、URL 和页码都相同的重复请求才会合并任务并命中 120 秒缓存。两个外部
+接口不会互相冒充结果；但某个平台为补齐互动中的“评论总数”时，内部可以调用评论总数
+端点，其返回的评论正文不会写入互动响应。一个代理 IP 可以承载多次 HTTP 请求；共用代理
+租约不等于合并请求。
 
 ## 抖音
 
@@ -61,7 +62,8 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 - 评论：使用 `xhshow` 为 `/api/sns/web/v2/comment/page` 动态生成完整签名头，按 cursor
   遍历到指定页。旧 `XYS_` 被 HTTP 406 拒绝时自动重试 `XYW_`。
 - 详情：`/api/sns/web/v1/feed` 同时生成当前版本需要的 `x-rap-param`。
-- 失败处理：无 Cookie 时进入游客浏览器读取公开首屏；游客态不会把第一页冒充后续页。
+- 失败处理：缺 Cookie/token 是不可重试的能力边界；会话齐全但详情返回 HTTP 461 或空目标
+  数据时标记 `blocked`，企业模式按 4/8 秒退避重试，再进入游客浏览器。
 - 会话边界：首屏可游客访问；稳定深分页需要调用方自己的会话和有效 `xsec_token`。
 
 ## 好看视频
@@ -79,14 +81,18 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 代码：`app/crawlers/platforms/kuaishou.py`
 
 - 互动量：同一游客/自有会话请求 GraphQL `visionVideoDetail`，并强制校验返回
-  `photo.id == URL photoId`。
-- 评论：优先请求 `/rest/v/photo/comment/list`，必要时回退 GraphQL
+  `photo.id == URL photoId`；详情传输或目标匹配异常时解析目标页 `__APOLLO_STATE__`。
+  评论总数由独立评论端点补齐，不能把两次 HTTP 请求写成一次。
+- 评论：优先请求 `/rest/v/photo/comment/list`，包括 REST 返回验证码时仍尝试 GraphQL
   `commentListQuery`，按 `pcursor` 遍历指定页；置顶评论若在后续页重复，会按评论 ID 去重。
-- 失败处理：无短期游客状态、Need captcha 或目标 ID 不一致时均不算成功；浏览器打开目标页
-  重新生成游客状态后重试。
+- 失败处理：企业模式最多 3 次，每次使用独立代理租约；网络失败、Need captcha、HTTP 200
+  空包和缺少评论总数都会淘汰当前 IP。已取得播放/点赞时，后续评论总数失败不会再丢弃前者。
+- 作品状态：详情明确返回 `status=1040/photo=null` 时停止无意义详情重试，继续返回评论端点
+  仍能验证的评论总数，并在 `reason` 中标明字段不完整。
 - URL：同时接受 `www.kuaishou.com/short-video/{id}` 和 `c.kuaishou.com/fw/photo/{id}`；
   分享链接在浏览器阶段自动规范化为同作品详情页。
-- 会话边界：公开作品首屏不要求账号；只返回一级评论，不混入推荐流或子回复。
+- 会话边界：公开作品首屏不要求账号；只返回一级评论，不混入推荐流或子回复。398 条真实
+  URL 企业实测互动/评论均为 398/398 有数据，全程零浏览器；互动中 34 条仅剩评论数。
 
 ## B 站
 

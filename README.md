@@ -59,7 +59,8 @@ conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 注入；为兼容 Stock_Project 现有环境，也接受 `DOUYIN_SESSION_COOKIE` 作为回退变量名。
 该 Cookie 只会注入抖音域名，不会污染快手、小红书等平台的游客会话。
 
-快手公开作品默认使用浏览器自动生成的游客设备会话，不需要账号。小红书游客态曾在新鲜
+快手公开作品默认复用本地游客设备状态走纯协议详情和评论接口，状态失效时才由浏览器重新
+生成，不需要账号。小红书游客态曾在新鲜
 公开笔记读取到互动量和首屏评论，但当前重复实测并不稳定。项目不接入付费数据供应商；
 小红书稳定首屏/深分页和任意公众号文章的互动/评论需要时复用调用方自己的平台会话。八个平台都可以在
 带桌面环境的本机建立独立 Profile：
@@ -98,9 +99,11 @@ LLM、Mongo、51 代理 API 和日志参数。当前代理模式：
 过期排空和供应商 API 限流机制。一次业务接口内部的预热和数据请求可共享代理租约，但每个
 HTTP 调用仍单独计入上游请求数；互动量接口和评论接口分别执行、分别缓存。
 
-服务默认最多同时运行 4 个采集任务、1 个浏览器任务，代理池只保留 1 个 IP；相同接口、
-相同 URL 和相同页码的并发重复请求会合并，结果缓存 120 秒（最多 1000 项）。需要更保守的低内存配置时可把
-`BROWSER_MAX_CONCURRENCY=1`。配置项、真实内存测试和 51 代理成本公式见
+默认启用 `RELIABILITY_MODE=enterprise`：最多 3 次协议尝试，HTTP 200 但业务空包/验证码
+也会淘汰当前代理；失败结果不写入 120 秒缓存。服务最多同时运行 4 个采集任务、1 个浏览器
+任务，代理池维护 4 个 IP 且每个 IP 单并发。小红书、快手和公众号另有平台级串行与启动
+间隔，避免全局 4 并发直接压到单个平台。相同接口、相同 URL 和相同页码的并发重复请求会
+合并，成功或有效部分结果缓存 120 秒（最多 1000 项）。配置项、真实内存测试和 51 代理成本公式见
 [`docs/COST_AND_CAPACITY.md`](docs/COST_AND_CAPACITY.md)。
 
 运行时以最终获取数据为验收标准：先走成本更低的协议请求；协议返回
@@ -135,11 +138,11 @@ kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、小
 | B 站 | 视频互动/评论；直播当前状态和最近弹幕 | 视频 `x/web-interface/view`、`x/v2/reply/wbi/main`；直播 `Room/get_info`、`dM/gethistory` | 视频支持分页；直播不提供历史弹幕全集 |
 | 微博 | 点赞、评论、转发和匿名评论分页 | `statuses/show`、`comments/hotflow`、`api/comments/show` | 可用，访客态部分覆盖 |
 | 好看 | 播放、点赞、评论总数和一级评论 | 目标页 SSR、`haokan/ui-web/v2/comment/get` | 纯协议匿名可用；收藏/分享未公开 |
-| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 游客 SSR/浏览器首屏；自有会话 `xhshow` | 游客首屏曾成功但当前不稳定；稳定采集需要自有会话 |
+| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 签名 feed/评论接口、SSR、浏览器兜底 | 低频评论最新 20/20；互动最新 0/20 且代理+浏览器仍验证码，稳定互动需要更有效的调用方会话 |
 | 抖音 | 匿名纯协议互动量和评论分页；浏览器仅作风控兜底 | 第一方访客 `ttwid`、纯 Python `a_bogus`、`/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 真实首屏 20 条、总数 2909；平台隐藏 `play_count` 时播放保持 `null` |
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
 | 公众号 | 页面公开字段；有文章会话时读取互动和评论 | 页面 SSR、`getappmsgext`、`appmsg_comment` | 任意文章匿名互动/评论无稳定免费接口；官方统计只适用于自有公众号授权 |
-| 快手 | 播放、点赞、评论总数和一级评论 | 游客页 `visionVideoDetail`、`/rest/v/photo/comment/list` | 无需账号；严格校验目标 ID，挑战失败时明确 blocked |
+| 快手 | 播放、点赞、评论总数和一级评论 | `visionVideoDetail`、SSR Apollo、REST/GraphQL 评论双通道 | 无需账号；398 条互动和 398 条评论企业实测均有数据，详情已下线时仅返回可验证评论数 |
 
 真实输入 URL 同时兼容头条 `/i{id}`、快手 `c.kuaishou.com/fw/photo/{id}`、微博桌面端
 `/用户ID/base62短ID` 和 `live.bilibili.com/{room_id}`。这些变体只在路由层规范化，平台
@@ -157,6 +160,9 @@ Cookie。
 
 头条评论接口已验证：`/article/v4/tab_comments/` 使用 `aid/app_name/offset/count/group_id/item_id` 即可返回 `err_no=0`、`total_number`、`has_more` 和评论列表，不需要把浏览器请求里的 `_signature` 写入代码。
 
-快手不能用“GraphQL 返回 HTTP 200”作为成功判据。项目先打开目标页，让平台签发游客设备状态，再在同一浏览器上下文调用 `visionVideoDetail` 和 `/rest/v/photo/comment/list`；响应必须严格匹配 `photoId`。游客状态自然过期后由浏览器重新生成，不把 `kww/kwssectoken` 写入代码。
+快手不能用“GraphQL 返回 HTTP 200”作为成功判据。项目复用本地游客状态直接调用
+`visionVideoDetail` 和 `/rest/v/photo/comment/list`，REST 受限时尝试 GraphQL 评论通道，
+详情传输失败时解析目标页 `__APOLLO_STATE__`；所有结果必须严格匹配 `photoId`。游客状态
+自然过期后才由浏览器重新生成，不把 `kww/kwssectoken` 写入代码。
 
 小红书评论接口已经定位到 `api/sns/web/v2/comment/page`。未登录网页会建立游客会话并返回首屏评论，但 UI 会阻止继续翻页；项目不会把第一页冒充成第二页。自有登录态可使用 `xhshow==0.2.0` 动态签名继续按游标请求；旧 `XYS_` 返回 406 时会自动重试 `XYW_`，两种格式均失败才标记受阻。

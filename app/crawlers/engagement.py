@@ -7,6 +7,8 @@ fallback when the protocol result is unavailable.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import TYPE_CHECKING, Any
 
 from app.crawlers.http_client import (
@@ -33,6 +35,9 @@ if TYPE_CHECKING:
     from app.crawlers.platform_session import PlatformSessionStore
 
 
+logger = logging.getLogger(__name__)
+
+
 class EngagementCrawler:
     """Route the common API contract to one independent platform collector."""
 
@@ -47,7 +52,13 @@ class EngagementCrawler:
         browser_fallback: "BrowserFallback | None" = None,
         session_store: "PlatformSessionStore | None" = None,
         platform_cookies: dict[EngagementPlatform, str] | None = None,
+        max_protocol_attempts: int = 1,
+        protocol_retry_base_seconds: float = 1,
     ) -> None:
+        if max_protocol_attempts <= 0:
+            raise ValueError("max_protocol_attempts must be greater than zero")
+        if protocol_retry_base_seconds < 0:
+            raise ValueError("protocol_retry_base_seconds must not be negative")
         self._owns_client = client is None
         self.client = client or CurlAsyncHttpClient(
             timeout_seconds=timeout_seconds,
@@ -65,6 +76,8 @@ class EngagementCrawler:
         self.browser_fallback = browser_fallback
         self.session_store = session_store
         self.platform_cookies = platform_cookies or {}
+        self.max_protocol_attempts = max_protocol_attempts
+        self.protocol_retry_base_seconds = protocol_retry_base_seconds
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -138,28 +151,16 @@ class EngagementCrawler:
                 f"{platform} protocol collector is not registered",
             )
         else:
-            lease_scope = getattr(self.client, "lease_scope", None)
-            if callable(lease_scope):
-                async with lease_scope():
-                    result = await handler(
-                        self,
-                        url,
-                        work_id,
-                        limit,
-                        page=page,
-                        include_stats=include_stats,
-                        include_comments=include_comments,
-                    )
-            else:
-                result = await handler(
-                    self,
-                    url,
-                    work_id,
-                    limit,
-                    page=page,
-                    include_stats=include_stats,
-                    include_comments=include_comments,
-                )
+            result = await self._run_protocol_handler(
+                handler,
+                url,
+                platform,
+                work_id,
+                limit=limit,
+                page=page,
+                include_stats=include_stats,
+                include_comments=include_comments,
+            )
 
         if self._should_use_browser_fallback(
             result,
@@ -176,8 +177,108 @@ class EngagementCrawler:
                 include_comments=include_comments,
             )
             if browser_result is not None:
+                browser_result.protocol_attempts = result.protocol_attempts
                 return browser_result
         return result
+
+    async def _run_protocol_handler(
+        self,
+        handler: Any,
+        url: str,
+        platform: EngagementPlatform,
+        work_id: str,
+        *,
+        limit: int,
+        page: int,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> EngagementResult:
+        result: EngagementResult | None = None
+        for attempt in range(1, self.max_protocol_attempts + 1):
+            lease_scope = getattr(self.client, "lease_scope", None)
+            if callable(lease_scope):
+                async with lease_scope():
+                    result = await handler(
+                        self,
+                        url,
+                        work_id,
+                        limit,
+                        page=page,
+                        include_stats=include_stats,
+                        include_comments=include_comments,
+                    )
+                    if self._should_retry_protocol(
+                        result,
+                        include_stats=include_stats,
+                        include_comments=include_comments,
+                    ):
+                        invalidate = getattr(self.client, "invalidate_active_lease", None)
+                        if callable(invalidate):
+                            invalidate(
+                                f"semantic collection failure: {result.coverage}: {result.reason}"
+                            )
+            else:
+                result = await handler(
+                    self,
+                    url,
+                    work_id,
+                    limit,
+                    page=page,
+                    include_stats=include_stats,
+                    include_comments=include_comments,
+                )
+
+            result.protocol_attempts = attempt
+            should_retry = self._should_retry_protocol(
+                result,
+                include_stats=include_stats,
+                include_comments=include_comments,
+            )
+            if not should_retry or attempt == self.max_protocol_attempts:
+                return result
+
+            delay = self._retry_delay(platform, attempt)
+            logger.warning(
+                "protocol_retry platform=%s work_id=%s attempt=%s/%s delay=%.2f coverage=%s reason=%s",
+                platform,
+                work_id,
+                attempt,
+                self.max_protocol_attempts,
+                delay,
+                result.coverage,
+                result.reason,
+            )
+            if delay:
+                await asyncio.sleep(delay)
+
+        assert result is not None
+        return result
+
+    def _retry_delay(self, platform: EngagementPlatform, attempt: int) -> float:
+        empirical_floor = 4.0 if platform == "xiaohongshu" else 0.0
+        base = max(self.protocol_retry_base_seconds, empirical_floor)
+        return base * (2 ** (attempt - 1))
+
+    @staticmethod
+    def _should_retry_protocol(
+        result: EngagementResult,
+        *,
+        include_stats: bool,
+        include_comments: bool,
+    ) -> bool:
+        if result.coverage in {"blocked", "failed"}:
+            return True
+        if result.coverage in {"unsupported", "complete"}:
+            return False
+        if bool(getattr(result, "retryable_partial", False)):
+            return True
+        if include_stats and not any(
+            value is not None for value in result.stats.model_dump().values()
+        ):
+            return True
+        if include_comments and not result.comments and result.stats.comments != 0:
+            return True
+        return False
 
     @staticmethod
     def _should_use_browser_fallback(
@@ -192,7 +293,12 @@ class EngagementCrawler:
             value is not None for value in result.stats.model_dump().values()
         ):
             return True
-        if include_comments and not result.comments and result.coverage == "partial":
+        if (
+            include_comments
+            and not result.comments
+            and result.coverage == "partial"
+            and result.stats.comments != 0
+        ):
             return True
         return False
 

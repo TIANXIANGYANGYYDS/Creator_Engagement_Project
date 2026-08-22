@@ -34,9 +34,9 @@ class Settings(BaseSettings):
         default="prefer",
         alias="PROXY_MODE",
     )
-    proxy_pool_size: int = Field(default=1, alias="PROXY_POOL_SIZE", ge=1, le=200)
+    proxy_pool_size: int = Field(default=4, alias="PROXY_POOL_SIZE", ge=1, le=200)
     proxy_max_concurrency: int = Field(
-        default=2,
+        default=1,
         alias="PROXY_MAX_CONCURRENCY",
         ge=1,
     )
@@ -57,6 +57,22 @@ class Settings(BaseSettings):
         default=4,
         alias="COLLECTION_MAX_CONCURRENCY",
         ge=1,
+    )
+    reliability_mode: Literal["economy", "enterprise"] = Field(
+        default="enterprise",
+        alias="RELIABILITY_MODE",
+    )
+    protocol_max_attempts: int = Field(
+        default=3,
+        alias="PROTOCOL_MAX_ATTEMPTS",
+        ge=1,
+        le=10,
+    )
+    protocol_retry_base_seconds: float = Field(
+        default=1,
+        alias="PROTOCOL_RETRY_BASE_SECONDS",
+        ge=0,
+        le=30,
     )
     engagement_cache_ttl_seconds: float = Field(
         default=120,
@@ -82,7 +98,7 @@ class Settings(BaseSettings):
         ge=1,
     )
     browser_reset_guest_state_on_proxy_change: bool = Field(
-        default=False,
+        default=True,
         alias="BROWSER_RESET_GUEST_STATE_ON_PROXY_CHANGE",
     )
     browser_profile_dir: str = Field(

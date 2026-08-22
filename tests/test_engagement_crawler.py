@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from app.crawlers.platforms.registry import (
 from app.crawlers.platforms.toutiao import parse_stats as parse_toutiao_stats
 from app.crawlers.platforms.haokan import parse_ssr_stats as parse_haokan_stats
 from app.crawlers.platforms.xiaohongshu import parse_stats as parse_xhs_stats
+from app.models.engagement import EngagementResult, EngagementStats
 
 
 class FakeResponse:
@@ -63,6 +65,96 @@ class FakeClient:
     async def post(self, url: str, **kwargs: Any) -> FakeResponse:
         self.calls.append((url, kwargs))
         return self.responses.pop(0)
+
+
+class LeaseAwareClient(FakeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.invalidations: list[str] = []
+        self.lease_count = 0
+
+    @asynccontextmanager
+    async def lease_scope(self):
+        self.lease_count += 1
+        yield
+
+    def invalidate_active_lease(self, reason: str) -> None:
+        self.invalidations.append(reason)
+
+
+def test_protocol_retries_semantic_block_and_reports_attempts(monkeypatch) -> None:
+    calls = 0
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return EngagementResult(
+                platform="weibo",
+                canonical_url="https://m.weibo.cn/detail/12345678",
+                work_id="12345678",
+                coverage="blocked",
+                reason="HTTP 200 payload requested captcha",
+            )
+        return EngagementResult(
+            platform="weibo",
+            canonical_url="https://m.weibo.cn/detail/12345678",
+            work_id="12345678",
+            coverage="partial",
+            stats=EngagementStats(likes=7),
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "weibo", handler)
+    client = LeaseAwareClient()
+    crawler = EngagementCrawler(
+        client=client,
+        max_protocol_attempts=3,
+        protocol_retry_base_seconds=0,
+    )
+
+    result = asyncio.run(crawler.fetch_interactions(
+        "https://m.weibo.cn/detail/12345678",
+        "weibo",
+    ))
+
+    assert result.stats.likes == 7
+    assert result.protocol_attempts == 2
+    assert calls == 2
+    assert client.lease_count == 2
+    assert len(client.invalidations) == 1
+
+
+def test_protocol_does_not_retry_intrinsic_unsupported_result(monkeypatch) -> None:
+    calls = 0
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        nonlocal calls
+        calls += 1
+        return EngagementResult(
+            platform="weibo",
+            canonical_url="https://m.weibo.cn/detail/12345678",
+            work_id="12345678",
+            coverage="unsupported",
+            reason="caller session is required",
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "weibo", handler)
+    client = LeaseAwareClient()
+    crawler = EngagementCrawler(
+        client=client,
+        max_protocol_attempts=3,
+        protocol_retry_base_seconds=0,
+    )
+
+    result = asyncio.run(crawler.fetch_interactions(
+        "https://m.weibo.cn/detail/12345678",
+        "weibo",
+    ))
+
+    assert result.coverage == "unsupported"
+    assert result.protocol_attempts == 1
+    assert calls == 1
+    assert client.invalidations == []
 
 
 @pytest.mark.parametrize(

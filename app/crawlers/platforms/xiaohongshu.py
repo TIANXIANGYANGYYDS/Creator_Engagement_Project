@@ -43,6 +43,7 @@ async def fetch(
         comments: list[EngagementComment] = []
         next_cursor: str | None = None
         sources: list[str] = []
+        feed_error = ""
 
         if include_stats:
             if cookie and token:
@@ -58,8 +59,8 @@ async def fetch(
                     stats = stats_from_note(note_card(feed))
                     if _has_stats(stats):
                         sources.append("api/sns/web/v1/feed")
-                except PlatformCrawlerError:
-                    pass
+                except PlatformCrawlerError as exc:
+                    feed_error = str(exc)
             if not _has_stats(stats):
                 response = await crawler._get_response(
                     url,
@@ -125,9 +126,12 @@ async def fetch(
                 )
                 comments = parse_comments(comment_payload)
                 total = to_int(
-                    comment_payload.get("total_count")
-                    or comment_payload.get("comment_count")
-                    or comment_payload.get("comments_count")
+                    first_present(
+                        comment_payload,
+                        "total_count",
+                        "comment_count",
+                        "comments_count",
+                    )
                 )
                 next_cursor = (
                     str(comment_payload.get("cursor"))
@@ -145,12 +149,18 @@ async def fetch(
             sources.append("api/sns/web/v2/comment/page")
 
         if not comments and not _has_stats(stats):
+            has_detail_session = bool(cookie and token)
             return result_error(
                 "xiaohongshu",
                 url,
                 work_id,
-                "unsupported",
-                "小红书笔记页面未返回可验证互动或评论数据，URL 可能已失效或需要登录验证",
+                "blocked" if has_detail_session else "unsupported",
+                (
+                    "小红书详情会话未返回目标数据"
+                    + (f"（{feed_error}）" if feed_error else "")
+                    if has_detail_session
+                    else "小红书笔记页面未返回可验证互动或评论数据，URL 可能已失效或需要登录验证"
+                ),
             )
 
         return EngagementResult(

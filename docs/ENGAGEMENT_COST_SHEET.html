@@ -197,18 +197,18 @@
     <header class="heading">
       <div>
         <h1>互动量与公开评论采集实测成本单</h1>
-        <div class="subtitle">按独立业务接口列示真实成功率、耗时和 IP 成本；8 个平台均不能把互动量与评论合并计为一次请求</div>
+        <div class="subtitle">按独立业务接口列示真实成功率、耗时和 IP 成本；互动量与评论按实际上游响应分别计数</div>
       </div>
       <div class="badge">实测日期 2026-08-22 · MyAgent / Python 3.13</div>
     </header>
 
     <section class="summary" aria-label="本轮代理成本摘要">
-      <div class="metric"><strong>2404 次</strong><span>正式独立接口实测</span></div>
-      <div class="metric"><strong>902 个 URL</strong><span>主数据集 / 1804 次调用</span></div>
-      <div class="metric"><strong>45 个 IP</strong><span>正式生产策略实耗</span></div>
-      <div class="metric"><strong>¥0.0378</strong><span>正式测试 IP 总成本</span></div>
-      <div class="metric"><strong>约 130 分钟</strong><span>902 URL 采集器活跃时间</span></div>
-      <div class="metric"><strong>约 1441 分钟</strong><span>1 万 URL 外推 / IP ¥0.419</span></div>
+      <div class="metric"><strong>796 次</strong><span>快手企业独立接口实测</span></div>
+      <div class="metric"><strong>398 个 URL</strong><span>互动量与评论各调用一次</span></div>
+      <div class="metric"><strong>64 个 IP</strong><span>两个接口独立实耗</span></div>
+      <div class="metric"><strong>¥0.05376</strong><span>快手两接口 IP 总成本</span></div>
+      <div class="metric"><strong>约 9.20 分钟</strong><span>两项独立长跑 + 补齐</span></div>
+      <div class="metric"><strong>100% 有数据</strong><span>快手 398 + 398 / 零浏览器</span></div>
     </section>
 
     <table aria-label="八个平台十六项独立接口成本明细">
@@ -263,16 +263,16 @@
         </tr>
 
         <tr class="group-even">
-          <td class="platform-cell">小红书</td><td class="service-cell">互动量</td><td>100</td>
-          <td class="upstream-cell">详情/SSR 协议；受限时浏览器多请求</td><td class="result-bad">29 / 100<br>29%</td>
-          <td class="time-cell"><strong>0.189 / 25.204s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>不稳定；同出口封控后降速仍未恢复</td>
+          <td class="platform-cell">小红书</td><td class="service-cell">互动量</td><td>20</td>
+          <td class="upstream-cell">每次 2 POST 签名详情 + 1 GET SSR；最多 3 轮</td><td class="result-bad">0 / 20<br>0%</td>
+          <td class="time-cell"><strong>14.356 / 15.978s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>当前不可用；60 次详情均 HTTP 461，代理+浏览器仍验证码</td>
         </tr>
         <tr class="group-even">
-          <td class="platform-cell">小红书</td><td class="service-cell">评论第 1 页</td><td>100</td>
-          <td class="upstream-cell">1 次签名评论协议；验证码时兜底</td><td class="result-ok">95 / 100<br>95%</td>
-          <td class="time-cell"><strong>0.133 / 0.305s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>限速可用；4 秒间隔，共返回 950 行</td>
+          <td class="platform-cell">小红书</td><td class="service-cell">评论第 1 页</td><td>20</td>
+          <td class="upstream-cell">1 GET：动态签名 <code>comment/page</code></td><td class="result-ok">20 / 20<br>100%</td>
+          <td class="time-cell"><strong>0.300 / 0.723s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>低频可用；4 秒启动间隔，共返回 200 行</td>
         </tr>
 
         <tr>
@@ -290,15 +290,15 @@
 
         <tr class="group-even">
           <td class="platform-cell">快手</td><td class="service-cell">互动量</td><td>398</td>
-          <td class="upstream-cell">协议优先；游客风控时浏览器/换 IP</td><td class="result-bad">84 / 398<br>21.1%</td>
-          <td class="time-cell"><strong>16.239 / 34.220s</strong></td><td class="cost-cell">¥0.00004749/次*</td>
-          <td>缺口大；成功响应解析准，游客风控覆盖率低</td>
+          <td class="upstream-cell">GraphQL 详情 + 评论总数；必要时 SSR/GraphQL/换 IP</td><td class="result-ok">398 / 398<br>100%</td>
+          <td class="time-cell"><strong>0.643 / 8.547s</strong></td><td class="cost-cell">¥0.00008653/次*</td>
+          <td>364 条完整公开字段；34 条详情失效，仅返回评论数</td>
         </tr>
         <tr class="group-even">
           <td class="platform-cell">快手</td><td class="service-cell">评论第 1 页</td><td>398</td>
-          <td class="upstream-cell">独立评论协议；受限时浏览器/换 IP</td><td class="result-bad">104 / 398<br>26.1%</td>
-          <td class="time-cell"><strong>15.981 / 31.971s</strong></td><td class="cost-cell">¥0.00004749/次*</td>
-          <td>缺口大；101/104 条可比总数与外部快照一致</td>
+          <td class="upstream-cell">REST 评论；验证码时 GraphQL + 换 IP</td><td class="result-ok">398 / 398<br>100%</td>
+          <td class="time-cell"><strong>0.123 / 1.555s</strong></td><td class="cost-cell">¥0.00004854/次*</td>
+          <td>共 854 行；378/398 个总数与外部旧快照一致</td>
         </tr>
 
         <tr>
@@ -330,8 +330,8 @@
     </table>
 
     <section class="notes">
-      <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。只有快手正式流程使用代理：796 次独立接口共消耗 45 个 IP，故混合实测摊销为 <strong>¥0.00004749/次</strong>；一个 IP 平均承载 17.69 次调用。其余正式流程直连，IP 采购成本为 ¥0。</p>
-      <p><strong>范围与风险：</strong>P50/P95 均为绕过业务缓存的端到端实测。研发诊断另耗 29 IP，不计入生产单价；正式测试与研发合计 74 IP / ¥0.06216。浏览器单并发峰值约 401 MB。互动量和评论均为不同上游流程，所以保持 16 行。</p>
+      <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。快手互动实耗 41 IP / ¥0.03444，评论实耗 23 IP / ¥0.01932；两个独立接口合计 <strong>64 IP / ¥0.05376</strong>，按 398 个 URL 各调两项摊销 ¥0.00013508/URL。其余表内正式流程直连，IP 采购成本为 ¥0。</p>
+      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存。快手互动的 41 IP 包含全量 36 IP 和 13 条专项补齐 5 IP，最终代码已合入补齐重试；两项全程零浏览器。小红书互动的代理+浏览器单测仍失败。互动量和评论是不同上游流程，因此保持 16 行。</p>
     </section>
   </main>
 </body>

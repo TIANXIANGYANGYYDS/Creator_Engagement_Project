@@ -27,8 +27,8 @@ from app.models.engagement import (
 GRAPHQL_URL = "https://www.kuaishou.com/graphql"
 COMMENT_URL = "https://www.kuaishou.com/rest/v/photo/comment/list"
 DETAIL_QUERY = """
-query visionVideoDetail($photoId: String) {
-  visionVideoDetail(photoId: $photoId) {
+query visionVideoDetail($photoId: String, $page: String) {
+  visionVideoDetail(photoId: $photoId, page: $page) {
     status
     photo {
       id
@@ -87,28 +87,18 @@ async def fetch(
         comments: list[EngagementComment] = []
         next_cursor: str | None = None
         sources: list[str] = []
+        detail_reason = ""
+        comment_total_reason = ""
+        retryable_partial = False
         if include_stats:
-            detail_payload = {
-                "operationName": "visionVideoDetail",
-                "variables": {"photoId": work_id},
-                "query": DETAIL_QUERY,
-            }
-            detail_response = await crawler._post_json(
-                GRAPHQL_URL,
-                headers=headers,
-                data=json.dumps(detail_payload, separators=(",", ":")),
+            stats, detail_source, detail_reason = await fetch_detail_stats(
+                crawler,
+                url,
+                work_id,
+                headers,
             )
-            raise_response_errors(detail_response)
-            detail = (detail_response.get("data") or {}).get("visionVideoDetail") or {}
-            photo = detail.get("photo") or {}
-            if str(photo.get("id") or "") != work_id:
-                raise PlatformCrawlerError("快手详情响应未匹配目标 photoId")
-            stats = EngagementStats(
-                views=to_int(photo.get("viewCount")),
-                likes=to_int(photo.get("realLikeCount") or photo.get("likeCount")),
-                comments=to_int(photo.get("commentCount")),
-            )
-            sources.append("graphql visionVideoDetail")
+            if detail_source:
+                sources.append(detail_source)
 
         if include_comments:
             cursor = ""
@@ -123,8 +113,7 @@ async def fetch(
                     if comment.comment_id not in seen_comment_ids
                 ]
                 total = to_int(
-                    comment_payload.get("commentCountV2")
-                    or comment_payload.get("commentCount")
+                    first_present(comment_payload, "commentCountV2", "commentCount")
                 )
                 raw_cursor = comment_payload.get("pcursorV2") or comment_payload.get("pcursor")
                 next_cursor = (
@@ -145,32 +134,142 @@ async def fetch(
                 stats.comments = total
             sources.append("rest/v/photo/comment/list")
         elif include_stats and stats.comments is None:
-            comment_payload = await fetch_comment_page(crawler, work_id, "", headers)
-            stats.comments = to_int(
-                comment_payload.get("commentCountV2")
-                or comment_payload.get("commentCount")
-            )
-            sources.append("rest/v/photo/comment/list total")
+            try:
+                comment_payload = await fetch_comment_page(crawler, work_id, "", headers)
+                comment_total = to_int(
+                    first_present(comment_payload, "commentCountV2", "commentCount")
+                )
+                if comment_total is None:
+                    raise PlatformCrawlerError("快手评论响应未返回评论总数")
+                stats.comments = comment_total
+                sources.append("rest/v/photo/comment/list total")
+            except PlatformCrawlerError as exc:
+                if not any(
+                    value is not None for value in stats.model_dump().values()
+                ):
+                    raise
+                retryable_partial = True
+                comment_total_reason = f"评论总数暂不可用（{exc}）"
 
-        return EngagementResult(
+        if include_stats and not any(
+            value is not None for value in stats.model_dump().values()
+        ):
+            raise PlatformCrawlerError(detail_reason or "快手目标详情没有可用互动数据")
+
+        if comment_total_reason:
+            reason = f"{comment_total_reason}；保留已验证的播放量和点赞量"
+        elif include_stats and detail_reason:
+            reason = f"{detail_reason}；仅返回仍可验证的评论总数"
+        elif include_comments:
+            reason = "快手会话可读取指定页一级评论；子回复未包含在本接口"
+        else:
+            reason = "快手会话可读取目标作品当前互动量"
+
+        result = EngagementResult(
             platform="kuaishou",
             canonical_url=f"https://www.kuaishou.com/short-video/{work_id}",
             work_id=work_id,
             coverage="partial",
-            reason=(
-                "快手登录会话可读取指定页一级评论；子回复未包含在本接口"
-                if include_comments else "快手登录会话可读取目标作品当前互动量"
-            ),
+            reason=reason,
             source=" + ".join(sources),
             stats=stats,
             comments=comments[:limit],
             next_cursor=next_cursor,
         )
+        result.retryable_partial = retryable_partial
+        return result
     except PlatformBlockedError as exc:
         return result_error("kuaishou", url, work_id, "blocked", str(exc))
     except Exception as exc:
         coverage: EngagementCoverage = "blocked" if is_challenge_text(str(exc)) else "failed"
         return result_error("kuaishou", url, work_id, coverage, str(exc))
+
+
+async def fetch_detail_stats(
+    crawler: PlatformCrawlerContext,
+    url: str,
+    work_id: str,
+    headers: dict[str, str],
+) -> tuple[EngagementStats, str, str]:
+    """Read target-validated detail, falling back to the page's Apollo cache."""
+
+    detail_reason = ""
+    try:
+        detail_payload = {
+            "operationName": "visionVideoDetail",
+            "variables": {"photoId": work_id, "page": "detail"},
+            "query": DETAIL_QUERY,
+        }
+        detail_response = await crawler._post_json(
+            GRAPHQL_URL,
+            headers=headers,
+            data=json.dumps(detail_payload, separators=(",", ":")),
+        )
+        raise_response_errors(detail_response)
+        detail = (detail_response.get("data") or {}).get("visionVideoDetail") or {}
+        photo = detail.get("photo") or {}
+        if str(photo.get("id") or "") == work_id:
+            return stats_from_photo(photo), "graphql visionVideoDetail", ""
+        status = detail.get("status")
+        if status is not None and not photo:
+            return (
+                EngagementStats(),
+                "graphql visionVideoDetail status",
+                f"快手目标作品详情当前不可用（status={status}）",
+            )
+        detail_reason = "快手详情响应未匹配目标 photoId"
+    except PlatformCrawlerError as exc:
+        detail_reason = str(exc)
+
+    try:
+        response = await crawler._get_response(url, headers=headers)
+        photo, status = parse_apollo_detail(response.text, work_id)
+        if str(photo.get("id") or "") == work_id:
+            return stats_from_photo(photo), "page __APOLLO_STATE__", ""
+        if status is not None and not photo:
+            detail_reason = f"快手目标作品详情当前不可用（status={status}）"
+    except Exception:
+        pass
+    return EngagementStats(), "", detail_reason
+
+
+def parse_apollo_detail(html: str, work_id: str) -> tuple[dict[str, Any], Any]:
+    """Extract only the requested photo entity from Kuaishou SSR state."""
+
+    marker = "window.__APOLLO_STATE__="
+    for script in BeautifulSoup(html, "html.parser").find_all("script"):
+        text = script.string or script.get_text()
+        marker_at = text.find(marker)
+        if marker_at < 0:
+            continue
+        try:
+            state, _ = json.JSONDecoder().raw_decode(text[marker_at + len(marker):])
+        except (TypeError, ValueError):
+            continue
+        cache = state.get("defaultClient") if isinstance(state, dict) else None
+        if not isinstance(cache, dict):
+            continue
+        photo = cache.get(f"VisionVideoDetailPhoto:{work_id}")
+        if isinstance(photo, dict) and str(photo.get("id") or "") == work_id:
+            return photo, 1
+        detail_prefix = "$ROOT_QUERY.visionVideoDetail("
+        for key, value in cache.items():
+            if (
+                isinstance(key, str)
+                and key.startswith(detail_prefix)
+                and f'"photoId":"{work_id}"' in key
+                and isinstance(value, dict)
+            ):
+                return {}, value.get("status")
+    return {}, None
+
+
+def stats_from_photo(photo: dict[str, Any]) -> EngagementStats:
+    return EngagementStats(
+        views=to_int(photo.get("viewCount")),
+        likes=to_int(first_present(photo, "realLikeCount", "likeCount")),
+        comments=to_int(photo.get("commentCount")),
+    )
 
 
 async def fetch_comment_page(
@@ -187,8 +286,6 @@ async def fetch_comment_page(
     )
     if rest.get("result") == 1:
         return rest
-    if is_challenge_text(json.dumps(rest, ensure_ascii=False)):
-        raise PlatformBlockedError("快手评论接口要求验证码或会话已失效")
     graphql_payload = {
         "operationName": "commentListQuery",
         "variables": {"photoId": work_id, "pcursor": cursor},
@@ -199,7 +296,12 @@ async def fetch_comment_page(
         headers=headers,
         data=json.dumps(graphql_payload, separators=(",", ":")),
     )
-    raise_response_errors(graphql)
+    try:
+        raise_response_errors(graphql)
+    except PlatformBlockedError:
+        if is_challenge_text(json.dumps(rest, ensure_ascii=False)):
+            raise PlatformBlockedError("快手评论接口要求验证码或会话已失效")
+        raise
     comment_list = (graphql.get("data") or {}).get("visionCommentList")
     if not isinstance(comment_list, dict):
         raise PlatformCrawlerError("快手评论响应没有目标数据")
@@ -230,8 +332,13 @@ def parse_comments(items: list[Any]) -> list[EngagementComment]:
             author=str(item.get("authorName") or item.get("author_name") or ""),
             text=BeautifulSoup(text, "html.parser").get_text(" ", strip=True),
             created_at=timestamp(item.get("timestamp")),
-            likes=to_int(first_present(item, "likedCount", "liked_count")),
-            replies=to_int(first_present(item, "subCommentCount", "sub_comment_count")),
+            likes=to_int(first_present(item, "likedCount", "liked_count", "likeCount")),
+            replies=to_int(first_present(
+                item,
+                "subCommentCount",
+                "sub_comment_count",
+                "commentCount",
+            )),
         ))
     return result
 

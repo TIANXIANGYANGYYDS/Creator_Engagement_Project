@@ -16,9 +16,13 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.proxy_mode == "prefer"
-    assert settings.proxy_pool_size == 1
-    assert settings.proxy_max_concurrency == 2
+    assert settings.proxy_pool_size == 4
+    assert settings.proxy_max_concurrency == 1
     assert settings.collection_max_concurrency == 4
+    assert settings.reliability_mode == "enterprise"
+    assert settings.protocol_max_attempts == 3
+    assert settings.protocol_retry_base_seconds == 1
     assert settings.engagement_cache_ttl_seconds == 120
     assert settings.engagement_cache_max_entries == 1000
     assert settings.browser_max_concurrency == 1
+    assert settings.browser_reset_guest_state_on_proxy_change is True

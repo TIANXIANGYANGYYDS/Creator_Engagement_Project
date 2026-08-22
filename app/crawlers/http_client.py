@@ -26,6 +26,7 @@ class _ProxyLeaseState:
     proxies: dict[str, str] | None = None
     acquired: bool = False
     failed: bool = False
+    failure_reason: str = ""
 
 
 @runtime_checkable
@@ -90,13 +91,26 @@ class CurlAsyncHttpClient:
             self._lease_state.reset(token)
             if state.acquired and state.proxies is not None:
                 callback = "on_failure_for" if state.failed else "on_success_for"
-                error = RuntimeError("collection proxy lease failed") if state.failed else None
+                error = (
+                    RuntimeError(state.failure_reason or "collection proxy lease failed")
+                    if state.failed
+                    else None
+                )
                 await self._notify_proxy(
                     callback,
                     "on_failure" if state.failed else "on_success",
                     state.proxies,
                     error,
                 )
+
+    def invalidate_active_lease(self, reason: str) -> None:
+        """Discard the current proxy after a semantic block or unusable payload."""
+
+        state = self._lease_state.get()
+        if state is None:
+            return
+        state.failed = True
+        state.failure_reason = reason
 
     async def get(
         self,

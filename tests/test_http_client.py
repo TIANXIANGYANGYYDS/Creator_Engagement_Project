@@ -157,6 +157,30 @@ def test_collection_scope_reuses_one_proxy_for_multiple_requests() -> None:
     assert provider.successes == [proxies]
 
 
+def test_semantic_failure_discards_active_proxy_lease() -> None:
+    proxies = {"https": "http://127.0.0.1:8080"}
+    provider = CountingProxyProvider(proxies)
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=provider,
+        proxy_mode="prefer",
+        session=FakeSession(),
+    )
+
+    async def run() -> None:
+        async with client.lease_scope():
+            await client.get("https://example.com/data")
+            client.invalidate_active_lease("HTTP 200 payload requested captcha")
+
+    asyncio.run(run())
+
+    assert provider.successes == []
+    assert len(provider.failures) == 1
+    assert provider.failures[0][0] == proxies
+    assert "captcha" in str(provider.failures[0][1])
+
+
 def test_blocked_response_discards_proxy_lease() -> None:
     proxies = {"https": "http://127.0.0.1:8080"}
     provider = FakeProxyProvider(proxies)

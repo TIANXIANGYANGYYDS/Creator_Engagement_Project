@@ -342,8 +342,8 @@ async def run(args: argparse.Namespace) -> None:
             raise ValueError("required 模式缺少 PROXY_51_API_URL")
         provider = AsyncDailiProxyPool(
             minutes=3,
-            pool_size=1,
-            max_concurrency_per_proxy=2,
+            pool_size=settings.proxy_pool_size,
+            max_concurrency_per_proxy=settings.proxy_max_concurrency,
             api_url=settings.proxy_51_api_url,
         )
     session_store = PlatformSessionStore(Path(settings.platform_session_dir))
@@ -378,6 +378,12 @@ async def run(args: argparse.Namespace) -> None:
         proxy_mode=args.proxy_mode,
         browser_fallback=browser,
         session_store=session_store,
+        max_protocol_attempts=(
+            settings.protocol_max_attempts
+            if settings.reliability_mode == "enterprise"
+            else 1
+        ),
+        protocol_retry_base_seconds=settings.protocol_retry_base_seconds,
     )
     queue: asyncio.Queue[BenchmarkCase] = asyncio.Queue()
     for case in pending:
@@ -435,6 +441,12 @@ async def run(args: argparse.Namespace) -> None:
             "browser_max_concurrency": args.browser_max_concurrency,
             "reset_guest_state_on_proxy_change": args.reset_guest_state_on_proxy_change,
             "browser_fallback_enabled": not args.disable_browser_fallback,
+            "reliability_mode": settings.reliability_mode,
+            "protocol_max_attempts": (
+                settings.protocol_max_attempts
+                if settings.reliability_mode == "enterprise"
+                else 1
+            ),
             "duration_seconds": round(monotonic() - started_at, 6),
             "completed_calls": completed_now,
             "stats": asdict(provider.stats) if provider is not None else None,

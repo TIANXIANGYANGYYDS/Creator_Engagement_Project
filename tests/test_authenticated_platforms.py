@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from app.crawlers.engagement import EngagementCrawler
@@ -112,6 +113,28 @@ def test_xiaohongshu_retries_blocked_xys_with_xyw() -> None:
     assert "X-Xray-Traceid" in client.get_calls[1][1]["headers"]
 
 
+def test_xiaohongshu_empty_authenticated_detail_is_retryable_block() -> None:
+    client = DualFakeClient(
+        gets=[FakeResponse(text="<html></html>")],
+        posts=[
+            FakeResponse({"success": False, "msg": "verify required"}),
+            FakeResponse({"success": False, "msg": "verify required"}),
+        ],
+    )
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"xiaohongshu": "a1=a1-value; web_session=session-value"},
+    ).fetch_interactions(
+        "https://www.xiaohongshu.com/explore/6a5585c000000000080326ac?xsec_token=token",
+        "小红书",
+    ))
+
+    assert result.coverage == "blocked"
+    assert "verify required" in result.reason
+    assert len(client.post_calls) == 2
+    assert len(client.get_calls) == 1
+
+
 def test_kuaishou_detail_and_rest_comments_validate_target_id() -> None:
     client = DualFakeClient(posts=[
         FakeResponse({
@@ -153,10 +176,21 @@ def test_kuaishou_detail_and_rest_comments_validate_target_id() -> None:
     assert client.post_calls[1][0].endswith("/rest/v/photo/comment/list")
 
 
-def test_kuaishou_detail_mismatch_is_not_success() -> None:
-    client = DualFakeClient(posts=[FakeResponse({
-        "data": {"visionVideoDetail": {"photo": {"id": "other"}}},
-    })])
+def test_kuaishou_detail_mismatch_returns_only_validated_comment_total() -> None:
+    client = DualFakeClient(
+        gets=[FakeResponse(text="<html></html>")],
+        posts=[
+            FakeResponse({
+                "data": {"visionVideoDetail": {"photo": {"id": "other"}}},
+            }),
+            FakeResponse({
+                "result": 1,
+                "commentCountV2": 2,
+                "pcursorV2": "no_more",
+                "rootCommentsV2": [],
+            }),
+        ],
+    )
     crawler = EngagementCrawler(
         client=client,
         platform_cookies={"kuaishou": "userId=user-1"},
@@ -167,8 +201,207 @@ def test_kuaishou_detail_mismatch_is_not_success() -> None:
         "快手",
     ))
 
-    assert result.coverage == "failed"
+    assert result.coverage == "partial"
     assert "photoId" in result.reason
+    assert result.stats.comments == 2
+    assert result.stats.likes is None
+
+
+def test_kuaishou_unavailable_detail_does_not_waste_retries() -> None:
+    client = DualFakeClient(posts=[
+        FakeResponse({
+            "data": {"visionVideoDetail": {"status": 1040, "photo": None}},
+        }),
+        FakeResponse({
+            "result": 1,
+            "commentCountV2": 3,
+            "pcursorV2": "no_more",
+            "rootCommentsV2": [],
+        }),
+    ])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"kuaishou": "userId=user-1"},
+        max_protocol_attempts=3,
+        protocol_retry_base_seconds=0,
+    ).fetch_interactions(
+        "https://www.kuaishou.com/short-video/photo-1",
+        "快手",
+    ))
+
+    assert result.coverage == "partial"
+    assert result.protocol_attempts == 1
+    assert result.stats.comments == 3
+    assert result.stats.views is None
+    assert "status=1040" in result.reason
+    assert len(client.post_calls) == 2
+
+
+def test_kuaishou_zero_comment_total_is_valid_data() -> None:
+    client = DualFakeClient(posts=[
+        FakeResponse({
+            "data": {"visionVideoDetail": {"status": 1, "photo": {
+                "id": "photo-1",
+                "viewCount": 10,
+                "realLikeCount": 0,
+            }}},
+        }),
+        FakeResponse({
+            "result": 1,
+            "commentCountV2": 0,
+            "pcursorV2": "no_more",
+            "rootCommentsV2": [],
+        }),
+    ])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"kuaishou": "userId=user-1"},
+    ).fetch_interactions(
+        "https://www.kuaishou.com/short-video/photo-1",
+        "快手",
+    ))
+
+    assert result.stats.views == 10
+    assert result.stats.likes == 0
+    assert result.stats.comments == 0
+
+
+def test_kuaishou_comments_fall_back_to_graphql_after_rest_challenge() -> None:
+    client = DualFakeClient(posts=[
+        FakeResponse({"result": 50, "message": "Need captcha"}),
+        FakeResponse({
+            "data": {"visionCommentList": {
+                "commentCountV2": 1,
+                "pcursorV2": "no_more",
+                "rootCommentsV2": [{
+                    "commentId": "comment-1",
+                    "content": "GraphQL 评论",
+                }],
+            }},
+        }),
+    ])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"kuaishou": "userId=user-1"},
+    ).fetch_comments(
+        "https://www.kuaishou.com/short-video/photo-1",
+        "快手",
+        1,
+    ))
+
+    assert result.total_comments == 1
+    assert result.comments[0].text == "GraphQL 评论"
+    assert len(client.post_calls) == 2
+
+
+def test_kuaishou_preserves_detail_when_comment_total_stays_blocked() -> None:
+    posts: list[FakeResponse] = []
+    for _ in range(3):
+        posts.extend([
+            FakeResponse({
+                "data": {"visionVideoDetail": {"status": 1, "photo": {
+                    "id": "photo-1",
+                    "viewCount": 100,
+                    "realLikeCount": 12,
+                }}},
+            }),
+            FakeResponse({"result": 50, "message": "Need captcha"}),
+            FakeResponse({"errors": [{"message": "Need captcha"}]}),
+        ])
+    client = DualFakeClient(posts=posts)
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"kuaishou": "userId=user-1"},
+        max_protocol_attempts=3,
+        protocol_retry_base_seconds=0,
+    ).fetch_interactions(
+        "https://www.kuaishou.com/short-video/photo-1",
+        "快手",
+    ))
+
+    assert result.coverage == "partial"
+    assert result.protocol_attempts == 3
+    assert result.stats.views == 100
+    assert result.stats.likes == 12
+    assert result.stats.comments is None
+    assert "保留已验证" in result.reason
+    assert len(client.post_calls) == 9
+
+
+def test_kuaishou_retries_when_comment_payload_omits_total() -> None:
+    posts: list[FakeResponse] = []
+    for attempt in range(2):
+        posts.extend([
+            FakeResponse({
+                "data": {"visionVideoDetail": {"status": 1, "photo": {
+                    "id": "photo-1",
+                    "viewCount": 100,
+                    "realLikeCount": 12,
+                }}},
+            }),
+            FakeResponse({"result": 50}),
+            FakeResponse({
+                "data": {"visionCommentList": {
+                    "pcursorV2": "no_more",
+                    "rootCommentsV2": [],
+                    **({"commentCountV2": 2} if attempt else {}),
+                }},
+            }),
+        ])
+    client = DualFakeClient(posts=posts)
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"kuaishou": "userId=user-1"},
+        max_protocol_attempts=3,
+        protocol_retry_base_seconds=0,
+    ).fetch_interactions(
+        "https://www.kuaishou.com/short-video/photo-1",
+        "快手",
+    ))
+
+    assert result.protocol_attempts == 2
+    assert result.stats.comments == 2
+    assert len(client.post_calls) == 6
+
+
+def test_kuaishou_detail_falls_back_to_target_validated_apollo_state() -> None:
+    state = {
+        "defaultClient": {
+            'VisionVideoDetailPhoto:photo-1': {
+                "id": "photo-1",
+                "viewCount": "101",
+                "realLikeCount": 12,
+            },
+        },
+    }
+    client = DualFakeClient(
+        gets=[FakeResponse(text=(
+            "<script>window.__APOLLO_STATE__="
+            + json.dumps(state)
+            + ";window.other=1</script>"
+        ))],
+        posts=[
+            FakeResponse(),
+            FakeResponse({
+                "result": 1,
+                "commentCountV2": 4,
+                "pcursorV2": "no_more",
+                "rootCommentsV2": [],
+            }),
+        ],
+    )
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"kuaishou": "userId=user-1"},
+    ).fetch_interactions(
+        "https://www.kuaishou.com/short-video/photo-1",
+        "快手",
+    ))
+
+    assert result.stats.views == 101
+    assert result.stats.likes == 12
+    assert result.stats.comments == 4
+    assert result.source.startswith("page __APOLLO_STATE__")
 
 
 def test_kuaishou_comment_pages_exclude_repeated_pinned_comment() -> None:

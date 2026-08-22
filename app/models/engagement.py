@@ -58,6 +58,7 @@ class CollectionResult(BaseModel):
     coverage: EngagementCoverage
     reason: str = ""
     source: str = ""
+    protocol_attempts: int = Field(default=1, ge=1)
 
 
 class InteractionResult(CollectionResult):
