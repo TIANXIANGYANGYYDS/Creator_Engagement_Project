@@ -68,7 +68,7 @@
 
     .summary {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       gap: 9px;
       margin: 0 0 14px;
     }
@@ -102,13 +102,13 @@
     }
 
     col.platform { width: 7%; }
-    col.service { width: 10%; }
-    col.upstream { width: 25%; }
-    col.direct { width: 9%; }
-    col.proxy { width: 9%; }
-    col.estimate { width: 8%; }
-    col.result { width: 17%; }
-    col.cost { width: 15%; }
+    col.service { width: 9%; }
+    col.sample { width: 8%; }
+    col.upstream { width: 19%; }
+    col.result { width: 12%; }
+    col.time { width: 11%; }
+    col.cost { width: 13%; }
+    col.verdict { width: 21%; }
 
     th,
     td {
@@ -197,140 +197,141 @@
     <header class="heading">
       <div>
         <h1>互动量与公开评论采集实测成本单</h1>
-        <div class="subtitle">互动量、评论按独立上游流程分别计数；本次 8 个平台没有可合并为单一响应的项目</div>
+        <div class="subtitle">按独立业务接口列示真实成功率、耗时和 IP 成本；8 个平台均不能把互动量与评论合并计为一次请求</div>
       </div>
       <div class="badge">实测日期 2026-08-22 · MyAgent / Python 3.13</div>
     </header>
 
     <section class="summary" aria-label="本轮代理成本摘要">
-      <div class="metric"><strong>16 次</strong><span>独立业务接口调用</span></div>
-      <div class="metric"><strong>94.651 秒</strong><span>代理单并发总用时</span></div>
-      <div class="metric"><strong>1 个 IP</strong><span>19 次租约、无换 IP</span></div>
-      <div class="metric"><strong>¥0.00084</strong><span>本批实际 IP 总成本</span></div>
-      <div class="metric"><strong>¥0.0000525</strong><span>本批每次调用平均摊销</span></div>
+      <div class="metric"><strong>2404 次</strong><span>正式独立接口实测</span></div>
+      <div class="metric"><strong>902 个 URL</strong><span>主数据集 / 1804 次调用</span></div>
+      <div class="metric"><strong>45 个 IP</strong><span>正式生产策略实耗</span></div>
+      <div class="metric"><strong>¥0.0378</strong><span>正式测试 IP 总成本</span></div>
+      <div class="metric"><strong>约 130 分钟</strong><span>902 URL 采集器活跃时间</span></div>
+      <div class="metric"><strong>约 1441 分钟</strong><span>1 万 URL 外推 / IP ¥0.419</span></div>
     </section>
 
-    <table aria-label="八个平台十六项独立实测明细">
+    <table aria-label="八个平台十六项独立接口成本明细">
       <colgroup>
-        <col class="platform"><col class="service"><col class="upstream"><col class="direct">
-        <col class="proxy"><col class="estimate"><col class="result"><col class="cost">
+        <col class="platform"><col class="service"><col class="sample"><col class="upstream">
+        <col class="result"><col class="time"><col class="cost"><col class="verdict">
       </colgroup>
       <thead>
         <tr>
-          <th>平台</th><th>服务内容</th><th>本次实际上游流程</th><th>直连实测</th>
-          <th>代理实测</th><th>规划时间</th><th>本次返回</th><th>本轮平均 IP 成本</th>
+          <th>平台</th><th>独立接口</th><th>实测次数</th><th>实际上游流程</th>
+          <th>有数据</th><th>耗时 P50 / P95</th><th>实际 IP 成本</th><th>当前结论</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td class="platform-cell" rowspan="2">抖音</td><td class="service-cell">互动量</td>
-          <td class="upstream-cell">1 GET：<code>aweme/detail</code></td><td class="time-cell"><strong>0.593s</strong></td>
-          <td class="time-cell"><strong>1.441s</strong></td><td class="time-cell"><strong>2s</strong></td>
-          <td class="result-ok">6 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">抖音</td><td class="service-cell">互动量</td><td>446</td>
+          <td class="upstream-cell">1 GET：<code>aweme/detail</code></td><td class="result-ok">445 / 446<br>99.8%</td>
+          <td class="time-cell"><strong>0.213 / 0.306s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；匿名签名协议，单独详情响应</td>
         </tr>
         <tr>
-          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：<code>comment/list</code></td>
-          <td class="time-cell"><strong>0.270s</strong></td><td class="time-cell"><strong>0.773s</strong></td>
-          <td class="time-cell"><strong>1s</strong></td><td class="result-ok">9 条 / 总数 22</td>
-          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">抖音</td><td class="service-cell">评论第 1 页</td><td>446</td>
+          <td class="upstream-cell">1 GET：<code>comment/list</code></td><td class="result-ok">442 / 446<br>99.1%</td>
+          <td class="time-cell"><strong>0.232 / 0.309s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；返回 2351 行，独立评论响应</td>
         </tr>
 
         <tr class="group-even">
-          <td class="platform-cell" rowspan="2">今日头条</td><td class="service-cell">互动量</td>
-          <td class="upstream-cell">1 GET 协议尝试 + 浏览器页面/数据多请求</td><td class="time-cell"><strong>10.165s</strong></td>
-          <td class="time-cell"><strong>10.832s</strong></td><td class="time-cell"><strong>14s</strong></td>
-          <td class="result-ok">5 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">今日头条</td><td class="service-cell">互动量</td><td>29</td>
+          <td class="upstream-cell">1 GET 协议尝试；必要时浏览器多请求</td><td class="result-ok">28 / 29<br>96.6%</td>
+          <td class="time-cell"><strong>7.995 / 16.570s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；浏览器兜底占时，不与评论合并</td>
         </tr>
         <tr class="group-even">
-          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：<code>tab_comments</code></td>
-          <td class="time-cell"><strong>0.330s</strong></td><td class="time-cell"><strong>0.735s</strong></td>
-          <td class="time-cell"><strong>1s</strong></td><td class="result-ok">10 条 / 总数 10</td>
-          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">今日头条</td><td class="service-cell">评论第 1 页</td><td>29</td>
+          <td class="upstream-cell">1 GET：<code>tab_comments</code></td><td class="result-ok">29 / 29<br>100%</td>
+          <td class="time-cell"><strong>0.185 / 0.290s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；返回 172 行，独立评论响应</td>
         </tr>
 
         <tr>
-          <td class="platform-cell" rowspan="2">公众号</td><td class="service-cell">互动量</td>
-          <td class="upstream-cell">1 GET 协议尝试 + 浏览器页面/数据多请求</td><td class="time-cell"><strong>17.920s</strong></td>
-          <td class="time-cell"><strong>12.255s</strong></td><td class="time-cell"><strong>23s</strong></td>
-          <td class="result-ok">1 个公开互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">公众号</td><td class="service-cell">互动量</td><td>100</td>
+          <td class="upstream-cell">协议请求 + 每次浏览器页面多请求</td><td class="result-bad">34 / 100<br>34%</td>
+          <td class="time-cell"><strong>21.828 / 27.973s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>不稳定；仅已知页面公开 1 个字段，负载高</td>
         </tr>
         <tr>
-          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：文章 HTML 判断评论开关</td>
-          <td class="time-cell"><strong>2.941s</strong></td><td class="time-cell"><strong>2.557s</strong></td>
-          <td class="time-cell"><strong>4s</strong></td><td class="result-ok">作者关闭评论，0 条</td>
-          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">公众号</td><td class="service-cell">评论第 1 页</td><td>100</td>
+          <td class="upstream-cell">文章 HTML 全局量 + 独立评论接口</td><td class="result-bad">0 / 100<br>0%</td>
+          <td class="time-cell"><strong>0.747 / 0.955s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>缺口大；98 次作者关闭，其余无匿名正文</td>
         </tr>
 
         <tr class="group-even">
-          <td class="platform-cell" rowspan="2">小红书</td><td class="service-cell">互动量</td>
-          <td class="upstream-cell">1 GET 协议尝试 + 浏览器页面/数据多请求</td><td class="time-cell"><strong>26.625s</strong></td>
-          <td class="time-cell"><strong>17.692s</strong></td><td class="time-cell"><strong>34s*</strong></td>
-          <td class="result-bad">当前样本未取到</td><td class="cost-cell">直连 ¥0<br>仍占用本批共享 IP</td>
+          <td class="platform-cell">小红书</td><td class="service-cell">互动量</td><td>100</td>
+          <td class="upstream-cell">详情/SSR 协议；受限时浏览器多请求</td><td class="result-bad">29 / 100<br>29%</td>
+          <td class="time-cell"><strong>0.189 / 25.204s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>不稳定；同出口封控后降速仍未恢复</td>
         </tr>
         <tr class="group-even">
-          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">浏览器页面/数据多请求</td>
-          <td class="time-cell"><strong>21.785s</strong></td><td class="time-cell"><strong>21.706s</strong></td>
-          <td class="time-cell"><strong>28s*</strong></td><td class="result-bad">当前样本未取到</td>
-          <td class="cost-cell">直连 ¥0<br>仍占用本批共享 IP</td>
+          <td class="platform-cell">小红书</td><td class="service-cell">评论第 1 页</td><td>100</td>
+          <td class="upstream-cell">1 次签名评论协议；验证码时兜底</td><td class="result-ok">95 / 100<br>95%</td>
+          <td class="time-cell"><strong>0.133 / 0.305s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>限速可用；4 秒间隔，共返回 950 行</td>
         </tr>
 
         <tr>
-          <td class="platform-cell" rowspan="2">好看视频</td><td class="service-cell">互动量</td>
-          <td class="upstream-cell">2 GET：首页预热 + 目标页 SSR</td><td class="time-cell"><strong>0.392s</strong></td>
-          <td class="time-cell"><strong>1.568s</strong></td><td class="time-cell"><strong>2s</strong></td>
-          <td class="result-ok">3 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">好看视频</td><td class="service-cell">互动量</td><td>100</td>
+          <td class="upstream-cell">2 GET：首页预热 + 目标页 SSR</td><td class="result-ok">100 / 100<br>100%</td>
+          <td class="time-cell"><strong>0.402 / 0.550s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；一次业务调用实际包含 2 次请求</td>
         </tr>
         <tr>
-          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：<code>comment/get</code></td>
-          <td class="time-cell"><strong>0.207s</strong></td><td class="time-cell"><strong>0.408s</strong></td>
-          <td class="time-cell"><strong>1s</strong></td><td class="result-ok">13 条 / 总数 13</td>
-          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">好看视频</td><td class="service-cell">评论第 1 页</td><td>100</td>
+          <td class="upstream-cell">1 GET：<code>comment/get</code></td><td class="result-ok">100 / 100<br>100%</td>
+          <td class="time-cell"><strong>0.148 / 0.204s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；共返回 1076 行，独立评论响应</td>
         </tr>
 
         <tr class="group-even">
-          <td class="platform-cell" rowspan="2">快手</td><td class="service-cell">互动量</td>
-          <td class="upstream-cell">浏览器 GraphQL 详情等数据多请求</td><td class="time-cell"><strong>11.180s</strong></td>
-          <td class="time-cell"><strong>9.893s</strong></td><td class="time-cell"><strong>14s</strong></td>
-          <td class="result-ok">3 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">快手</td><td class="service-cell">互动量</td><td>398</td>
+          <td class="upstream-cell">协议优先；游客风控时浏览器/换 IP</td><td class="result-bad">84 / 398<br>21.1%</td>
+          <td class="time-cell"><strong>16.239 / 34.220s</strong></td><td class="cost-cell">¥0.00004749/次*</td>
+          <td>缺口大；成功响应解析准，游客风控覆盖率低</td>
         </tr>
         <tr class="group-even">
-          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">浏览器评论接口等数据多请求</td>
-          <td class="time-cell"><strong>12.222s</strong></td><td class="time-cell"><strong>12.230s</strong></td>
-          <td class="time-cell"><strong>16s</strong></td><td class="result-ok">1 条 / 总数 1</td>
-          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">快手</td><td class="service-cell">评论第 1 页</td><td>398</td>
+          <td class="upstream-cell">独立评论协议；受限时浏览器/换 IP</td><td class="result-bad">104 / 398<br>26.1%</td>
+          <td class="time-cell"><strong>15.981 / 31.971s</strong></td><td class="cost-cell">¥0.00004749/次*</td>
+          <td>缺口大；101/104 条可比总数与外部快照一致</td>
         </tr>
 
         <tr>
-          <td class="platform-cell" rowspan="2">B站</td><td class="service-cell">互动量</td>
-          <td class="upstream-cell">1 GET：<code>x/web-interface/view</code></td><td class="time-cell"><strong>0.176s</strong></td>
-          <td class="time-cell"><strong>0.878s</strong></td><td class="time-cell"><strong>2s</strong></td>
-          <td class="result-ok">7 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">B站</td><td class="service-cell">互动量</td><td>9</td>
+          <td class="upstream-cell">1 GET：<code>x/web-interface/view</code></td><td class="result-ok">9 / 9<br>100%</td>
+          <td class="time-cell"><strong>0.091 / 0.177s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；样本较少，直播字段口径另计</td>
         </tr>
         <tr>
-          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">3 GET：详情 + nav + WBI 评论</td>
-          <td class="time-cell"><strong>0.338s</strong></td><td class="time-cell"><strong>0.840s</strong></td>
-          <td class="time-cell"><strong>2s</strong></td><td class="result-ok">20 条 / 总数 140</td>
-          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">B站</td><td class="service-cell">评论第 1 页</td><td>9</td>
+          <td class="upstream-cell">3 GET：详情 + nav + WBI 评论</td><td class="result-bad">6 / 9<br>66.7%</td>
+          <td class="time-cell"><strong>0.489 / 23.332s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>部分可用；返回 42 行，含直播/失效内容边界</td>
         </tr>
 
         <tr class="group-even">
-          <td class="platform-cell" rowspan="2">微博</td><td class="service-cell">互动量</td>
-          <td class="upstream-cell">1 GET：<code>statuses/show</code></td><td class="time-cell"><strong>0.104s</strong></td>
-          <td class="time-cell"><strong>0.477s</strong></td><td class="time-cell"><strong>1s</strong></td>
-          <td class="result-ok">3 个互动字段</td><td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">微博</td><td class="service-cell">互动量</td><td>20</td>
+          <td class="upstream-cell">1 GET：<code>statuses/show</code></td><td class="result-ok">20 / 20<br>100%</td>
+          <td class="time-cell"><strong>0.057 / 0.091s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；单独状态响应</td>
         </tr>
         <tr class="group-even">
-          <td class="service-cell">评论第 1 页</td><td class="upstream-cell">1 GET：<code>comments/hotflow</code></td>
-          <td class="time-cell"><strong>0.146s</strong></td><td class="time-cell"><strong>0.361s</strong></td>
-          <td class="time-cell"><strong>1s</strong></td><td class="result-ok">5 条 / 总数 5</td>
-          <td class="cost-cell">直连 ¥0<br>代理摊销 ¥0.0000525</td>
+          <td class="platform-cell">微博</td><td class="service-cell">评论第 1 页</td><td>20</td>
+          <td class="upstream-cell">1 GET：<code>comments/hotflow</code></td><td class="result-ok">20 / 20<br>100%</td>
+          <td class="time-cell"><strong>0.125 / 0.179s</strong></td><td class="cost-cell">直连：¥0</td>
+          <td>可用；返回 73 行，深页可能需要会话</td>
         </tr>
       </tbody>
     </table>
 
     <section class="notes">
-      <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。本轮 16 次调用共享 1 个 IP，故平均摊销为 0.0000525 元/次；14 次有效结果的平均成本是 0.00006 元/次。两者都只是本批实测，不是固定报价。</p>
-      <p><strong>时间与负载：</strong>规划时间为直连/代理较慢值加 25% 余量；* 为失败返回时间。浏览器默认单并发，单浏览器实测峰值约 401 MB。页面流包含多个数据响应，未伪装成一次请求。</p>
+      <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。只有快手正式流程使用代理：796 次独立接口共消耗 45 个 IP，故混合实测摊销为 <strong>¥0.00004749/次</strong>；一个 IP 平均承载 17.69 次调用。其余正式流程直连，IP 采购成本为 ¥0。</p>
+      <p><strong>范围与风险：</strong>P50/P95 均为绕过业务缓存的端到端实测。研发诊断另耗 29 IP，不计入生产单价；正式测试与研发合计 74 IP / ¥0.06216。浏览器单并发峰值约 401 MB。互动量和评论均为不同上游流程，所以保持 16 行。</p>
     </section>
   </main>
 </body>
