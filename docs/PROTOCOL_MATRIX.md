@@ -3,9 +3,9 @@
 最后验证：2026-08-23，环境：`MyAgent` / Python 3.13.12。业务顺序为协议优先、浏览器
 持久化会话接管，不接入付费数据供应商。快手企业协议链路最新全量为互动/评论均
 398/398 有数据；小红书互动已修正为匿名 SSR 100/100，低频评论为 20/20；视频号公开
-互动量为 100/100，评论总数为 100/100。公众号任意第三方文章互动/评论、视频号评论正文
-及小红书无会话深分页不存在
-已验证的免费匿名协议，不硬编码浏览器 Cookie/签名。
+互动量为 100/100，评论总数为 100/100。公众号任意第三方文章不存在免费匿名完整协议，
+但已新增微信桌面客户端短时会话桥；视频号评论正文及小红书无会话深分页仍没有已验证的
+匿名协议，不硬编码浏览器 Cookie/签名。
 
 状态含义：
 
@@ -22,8 +22,8 @@
 | 抖音 | 评论 | 匿名纯协议分页可用（已实测） | 同一访客/IP 请求 `/aweme/v1/web/comment/list/`；首屏/第 2 页各 20 条、总数 2909 | 只能说明公开页；签名/访客规则变化或风控空包时进入浏览器兜底 |
 | 头条 | 互动量 | 受 SSR/挑战影响 | 文章 SSR 中的 `itemCounter`/`likeData`；无 `_signature` 的评论接口可用 | 直接协议首包可能是 JSVM 挑战，统计字段可能为空 |
 | 头条 | 评论 | 可用（部分覆盖） | `/article/v4/tab_comments/`，参数 `aid/app_name/offset/count/group_id/item_id` | 只能说明指定公开页，不保证评论全集 |
-| 公众号 | 互动量 | 自有公众号官方授权可用；第三方文章受会话影响 | 当前 `/datacube/getarticletotaldetail`；匿名 SSR（含 V2/零值字段）、`/mp/getappmsgext` | 官方 API 只能读取凭据所属公众号且受日期/权限/IP 白名单约束；匿名页通常不下发计数，验证码标记 `blocked` |
-| 公众号 | 评论 | 自有公众号官方授权可分页；页面预载首屏可直接取 | 官方 `/cgi-bin/comment/list`；`preload_comment_list`、`cgiDataNew.show_comment`、`/mp/appmsg_comment` | 官方 API 不能跨公众号；作者关闭返回完整空页；第三方文章开启但无文章会话仍返回 `ret=-3 no session` |
+| 公众号 | 互动量 | 本地微信会话桥已实现；官方授权保留降级 | 微信客户端捕获一次短时会话，同 `__biz` 约 25 分钟复用；凭据化文章页、`/mp/getappmsgext` | 不是匿名；需用户桌面微信和本地 MITM，当前服务器无用户会话，尚待真实账号百测 |
+| 公众号 | 评论 | 本地微信会话桥已实现精选评论分页；预载首屏/官方授权保留 | `/mp/appmsg_comment` 的 `buffer/continue_flag` 转外部页码；`preload_comment_list` | 只公开精选评论；作者关闭返回完整空页；会话过期仍会 `ret=-3`，需重新打开同公众号文章 |
 | 微信视频号 | 互动量 | 匿名公开接口可用（100/100） | 1 POST：`/finder-preview/api/feed/get_feed_info`；解析点赞、评论总数、转发和收藏显示值 | `万/亿/+` 是页面格式化数字，只能返回显示精度或下限；无精确播放量 |
 | 微信视频号 | 评论 | 仅总数可用，正文不可匿名获取 | 同一公开预览端点 100/100 返回 `commentCountFmt`；公开页面不请求正文 | 正文来自微信客户端 `finderGetCommentList` 会话，不属于匿名网页协议；当前返回 `unsupported` 而非成功空页 |
 | 小红书 | 互动量 | 匿名纯协议可用（100/100） | 当前有效 `xsec_token` + `xsec_source=pc_feed` 直访笔记 SSR；自动补来源参数，不带评论 Cookie | 100 条新鲜 URL 各 1 GET，94 条返回赞/藏/评/分享四项、6 条返回页面公开的三项；过期或缺 token 不能恢复任意旧 URL |
@@ -43,8 +43,8 @@
 快手互动量/一级评论，快手企业全量两项均达到 398/398 有数据，但互动中 34 条只剩评论数。
 小红书互动量本轮新鲜 URL 100/100，评论低频 20/20；两者分别使用匿名 SSR 与带会话签名
 评论端点，不能合并为一次上游请求；
-小红书后续评论页和公众号任意第三方文章互动/评论没有接入付费接口。公众号接口仍区分
-自有公众号官方授权、作者关闭评论与原生会话 `no session`。视频号与公众号不是一个渠道：
+小红书后续评论页和公众号都没有接入付费接口。公众号已区分本地微信会话桥、自有公众号
+官方降级、作者关闭评论与原生会话 `no session`。视频号与公众号不是一个渠道：
 视频号互动公开端点已接入，但评论正文仍需微信客户端会话桥接。
 
 仍不应硬编码或伪造：公众号文章/视频号客户端会话参数、小红书动态签名、快手短期游客验证状态和抖音
@@ -73,7 +73,9 @@ Cookie 交给服务端配置。
 - 小红书推荐页可匿名下发新鲜 `note_id+xsec_token`；笔记详情必须补
   `xsec_source=pc_feed`，且不能错误携带评论会话 Cookie。修正后匿名 SSR 百次为 100/100。
   `xhshow 0.2.0` 双格式签名仍只用于带 `web_session` 的评论分页，不虚构匿名深分页。
-- 公众号官方路径使用 2026 年当前的 `getarticletotaldetail` 与 `comment/list`，令牌由
+- 公众号非官方路径采用本地微信桌面客户端 + mitmproxy + 内存会话桥：原始凭据按 `__biz`
+  保存约 25 分钟，同公众号多篇文章复用；互动和精选评论仍是两个微信上游响应。官方降级
+  使用 2026 年当前的 `getarticletotaldetail` 与 `comment/list`，令牌由
   `stable_token` 缓存；它解决自有公众号，不扩大到任意第三方文章。匿名
   `/mp/getappmsgext` 可能返回 `ret=0` 但不含统计，`/mp/appmsg_comment`
   无文章会话返回 `ret=-3`；只有 HTML 已预载的精选评论可直接解析。批量全参数文章实测还会
@@ -98,6 +100,12 @@ Cookie 交给服务端配置。
 - <https://github.com/tamnd/weibo-cli/blob/main/weibo/api.go>
 - <https://github.com/NanmiCoder/MediaCrawler/blob/main/media_platform/kuaishou/client.py>
 - <https://github.com/Moore-developers/moore-wechat-article-downloader>
+- <https://github.com/wnma3mz/wechat_articles_spider/issues/57>
+- <https://github.com/xiguawang/wechat-reader>
+- <https://github.com/openatx/uiautomator2/issues/1040>
+- <https://www.yaklang.com/en/Yaklab/WeChatAppEx/>
+- <https://docs.mitmproxy.org/stable/overview/getting-started/>
+- <https://docs.mitmproxy.org/stable/addons/overview/>
 - <https://greasyfork.org/scripts/535482-wechat-plus/code>
 - <https://developers.weixin.qq.com/doc/offiaccount/Analytics/Graphic_Analysis_Data_Interface.html>
 - <https://developers.weixin.qq.com/doc/service/api/wedata/news/api_getarticletotaldetail>

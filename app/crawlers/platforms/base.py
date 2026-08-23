@@ -58,6 +58,16 @@ class PlatformCrawlerContext(Protocol):
 
     def _invalidate_wechat_mp_access_token(self) -> None: ...
 
+    async def _wechat_session_bridge_request(
+        self,
+        operation: str,
+        *,
+        url: str,
+        metadata: dict[str, str],
+        page: int,
+        limit: int,
+    ) -> dict[str, Any] | None: ...
+
 
 class PlatformFetchHandler(Protocol):
     def __call__(

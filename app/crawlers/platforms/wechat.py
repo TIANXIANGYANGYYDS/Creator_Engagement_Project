@@ -41,7 +41,9 @@ async def fetch(
 ) -> EngagementResult:
     cookie = crawler._platform_cookie("wechat")
     official_issue = ""
+    bridge_issue = ""
     official_stats: EngagementStats | None = None
+    bridge_stats: EngagementStats | None = None
     try:
         article_response = await crawler._get_response(
             url,
@@ -65,43 +67,120 @@ async def fetch(
                 pass
         if include_stats:
             try:
-                official_stats = await fetch_official_stats(crawler, metadata)
-                if official_stats is not None:
-                    stats = official_stats
+                bridge_payload = await crawler._wechat_session_bridge_request(
+                    "interactions",
+                    url=url,
+                    metadata=metadata,
+                    page=page,
+                    limit=limit,
+                )
+                if bridge_payload and bridge_payload.get("ok"):
+                    bridge_stats = EngagementStats.model_validate(
+                        bridge_payload.get("stats") or {}
+                    )
+                    if _has_stats(bridge_stats):
+                        stats = bridge_stats
+                elif bridge_payload:
+                    bridge_issue = str(
+                        bridge_payload.get("reason")
+                        or bridge_payload.get("status")
+                        or "会话桥未返回数据"
+                    )
             except PlatformCrawlerError as exc:
-                official_issue = str(exc)
+                bridge_issue = str(exc)
+            if bridge_stats is None or not _has_stats(bridge_stats):
+                try:
+                    official_stats = await fetch_official_stats(crawler, metadata)
+                    if official_stats is not None:
+                        stats = official_stats
+                except PlatformCrawlerError as exc:
+                    official_issue = str(exc)
 
         if not include_comments:
             has_stats = _has_stats(stats)
             official = official_stats is not None
+            bridged = bridge_stats is not None and _has_stats(bridge_stats)
             return EngagementResult(
                 platform="wechat",
                 canonical_url=url,
                 work_id=work_id,
                 coverage="partial" if has_stats else "unsupported",
                 reason=(
-                    "自有公众号官方接口返回阅读人数、赞、分享、留言和收藏数据"
-                    if official
+                    "本地微信短时会话返回该公众号文章的公开互动量"
+                    if bridged
                     else (
-                        "公众号文章页面返回了当前会话可见互动量"
-                        if has_stats
+                        "自有公众号官方接口返回阅读人数、赞、分享、留言和收藏数据"
+                        if official
                         else (
-                            "公众号匿名文章页未下发阅读/点赞统计；任意第三方文章仍需微信文章短时会话，"
-                            "自有公众号可配置官方 API 授权"
-                            + (f"；官方接口尝试失败: {official_issue}" if official_issue else "")
+                            "公众号文章页面返回了当前会话可见互动量"
+                            if has_stats
+                            else (
+                                "公众号匿名文章页未下发阅读/点赞统计；任意第三方文章可通过"
+                                "本地微信会话桥采集"
+                                + (f"；会话桥: {bridge_issue}" if bridge_issue else "")
+                                + (f"；官方接口: {official_issue}" if official_issue else "")
+                            )
                         )
                     )
                 ),
                 source=(
-                    "api.weixin.qq.com/datacube/getarticletotaldetail"
-                    if official
-                    else "mp article appmsgstat/cgiDataNew"
+                    str(bridge_payload.get("source") or "wechat_session_bridge")
+                    if bridged
+                    else (
+                        "api.weixin.qq.com/datacube/getarticletotaldetail"
+                        if official
+                        else "mp article appmsgstat/cgiDataNew"
+                    )
                 ),
                 stats=stats,
             )
 
         preloaded_payload = parse_preloaded_comment_payload(text)
         preloaded_comments = parse_comments(preloaded_payload)
+
+        if metadata.get("show_comment") == "0":
+            return EngagementResult(
+                platform="wechat",
+                canonical_url=url,
+                work_id=work_id,
+                coverage="complete",
+                reason="该公众号文章由作者关闭评论，登录账号也不会产生可抓取评论",
+                source="cgiDataNew.show_comment",
+                stats=stats,
+            )
+
+        try:
+            bridge_comments = await crawler._wechat_session_bridge_request(
+                "comments",
+                url=url,
+                metadata=metadata,
+                page=page,
+                limit=limit,
+            )
+        except PlatformCrawlerError as exc:
+            bridge_issue = str(exc)
+            bridge_comments = None
+        if bridge_comments and bridge_comments.get("ok"):
+            comments = parse_comments({"comments": bridge_comments.get("comments") or []})
+            total = to_int(bridge_comments.get("total_comments"))
+            return EngagementResult(
+                platform="wechat",
+                canonical_url=url,
+                work_id=work_id,
+                coverage="partial",
+                reason="本地微信短时会话返回指定页；微信文章只公开精选评论，不代表全量评论",
+                source=str(bridge_comments.get("source") or "wechat_session_bridge"),
+                stats=EngagementStats(comments=total),
+                comments=comments[:limit],
+                next_cursor=str(page + 1) if bridge_comments.get("has_more") else None,
+            )
+        if bridge_comments:
+            bridge_issue = str(
+                bridge_comments.get("reason")
+                or bridge_comments.get("status")
+                or "会话桥未返回数据"
+            )
+
         try:
             official_comments = await fetch_official_comments(
                 crawler,
@@ -127,17 +206,6 @@ async def fetch(
                 stats=EngagementStats(comments=total),
                 comments=comments[:limit],
                 next_cursor=str(page + 1) if has_more else None,
-            )
-
-        if metadata.get("show_comment") == "0":
-            return EngagementResult(
-                platform="wechat",
-                canonical_url=url,
-                work_id=work_id,
-                coverage="complete",
-                reason="该公众号文章由作者关闭评论，登录账号也不会产生可抓取评论",
-                source="cgiDataNew.show_comment",
-                stats=stats,
             )
 
         if page == 1 and preloaded_comments:
@@ -175,7 +243,8 @@ async def fetch(
                 url,
                 work_id,
                 "unsupported",
-                "公众号任意第三方文章评论需要微信文章短时会话；自有公众号可用官方留言授权"
+                "公众号任意第三方文章评论需要本地微信短时会话桥"
+                + (f"；会话桥: {bridge_issue}" if bridge_issue else "")
                 + (f"；官方接口尝试失败: {official_issue}" if official_issue else ""),
             )
         params = {
@@ -421,8 +490,9 @@ def parse_stats(text: str) -> EngagementStats:
     decoded = html.unescape(text).replace(r"\u0022", '"').replace(r'\"', '"')
     values: dict[str, int | None] = {}
     for key in (
-        "read_num", "read_num_v2", "readCount",
-        "like_num", "like_num_v2", "old_like_num", "old_like_num_v2", "likeCount",
+        "read_num", "read_num_v2", "appmsg_read_num", "readCount",
+        "like_num", "like_num_v2", "appmsg_like_num",
+        "old_like_num", "old_like_num_v2", "appmsg_old_like_num", "likeCount",
         "comment_count", "commentCount", "share_count", "shareCount",
     ):
         match = re.search(
@@ -432,13 +502,21 @@ def parse_stats(text: str) -> EngagementStats:
         if match:
             values[key] = to_int(match.group(1))
     return EngagementStats(
-        views=to_int(first_present(values, "read_num", "read_num_v2", "readCount")),
+        views=to_int(first_present(
+            values,
+            "read_num",
+            "read_num_v2",
+            "appmsg_read_num",
+            "readCount",
+        )),
         likes=to_int(first_present(
             values,
             "like_num",
             "like_num_v2",
+            "appmsg_like_num",
             "old_like_num",
             "old_like_num_v2",
+            "appmsg_old_like_num",
             "likeCount",
         )),
         comments=to_int(first_present(values, "comment_count", "commentCount")),

@@ -45,6 +45,14 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 
 代码：`app/crawlers/platforms/wechat.py`
 
+- 任意公众号优先路径：配置本地微信会话桥后，用户在已登录微信桌面端打开该公众号任意
+  一篇文章。mitmproxy 捕获 `uin/key/pass_ticket/appmsg_token/Cookie`，桥按 `__biz` 仅在
+  内存保留约 25 分钟。主服务只向桥发送 URL/页码，不接收原始凭据。
+- 会话桥互动量：先复用微信实际观察到的响应；没有观察值时请求凭据化文章页，必要时再调
+  `/mp/getappmsgext`。兼容 `appmsg_read_num/appmsg_like_num` 等客户端字段。
+- 会话桥评论：请求 `/mp/appmsg_comment`，按 `buffer/continue_flag` 遍历并转换为外部
+  `page`；只标记为公开精选评论，不承诺后台全量留言。同一公众号多 URL 可复用一次捕获。
+
 - 自有公众号互动量：配置 AppID/AppSecret 或 access token 后，通过官方 `stable_token`
   获取并缓存令牌；按文章发布日期请求当前 `/datacube/getarticletotaldetail`，用 URL 的
   `mid_idx` 匹配 `msgid`，返回阅读、点赞、在看、分享、留言和收藏。
@@ -58,8 +66,9 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 - 失败处理：作者关闭评论、缺参数、`ret=-3 no session` 和
   `/mp/wappoc_appmsgcaptcha` 验证码重定向分别返回可区分的状态，随后可由浏览器验证当前
   会话可见内容，不再把验证码页误报成“文章无数据”。
-- 会话边界：官方凭据不能跨公众号读取第三方文章；任意公众号文章不存在已验证的免费匿名
-  完整互动/评论接口，不伪造手机微信会话。服务器出口还需加入公众号后台 IP 白名单。
+- 会话边界：官方凭据不能跨公众号读取第三方文章；匿名请求仍不完整。非官方路径依赖用户
+  已登录微信客户端提供的短时会话，不需要付费数据商，但需要一台桌面微信 sidecar。详细
+  部署、安全和失败状态见 [`WECHAT_SESSION_BRIDGE.md`](WECHAT_SESSION_BRIDGE.md)。
 
 ## 微信视频号
 

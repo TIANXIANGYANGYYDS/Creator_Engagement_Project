@@ -63,7 +63,10 @@ conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 快手公开作品默认复用本地游客设备状态走纯协议详情和评论接口，状态失效时才由浏览器重新
 生成，不需要账号。小红书互动对带当前有效 `xsec_token` 的 URL 使用匿名 SSR，最新百测
 100/100；评论则单独复用调用方自己的平台会话。项目不接入付费数据供应商；小红书评论
-分页和任意第三方公众号文章的互动/评论仍受各自会话边界约束。视频号公开分享链接的
+分页和任意第三方公众号文章的互动/评论仍受各自会话边界约束。公众号现已提供免费的
+本地微信会话桥：用户电脑打开同公众号一篇文章后，约 25 分钟内可批量请求该公众号文章，
+原始凭据只留在本机内存，配置与操作见
+[`docs/WECHAT_SESSION_BRIDGE.md`](docs/WECHAT_SESSION_BRIDGE.md)。视频号公开分享链接的
 点赞、评论总数、转发和收藏可匿名直连获取，但评论正文不在公开预览响应中。九个平台都可以在
 带桌面环境的本机建立独立 Profile：
 
@@ -86,6 +89,8 @@ conda run -n MyAgent creator-engagement-login xiaohongshu --url '<小红书笔�
 `WECHAT_MP_APP_SECRET`，或注入已有 `WECHAT_MP_ACCESS_TOKEN`。服务通过微信
 `stable_token` 缓存令牌，互动量使用当前 `getarticletotaldetail`，评论使用官方
 `comment/list`；该授权只能读取凭据所属公众号，不能读取任意第三方公众号文章。
+不能使用官方授权时，主服务配置 `WECHAT_SESSION_BRIDGE_URL/TOKEN` 后会优先走本地微信
+会话桥，官方路径只保留为兼容降级。
 
 启动 API：
 
@@ -149,7 +154,7 @@ haokan / kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微
 | 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 互动匿名 SSR；评论 `xhshow` 动态签名 | 互动新鲜 URL 100/100、无需登录；评论低频 20/20，仍需要 `web_session` 与有效 token |
 | 抖音 | 匿名纯协议互动量和评论分页；浏览器仅作风控兜底 | 第一方访客 `ttwid`、纯 Python `a_bogus`、`/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 真实首屏 20 条、总数 2909；平台隐藏 `play_count` 时播放保持 `null` |
 | 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
-| 公众号 | 自有公众号互动量和留言；第三方文章仅取页面/当前会话公开值 | 官方 `getarticletotaldetail`、`comment/list`；页面 SSR、`getappmsgext`、`appmsg_comment` | 自有公众号授权路径可用；任意第三方文章无稳定匿名完整接口 |
+| 公众号 | 任意公开文章的会话化互动量和精选评论；自有号保留官方降级 | 本地微信短时会话桥；页面 SSR、`getappmsgext`、`appmsg_comment`；官方接口 | 无免费匿名完整接口；打开同公众号一篇文章后约 25 分钟复用，凭据仅存本机内存 |
 | 微信视频号 | 点赞、评论总数、转发、收藏 | 公开预览 `finder-preview/api/feed/get_feed_info` | 互动量匿名 100/100；评论总数可取，评论正文需微信客户端会话，当前明确不可用 |
 | 快手 | 播放、点赞、评论总数和一级评论 | `visionVideoDetail`、SSR Apollo、REST/GraphQL 评论双通道 | 无需账号；398 条互动和 398 条评论企业实测均有数据，详情已下线时仅返回可验证评论数 |
 

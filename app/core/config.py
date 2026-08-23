@@ -57,6 +57,14 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         alias="WECHAT_MP_ACCESS_TOKEN",
     )
+    wechat_session_bridge_url: str = Field(
+        default="",
+        alias="WECHAT_SESSION_BRIDGE_URL",
+    )
+    wechat_session_bridge_token: SecretStr = Field(
+        default=SecretStr(""),
+        alias="WECHAT_SESSION_BRIDGE_TOKEN",
+    )
     request_timeout_seconds: float = Field(
         default=20,
         alias="REQUEST_TIMEOUT_SECONDS",

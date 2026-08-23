@@ -36,3 +36,16 @@ def test_wechat_official_api_credentials_are_optional_secrets(monkeypatch) -> No
 
     assert settings.wechat_mp_app_id == "wx-app-id"
     assert settings.wechat_mp_app_secret.get_secret_value() == "app-secret"
+
+
+def test_wechat_session_bridge_credentials_are_optional_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("WECHAT_SESSION_BRIDGE_URL", "http://127.0.0.1:8210")
+    monkeypatch.setenv("WECHAT_SESSION_BRIDGE_TOKEN", "local-bridge-token-secret")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.wechat_session_bridge_url == "http://127.0.0.1:8210"
+    assert (
+        settings.wechat_session_bridge_token.get_secret_value()
+        == "local-bridge-token-secret"
+    )

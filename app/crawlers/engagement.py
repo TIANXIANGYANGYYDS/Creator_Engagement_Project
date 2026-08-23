@@ -34,6 +34,7 @@ from app.models.engagement import (
 if TYPE_CHECKING:
     from app.crawlers.browser_fallback import BrowserFallback
     from app.crawlers.platform_session import PlatformSessionStore
+    from app.crawlers.wechat_session_bridge import HttpWeChatSessionBridgeClient
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,9 @@ class EngagementCrawler:
         wechat_mp_app_id: str = "",
         wechat_mp_app_secret: str = "",
         wechat_mp_access_token: str = "",
+        wechat_session_bridge_url: str = "",
+        wechat_session_bridge_token: str = "",
+        wechat_session_bridge_client: "HttpWeChatSessionBridgeClient | Any | None" = None,
     ) -> None:
         if max_protocol_attempts <= 0:
             raise ValueError("max_protocol_attempts must be greater than zero")
@@ -88,10 +92,23 @@ class EngagementCrawler:
         self._cached_wechat_mp_access_token = ""
         self._wechat_mp_token_expires_at = 0.0
         self._wechat_mp_token_lock = asyncio.Lock()
+        self._owns_wechat_session_bridge_client = False
+        self.wechat_session_bridge_client = wechat_session_bridge_client
+        if self.wechat_session_bridge_client is None and wechat_session_bridge_url.strip():
+            from app.crawlers.wechat_session_bridge import HttpWeChatSessionBridgeClient
+
+            self.wechat_session_bridge_client = HttpWeChatSessionBridgeClient(
+                wechat_session_bridge_url,
+                wechat_session_bridge_token,
+                timeout_seconds=timeout_seconds,
+            )
+            self._owns_wechat_session_bridge_client = True
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self.client.aclose()  # type: ignore[attr-defined]
+        if self._owns_wechat_session_bridge_client:
+            await self.wechat_session_bridge_client.aclose()
 
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         if comment_limit <= 0:
@@ -560,6 +577,25 @@ class EngagementCrawler:
         self._configured_wechat_mp_access_token = ""
         self._cached_wechat_mp_access_token = ""
         self._wechat_mp_token_expires_at = 0.0
+
+    async def _wechat_session_bridge_request(
+        self,
+        operation: str,
+        *,
+        url: str,
+        metadata: dict[str, str],
+        page: int,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        if self.wechat_session_bridge_client is None:
+            return None
+        return await self.wechat_session_bridge_client.fetch(
+            operation,
+            url=url,
+            metadata=metadata,
+            page=page,
+            limit=limit,
+        )
 
 
 async def fetch_engagement(

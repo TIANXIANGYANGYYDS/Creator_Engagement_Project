@@ -253,13 +253,13 @@
           <td class="platform-cell">公众号</td><td class="service-cell">互动量</td><td>100</td>
           <td class="upstream-cell">协议请求 + 每次浏览器页面多请求</td><td class="result-bad">34 / 100<br>34%</td>
           <td class="time-cell"><strong>21.828 / 27.973s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>第三方匿名样本不稳定；自有号已接官方 API，待用户凭据实测</td>
+          <td>匿名历史基线；任意文章本地微信会话桥已实现，待用户桌面会话百测</td>
         </tr>
         <tr>
           <td class="platform-cell">公众号</td><td class="service-cell">评论第 1 页</td><td>100</td>
           <td class="upstream-cell">文章 HTML 全局量 + 独立评论接口</td><td class="result-bad">0 / 100<br>0%</td>
           <td class="time-cell"><strong>0.747 / 0.955s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>第三方匿名缺口大；自有号已接官方 comment/list</td>
+          <td>匿名历史基线；会话桥已接 appmsg_comment 精选评论分页，待真实百测</td>
         </tr>
 
         <tr class="group-even">
@@ -344,7 +344,7 @@
 
     <section class="notes">
       <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。快手互动实耗 41 IP / ¥0.03444，评论实耗 23 IP / ¥0.01932；两个独立接口合计 <strong>64 IP / ¥0.05376</strong>，按 398 个 URL 各调两项摊销 ¥0.00013508/URL。视频号本次直连且默认 prefer 绕过代理，实际 IP 成本 ¥0；显式 required 除外。</p>
-      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存。‡ 视频号单请求耗时来自最终采集器 20 次顺序探针（20/20）；另有互动/评论各 100 个任务同时入队的企业节奏实测，队列 P95 为 21.663/22.348 秒。互动计数可用，评论正文不可用。公众号两行是任意第三方文章匿名历史实测；自有公众号官方接口已实现但尚无用户凭据，未虚构成功率和单价。</p>
+      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存。‡ 视频号单请求耗时来自最终采集器 20 次顺序探针（20/20）；另有互动/评论各 100 个任务同时入队的企业节奏实测，队列 P95 为 21.663/22.348 秒。互动计数可用，评论正文不可用。公众号两行仍是任意第三方文章匿名历史实测；免费的本地微信短时会话桥已经实现且采购 IP 成本为 ¥0，但服务器没有用户桌面微信会话，不能把自动化 mock 写成真实成功率和耗时。</p>
     </section>
   </main>
 </body>

@@ -174,6 +174,10 @@ class EngagementService:
             wechat_mp_access_token=(
                 settings.wechat_mp_access_token.get_secret_value()
             ),
+            wechat_session_bridge_url=settings.wechat_session_bridge_url,
+            wechat_session_bridge_token=(
+                settings.wechat_session_bridge_token.get_secret_value()
+            ),
         )
         return cls(
             crawler,
