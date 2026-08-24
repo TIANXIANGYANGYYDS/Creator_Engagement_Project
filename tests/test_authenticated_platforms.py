@@ -473,7 +473,7 @@ def test_kuaishou_comment_pages_exclude_repeated_pinned_comment() -> None:
     assert result.next_page is None
 
 
-def test_wechat_disabled_comments_are_distinguished_from_missing_session() -> None:
+def test_wechat_anonymous_show_comment_zero_is_not_claimed_as_author_disabled() -> None:
     html = """
     <script>
       window.cgiDataNew = {show_comment: 0, comment_id: 10, bizuin: 'MzA=', mid: 20, idx: 1};
@@ -488,12 +488,41 @@ def test_wechat_disabled_comments_are_distinguished_from_missing_session() -> No
         1,
     ))
 
-    assert result.coverage == "complete"
-    assert "关闭评论" in result.reason
+    assert result.coverage == "unsupported"
+    assert "不能单独证明作者关闭评论" in result.reason
     assert result.total_comments is None
 
 
-def test_wechat_no_session_is_blocked_after_article_metadata() -> None:
+def test_wechat_comment_endpoint_can_confirm_author_disabled() -> None:
+    html = """
+    <script>
+      window.cgiDataNew = {
+        show_comment: 0, comment_id: 10, bizuin: 'MzA=', mid: 20, idx: 1
+      };
+    </script>
+    """
+    client = DualFakeClient(gets=[
+        FakeResponse(text=html),
+        FakeResponse({"base_resp": {"ret": 0}, "enabled": 0}),
+    ])
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"wechat": (
+            "wxuin=1; key=k; pass_ticket=p; appmsg_token=t; wap_sid2=s"
+        )},
+    ).fetch_comments(
+        "https://mp.weixin.qq.com/s/article-token",
+        "公众号",
+        1,
+    ))
+
+    assert result.coverage == "complete"
+    assert "enabled=0" in result.reason
+    assert result.total_comments == 0
+
+
+def test_wechat_no_session_is_reported_as_unsupported_cookie() -> None:
     html = """
     <script>
       window.cgiDataNew = {show_comment: 1, comment_id: 10, bizuin: 'MzA=', mid: 20, idx: 1};
@@ -512,8 +541,9 @@ def test_wechat_no_session_is_blocked_after_article_metadata() -> None:
         1,
     ))
 
-    assert result.coverage == "blocked"
+    assert result.coverage == "unsupported"
     assert "no session" in result.reason
+    assert "appmsg_token" in result.reason
     assert client.get_calls[1][0].endswith("/mp/appmsg_comment")
 
 
@@ -574,6 +604,147 @@ def test_wechat_metadata_uses_full_article_query_when_html_omits_biz() -> None:
     assert metadata["mid"] == "20"
     assert metadata["idx"] == "2"
     assert metadata["sn"] == "abc"
+
+
+def test_wechat_metadata_prefers_cgi_constants_over_sdk_placeholders() -> None:
+    metadata = parse_wechat_metadata(
+        """
+        <script>const early = {mid: this.mid, idx: `${window.idx}`};</script>
+        <script>
+          window.cgiDataNew = {
+            base_resp: {ret: '0' * 1},
+            show_comment: '1' * 1,
+            comment_id: '9001',
+            bizuin: 'MzA=',
+            mid: '22470001' * 1,
+            idx: '2' * 1,
+            sn: 'abc123'
+          };
+          window.key = params['key'] || '';
+        </script>
+        """,
+        "https://mp.weixin.qq.com/s/short-token",
+    )
+
+    assert metadata["mid"] == "22470001"
+    assert metadata["idx"] == "2"
+    assert metadata["biz"] == "MzA="
+    assert "key" not in metadata
+
+
+def test_wechat_cookie_fields_are_recovered_for_interactions() -> None:
+    html = """
+    <script>
+      window.cgiDataNew = {
+        show_comment: 1, comment_id: '10', bizuin: 'MzA=',
+        mid: '20', idx: '1', sn: 'abc'
+      };
+    </script>
+    """
+    cookie = (
+        "wxuin=123; key=key%2Bvalue; pass_ticket=pass%2Bticket; "
+        "appmsg_token=token%2Fvalue; wxtokenkey=777; "
+        "devicetype=UnifiedPCWindows; version=f2541510; wap_sid2=session"
+    )
+    client = DualFakeClient(
+        gets=[FakeResponse(text=html)],
+        posts=[FakeResponse({
+            "base_resp": {"ret": 0},
+            "appmsgstat": {"read_num": 321, "like_num": 12},
+        })],
+    )
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"wechat": cookie},
+    ).fetch_interactions(
+        "https://mp.weixin.qq.com/s/article-token",
+        "公众号",
+    ))
+
+    assert result.stats.views == 321
+    assert result.stats.likes == 12
+    request = client.post_calls[0][1]
+    assert request["headers"]["Cookie"] == cookie
+    assert request["params"]["uin"] == "123"
+    assert request["params"]["key"] == "key+value"
+    assert request["params"]["pass_ticket"] == "pass+ticket"
+    assert request["params"]["appmsg_token"] == "token/value"
+    assert cookie not in result.reason
+
+
+def test_wechat_cookie_comments_translate_page_to_buffer() -> None:
+    html = """
+    <script>
+      window.cgiDataNew = {
+        show_comment: 1, comment_id: '10', bizuin: 'MzA=',
+        mid: '20', idx: '1', sn: 'abc'
+      };
+    </script>
+    """
+    client = DualFakeClient(gets=[
+        FakeResponse(text=html),
+        FakeResponse({
+            "base_resp": {"ret": 0},
+            "elected_comment": [{"content_id": "c1", "content": "第一页"}],
+            "elected_comment_total_cnt": 2,
+            "continue_flag": 1,
+            "buffer": "opaque-next-page",
+        }),
+        FakeResponse({
+            "base_resp": {"ret": 0},
+            "elected_comment": [{"content_id": "c2", "content": "第二页"}],
+            "elected_comment_total_cnt": 2,
+            "continue_flag": 0,
+            "buffer": "",
+        }),
+    ])
+    cookie = (
+        "wxuin=123; key=key; pass_ticket=ticket; "
+        "appmsg_token=token; wap_sid2=session"
+    )
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"wechat": cookie},
+    ).fetch_comments(
+        "https://mp.weixin.qq.com/s/article-token",
+        "公众号",
+        2,
+    ))
+
+    assert [comment.comment_id for comment in result.comments] == ["c2"]
+    assert result.total_comments == 2
+    assert result.next_page is None
+    assert client.get_calls[1][1]["params"]["appmsgid"] == "20"
+    assert client.get_calls[2][1]["params"]["buffer"] == "opaque-next-page"
+    assert client.get_calls[2][1]["headers"]["Cookie"] == cookie
+
+
+def test_wechat_verify_html_is_an_ip_block_not_a_cookie_error() -> None:
+    html = """
+    <script>
+      window.cgiDataNew = {
+        show_comment: 1, comment_id: '10', bizuin: 'MzA=', mid: '20', idx: '1'
+      };
+    </script>
+    """
+    client = DualFakeClient(gets=[
+        FakeResponse(text=html),
+        FakeResponse(text="<html><title>Verify</title></html>"),
+    ])
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"wechat": "wap_sid2=session"},
+    ).fetch_comments(
+        "https://mp.weixin.qq.com/s/article-token",
+        "公众号",
+        1,
+    ))
+
+    assert result.coverage == "blocked"
+    assert "访问验证" in result.reason
 
 
 def test_wechat_captcha_redirect_is_reported_as_blocked() -> None:

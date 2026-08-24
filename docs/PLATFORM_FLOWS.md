@@ -45,30 +45,29 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 
 代码：`app/crawlers/platforms/wechat.py`
 
-- 任意公众号优先路径：配置本地微信会话桥后，用户在已登录微信桌面端打开该公众号任意
-  一篇文章。mitmproxy 捕获 `uin/key/pass_ticket/appmsg_token/Cookie`，桥按 `__biz` 仅在
-  内存保留约 25 分钟。主服务只向桥发送 URL/页码，不接收原始凭据。
-- 会话桥互动量：先复用微信实际观察到的响应；没有观察值时请求凭据化文章页，必要时再调
-  `/mp/getappmsgext`。兼容 `appmsg_read_num/appmsg_like_num` 等客户端字段。
-- 会话桥评论：请求 `/mp/appmsg_comment`，按 `buffer/continue_flag` 遍历并转换为外部
-  `page`；只标记为公开精选评论，不承诺后台全量留言。同一公众号多 URL 可复用一次捕获。
+- 任意公众号生产路径：调用方把完整文章 Cookie Header 写入本机
+  `WECHAT_ARTICLE_COOKIE`。适配器从 Cookie、URL 与 `window.cgiDataNew` 合并
+  `uin/key/pass_ticket/appmsg_token/wap_sid2` 等参数；整个业务调用复用同一个 Cookie 和
+  IP 租约，不启动浏览器、微信客户端或真实账号。
+- Cookie-only 互动量：先解析文章页 `appmsgstat/cgiDataNew`，缺计数时再 POST
+  `/mp/getappmsgext`；兼容 `appmsg_read_num/appmsg_like_num`、V2 字段和数值 `0`。
+- Cookie-only 评论：先解析 `preload_comment_list`，否则请求 `/mp/appmsg_comment`，按
+  `buffer/continue_flag` 顺序遍历并转换为外部 `page`；只返回公开精选评论，不承诺后台
+  全量留言。
 
 - 自有公众号互动量：配置 AppID/AppSecret 或 access token 后，通过官方 `stable_token`
   获取并缓存令牌；按文章发布日期请求当前 `/datacube/getarticletotaldetail`，用 URL 的
   `mid_idx` 匹配 `msgid`，返回阅读、点赞、在看、分享、留言和收藏。
 - 自有公众号评论：请求官方 `/cgi-bin/comment/list`，将外部页码转换为 `begin/count`。
   该接口只对凭据所属公众号和已开通留言权限的文章生效。
-- 任意文章互动量：先解析文章页 `appmsgstat/cgiDataNew`，有调用方自己的文章会话时再尝试
-  `/mp/getappmsgext`。页面解析兼容未加引号字段、`read_num_v2/like_num_v2` 和数值 `0`。
-- 任意文章评论：先解析页面直接下发的 `preload_comment_list`；首屏有精选评论时无需额外会话。
-  否则检查 `show_comment`；作者关闭评论时返回 `complete` 空结果。开启评论时，使用文章
-  参数和自有会话请求 `/mp/appmsg_comment`，页码转换为 offset。
-- 失败处理：作者关闭评论、缺参数、`ret=-3 no session` 和
-  `/mp/wappoc_appmsgcaptcha` 验证码重定向分别返回可区分的状态，随后可由浏览器验证当前
-  会话可见内容，不再把验证码页误报成“文章无数据”。
-- 会话边界：官方凭据不能跨公众号读取第三方文章；匿名请求仍不完整。非官方路径依赖用户
-  已登录微信客户端提供的短时会话，不需要付费数据商，但需要一台桌面微信 sidecar。详细
-  部署、安全和失败状态见 [`WECHAT_SESSION_BRIDGE.md`](WECHAT_SESSION_BRIDGE.md)。
+- 关闭评论判据：匿名页的 `show_comment=0` 只表示当前页面没有展示评论区；只有成功的
+  评论接口响应明确给出 `enabled=0`，才返回 `complete` 空结果并确认文章未开放评论。
+- 失败处理：缺会话字段或 `ret=-3/no session` 返回 `unsupported`，不会浪费 IP 轮换；
+  Verify HTML、频繁访问或 `/mp/wappoc_appmsgcaptcha` 返回 `blocked`，允许代理池更换出口。
+  Cookie/token 的值永不写入 reason 或日志。
+- 会话边界：官方凭据不能跨公众号读取第三方文章；IP 只能缓解验证码和频控，不能把弱
+  Cookie 提升成完整文章会话。旧桌面微信 sidecar 仅保留兼容代码，当前生产路径默认关闭；
+  Cookie-only 配置与边界见 [`WECHAT_COOKIE_PROTOCOL.md`](WECHAT_COOKIE_PROTOCOL.md)。
 
 ## 微信视频号
 

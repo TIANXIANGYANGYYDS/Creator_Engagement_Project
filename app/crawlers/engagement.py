@@ -342,6 +342,11 @@ class EngagementCrawler:
         include_stats: bool,
         include_comments: bool,
     ) -> bool:
+        if result.platform == "wechat":
+            # Article counters/comments are session protocols. An anonymous
+            # browser cannot turn a weak Cookie into a WeChat article session,
+            # and a persistent profile could accidentally use a real account.
+            return False
         if result.platform == "wechat_channels" and include_comments:
             # The public preview UI intentionally redirects comment clicks to
             # WeChat and never requests comment bodies in the browser page.

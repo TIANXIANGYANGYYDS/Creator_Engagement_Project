@@ -199,7 +199,7 @@
         <h1>互动量与公开评论采集实测成本单</h1>
         <div class="subtitle">按独立业务接口列示真实成功率、耗时和 IP 成本；互动量与评论按实际上游响应分别计数</div>
       </div>
-      <div class="badge">更新 2026-08-23 · MyAgent / Python 3.13</div>
+      <div class="badge">更新 2026-08-24 · MyAgent / Python 3.13</div>
     </header>
 
     <section class="summary" aria-label="本轮代理成本摘要">
@@ -250,16 +250,16 @@
         </tr>
 
         <tr>
-          <td class="platform-cell">公众号</td><td class="service-cell">互动量</td><td>100</td>
-          <td class="upstream-cell">协议请求 + 每次浏览器页面多请求</td><td class="result-bad">34 / 100<br>34%</td>
-          <td class="time-cell"><strong>21.828 / 27.973s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>匿名历史基线；任意文章本地微信会话桥已实现，待用户桌面会话百测</td>
+          <td class="platform-cell">公众号</td><td class="service-cell">互动量</td><td>5</td>
+          <td class="upstream-cell">1 GET 文章；完整 Cookie 时至多再 1 POST <code>getappmsgext</code></td><td class="result-bad">0 / 5<br>无 Cookie</td>
+          <td class="time-cell"><strong>1.611 / 1.889s*</strong></td><td class="cost-cell">本次直连：¥0<br>新 IP 上限 ¥0.00084</td>
+          <td>Cookie-only 已实现且禁用浏览器；待调用方 Cookie 实测，匿名不伪报成功</td>
         </tr>
         <tr>
-          <td class="platform-cell">公众号</td><td class="service-cell">评论第 1 页</td><td>100</td>
-          <td class="upstream-cell">文章 HTML 全局量 + 独立评论接口</td><td class="result-bad">0 / 100<br>0%</td>
-          <td class="time-cell"><strong>0.747 / 0.955s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>匿名历史基线；会话桥已接 appmsg_comment 精选评论分页，待真实百测</td>
+          <td class="platform-cell">公众号</td><td class="service-cell">评论第 1 页</td><td>5</td>
+          <td class="upstream-cell">1 GET 文章；完整 Cookie 时再 1 GET <code>appmsg_comment</code></td><td class="result-bad">0 / 5<br>无 Cookie</td>
+          <td class="time-cell"><strong>0.896 / 1.065s*</strong></td><td class="cost-cell">本次直连：¥0<br>新 IP 上限 ¥0.00084</td>
+          <td>buffer 分页已实现；show_comment=0 不再误报作者关闭，待 Cookie 实测</td>
         </tr>
 
         <tr class="group-even">
@@ -344,7 +344,7 @@
 
     <section class="notes">
       <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。快手互动实耗 41 IP / ¥0.03444，评论实耗 23 IP / ¥0.01932；两个独立接口合计 <strong>64 IP / ¥0.05376</strong>，按 398 个 URL 各调两项摊销 ¥0.00013508/URL。视频号本次直连且默认 prefer 绕过代理，实际 IP 成本 ¥0；显式 required 除外。</p>
-      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存。‡ 视频号单请求耗时来自最终采集器 20 次顺序探针（20/20）；另有互动/评论各 100 个任务同时入队的企业节奏实测，队列 P95 为 21.663/22.348 秒。互动计数可用，评论正文不可用。公众号两行仍是任意第三方文章匿名历史实测；免费的本地微信短时会话桥已经实现且采购 IP 成本为 ¥0，但服务器没有用户桌面微信会话，不能把自动化 mock 写成真实成功率和耗时。</p>
+      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存；* 公众号只有 5 个最终实现样本，第二个数字为最大值。‡ 视频号单请求耗时来自最终采集器 20 次顺序探针（20/20）；另有互动/评论各 100 个任务同时入队的企业节奏实测，队列 P95 为 21.663/22.348 秒。公众号只用 Cookie + IP 纯协议，当前服务器没有调用方文章 Cookie，故 0/5 是匿名权限边界，不是完整 Cookie 路径的失败率。</p>
     </section>
   </main>
 </body>

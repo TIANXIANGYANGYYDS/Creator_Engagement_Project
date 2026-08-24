@@ -151,6 +151,23 @@ def test_required_proxy_mode_requires_api_url() -> None:
         EngagementService.from_settings(settings)
 
 
+def test_service_injects_dedicated_wechat_cookie(monkeypatch) -> None:
+    monkeypatch.delenv("CREATOR_ENGAGEMENT_COOKIE", raising=False)
+    monkeypatch.delenv("DOUYIN_SESSION_COOKIE", raising=False)
+    settings = Settings(
+        _env_file=None,
+        browser_fallback_enabled=False,
+        creator_engagement_cookie="",
+        wechat_article_cookie="wap_sid2=wechat-only",
+    )
+
+    service = EngagementService.from_settings(settings, proxy_mode="direct")
+
+    assert service.crawler._platform_cookie("wechat") == "wap_sid2=wechat-only"
+    assert service.crawler.platform_cookies == {"wechat": "wap_sid2=wechat-only"}
+    asyncio.run(service.aclose())
+
+
 def test_retryable_failure_is_not_cached() -> None:
     class BlockedCrawler(FakeCrawler):
         async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:

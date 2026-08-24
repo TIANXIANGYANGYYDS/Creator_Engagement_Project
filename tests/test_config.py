@@ -49,3 +49,16 @@ def test_wechat_session_bridge_credentials_are_optional_secrets(monkeypatch) -> 
         settings.wechat_session_bridge_token.get_secret_value()
         == "local-bridge-token-secret"
     )
+
+
+def test_wechat_article_cookie_is_an_independent_secret(monkeypatch) -> None:
+    monkeypatch.setenv("CREATOR_ENGAGEMENT_COOKIE", "douyin-cookie")
+    monkeypatch.setenv("WECHAT_ARTICLE_COOKIE", "wap_sid2=wechat-session")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.creator_engagement_cookie.get_secret_value() == "douyin-cookie"
+    assert (
+        settings.wechat_article_cookie.get_secret_value()
+        == "wap_sid2=wechat-session"
+    )

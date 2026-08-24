@@ -48,6 +48,10 @@ class Settings(BaseSettings):
             "DOUYIN_SESSION_COOKIE",
         ),
     )
+    wechat_article_cookie: SecretStr = Field(
+        default=SecretStr(""),
+        alias="WECHAT_ARTICLE_COOKIE",
+    )
     wechat_mp_app_id: str = Field(default="", alias="WECHAT_MP_APP_ID")
     wechat_mp_app_secret: SecretStr = Field(
         default=SecretStr(""),

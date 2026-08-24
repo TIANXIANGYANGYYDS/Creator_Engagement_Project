@@ -96,7 +96,7 @@ def test_browser_fallback_has_a_global_concurrency_limit() -> None:
     assert browser.max_active == 2
 
 
-def test_protocol_unsupported_result_uses_browser_fallback() -> None:
+def test_wechat_protocol_result_never_uses_accounted_browser_fallback() -> None:
     browser = FakeBrowserFallback()
     result = asyncio.run(
         EngagementCrawler(client=FakeClient(), browser_fallback=browser).fetch_interactions(
@@ -104,18 +104,9 @@ def test_protocol_unsupported_result_uses_browser_fallback() -> None:
         )
     )
 
-    assert result.source == "browser:test"
-    assert result.stats.likes == 42
-    assert browser.calls[0][1:] == (
-        "wechat",
-        "XKB0QLWfxHAJrOo-QvHsVw",
-        {
-            "page": 1,
-            "limit": 20,
-            "include_stats": True,
-            "include_comments": False,
-        },
-    )
+    assert result.source == "mp article appmsgstat/cgiDataNew"
+    assert result.coverage == "unsupported"
+    assert browser.calls == []
 
 
 def test_caller_cookie_is_only_seeded_into_douyin_profile() -> None:
