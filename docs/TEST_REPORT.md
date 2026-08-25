@@ -59,6 +59,7 @@
 
 ```text
 GET /api/v1/interactions?url=<URL>&media_name=<MEDIA>
+GET /api/v1/comments?url=<URL>&media_name=<MEDIA>
 GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=<N>
 ```
 
@@ -314,24 +315,26 @@ P50/P95/最大为 0.063/0.088/0.213 秒。互动量满足需求；评论接口�
   `finderGetCommentList` 会话；侧车适配器已实现，未配置授权终端时纯服务端会明确返回
   `unsupported`。
 - 小红书互动对带当前有效 `xsec_token` 的 URL 已达 100/100，无需登录；token 缺失或过期
-  时不能仅凭 note ID 恢复。评论低频首屏为 20/20，深分页仍需要调用方自己的有效
-  `web_session` 和 token。
+  时不能仅凭 note ID 恢复。评论低频首屏为 20/20；当前专用 Cookie 配置支持 cursor 深分页，
+  仍需要调用方自己的有效 `a1/web_session` 和 token。
 - 微博匿名降级已覆盖本轮样例第 2 页；更深页仍可能 `ok=-100`，IP 池不能替代平台权限。
 - 抖音已转为匿名签名协议，签名或访客规则变化时仍可能空包并进入浏览器兜底；头条部分
   计数仍受 SSR/挑战影响。
 
 ## 零账号一级评论分页结论（2026-08-25）
 
-统一 `/comments` 接口只返回一级评论正文，每页最多 20 条，调用方根据 `next_page` 继续。
+统一 `/comments` 接口只返回一级评论正文；默认自动合并当前可见全部页，显式 `page=N` 时
+只返回最多 20 条的第 N 页。
 评论对象里的 `replies` 只是回复数量，不会触发额外请求。
-全量自动化在 `MyAgent / Python 3.13.12` 下为 `173 passed`，`ruff check app tests` 通过。
+全量自动化在 `MyAgent / Python 3.13.12` 下为 `178 passed`，`ruff check app tests` 通过。
 
 | 分类 | 平台 | 结论 |
 |---|---|---|
 | 可翻到匿名公开末页 | 抖音、今日头条、好看、快手、B 站 | 均有公开游标或页码结束标志 |
 | 可翻多页但不保证到底 | 微博 | 第 2 页已实测；更深页可能 `ok=-100` 或登录跳转 |
 | 固定只能第一页 | 无 | 当前没有把任何平台误标为仅第一页 |
-| 不能获取正文 | 微信公众号、微信视频号、小红书 | 严格零账号模式下明确返回 `unsupported` |
+| Cookie 模式可翻到会话可见末页 | 小红书 | 默认关闭；显式提供 `a1/web_session` 和 URL token 后启用 |
+| 不能获取正文 | 微信公众号、微信视频号 | 严格零账号模式下明确返回 `unsupported` |
 
 “公开末页”不含平台隐藏、删除、审核折叠或仅账号可见的评论，不能把页面显示的评论总数
 简单等同于实际可返回的一级评论行数。

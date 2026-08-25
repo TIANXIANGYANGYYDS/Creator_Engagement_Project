@@ -197,7 +197,7 @@
     <header class="heading">
       <div>
         <h1>互动量与公开评论采集实测成本单</h1>
-        <div class="subtitle">默认 STRICT_ANONYMOUS_MODE；不使用人工、扫码或真实账号；互动量与评论按实际上游响应分别计数</div>
+        <div class="subtitle">默认 STRICT_ANONYMOUS_MODE；不执行人工登录或扫码；小红书评论可显式注入 Cookie；互动量与评论按实际上游响应分别计数</div>
       </div>
       <div class="badge">更新 2026-08-24 · MyAgent / Python 3.13</div>
     </header>
@@ -283,9 +283,9 @@
         </tr>
         <tr>
           <td class="platform-cell">小红书</td><td class="service-cell">评论第 1 页</td><td>20</td>
-          <td class="upstream-cell">历史：账号会话 + 动态签名 <code>comment/page</code></td><td class="result-bad">严格匿名 0<br>历史 20 / 20</td>
+          <td class="upstream-cell">显式 Cookie + 动态签名 <code>comment/page</code></td><td class="result-ok">历史实测<br>20 / 20</td>
           <td class="time-cell"><strong>0.300 / 0.723s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>当前不可用；历史 20/20 使用了 web_session，不符合零账号约束</td>
+          <td>Cookie-only 已接入；默认关闭，注入有效 a1/web_session 后按 cursor 分页</td>
         </tr>
 
         <tr class="group-even">
@@ -344,7 +344,7 @@
 
     <section class="notes">
       <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。快手互动实耗 41 IP / ¥0.03444，评论实耗 23 IP / ¥0.01932；两个独立接口合计 <strong>64 IP / ¥0.05376</strong>，按 398 个 URL 各调两项摊销 ¥0.00013508/URL。视频号本次直连且默认 prefer 绕过代理，实际 IP 成本 ¥0；显式 required 除外。</p>
-      <p><strong>一级评论边界：</strong>评论接口只读取一级评论正文，不会为每条评论继续扇出回复请求。抖音、头条、好看、快手和 B 站可按公开游标翻到末页；微博可翻多页但深页可能被登录或风控拦截；公众号、视频号和小红书在严格零账号模式下不可用。P50/P95 均绕过业务缓存；‡ 视频号时间只代表匿名公开预览。</p>
+      <p><strong>一级评论边界：</strong>评论接口只读取一级评论正文，不会为每条评论继续扇出回复请求。抖音、头条、好看、快手和 B 站可按公开游标翻到末页；小红书显式 Cookie 模式可按 cursor 翻到会话可见末页；微博可翻多页但深页可能被登录或风控拦截；公众号和视频号在严格零账号模式下不可用。P50/P95 均绕过业务缓存；‡ 视频号时间只代表匿名公开预览。</p>
     </section>
   </main>
 </body>

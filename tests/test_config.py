@@ -19,6 +19,8 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.proxy_pool_size == 4
     assert settings.proxy_max_concurrency == 1
     assert settings.strict_anonymous_mode is True
+    assert settings.xiaohongshu_session_mode == "disabled"
+    assert settings.xiaohongshu_cookie.get_secret_value() == ""
     assert settings.collection_max_concurrency == 4
     assert settings.reliability_mode == "enterprise"
     assert settings.protocol_max_attempts == 3
@@ -75,4 +77,20 @@ def test_wechat_article_cookie_is_an_independent_secret(monkeypatch) -> None:
     assert (
         settings.wechat_article_cookie.get_secret_value()
         == "wap_sid2=wechat-session"
+    )
+
+
+def test_xiaohongshu_cookie_is_an_independent_opt_in_secret(monkeypatch) -> None:
+    monkeypatch.setenv("XIAOHONGSHU_SESSION_MODE", "cookie")
+    monkeypatch.setenv(
+        "XIAOHONGSHU_COOKIE",
+        "a1=xhs-device; web_session=xhs-session",
+    )
+
+    settings = Settings(_env_file=None)
+
+    assert settings.xiaohongshu_session_mode == "cookie"
+    assert (
+        settings.xiaohongshu_cookie.get_secret_value()
+        == "a1=xhs-device; web_session=xhs-session"
     )

@@ -28,6 +28,7 @@ async def fetch(
     limit: int,
     *,
     page: int,
+    comment_cursor: str | None,
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
@@ -119,9 +120,10 @@ async def fetch(
                     "小红书评论需要 URL 中的 xsec_token；请使用搜索或推荐流生成的完整笔记链接",
                 )
 
-            cursor = ""
+            cursor = comment_cursor or ""
             total: int | None = None
-            for current_page in range(1, page + 1):
+            start_page = page if comment_cursor is not None else 1
+            for current_page in range(start_page, page + 1):
                 params = {
                     "note_id": work_id,
                     "cursor": cursor,

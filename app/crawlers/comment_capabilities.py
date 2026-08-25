@@ -54,5 +54,15 @@ COMMENT_CAPABILITIES: dict[EngagementPlatform, CommentCapabilities] = {
 }
 
 
-def comment_capabilities(platform: EngagementPlatform) -> CommentCapabilities:
+def comment_capabilities(
+    platform: EngagementPlatform,
+    *,
+    xiaohongshu_cookie_enabled: bool = False,
+) -> CommentCapabilities:
+    if platform == "xiaohongshu" and xiaohongshu_cookie_enabled:
+        return CommentCapabilities(
+            root_comments="all_public_pages",
+            anonymous=False,
+            note="使用调用方提供的小红书 Cookie 和动态签名，按 cursor 翻到会话可见末页。",
+        )
     return COMMENT_CAPABILITIES[platform].model_copy(deep=True)

@@ -97,10 +97,19 @@ class CommentPageResult(CollectionResult):
     page: int = Field(ge=1)
     comments: list[EngagementComment] = Field(default_factory=list)
     next_page: int | None = Field(default=None, ge=1)
+    next_cursor: str | None = None
     total_comments: int | None = Field(default=None, ge=0)
     capabilities: CommentCapabilities = Field(
         default_factory=unavailable_comment_capabilities
     )
+
+
+class InteractionDataResponse(BaseModel):
+    data: EngagementStats
+
+
+class CommentDataResponse(BaseModel):
+    data: list[EngagementComment] = Field(default_factory=list)
 
 
 class EngagementResult(CollectionResult):
@@ -109,3 +118,4 @@ class EngagementResult(CollectionResult):
     stats: EngagementStats = Field(default_factory=EngagementStats)
     comments: list[EngagementComment] = Field(default_factory=list)
     next_cursor: str | None = None
+    resume_cursor: str | None = Field(default=None, exclude=True)

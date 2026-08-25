@@ -13,10 +13,10 @@
   同时写一个持久化 Profile。默认最多 1 个浏览器，确认内存充足并压测后才建议设为 2。
 - 互动接口和评论接口分别进入浏览器兜底、分别缓存；不会因为两个请求使用同一个浏览器
   Profile 或同一个代理 IP，就把它们记录成一次上游请求。
-- 每个平台使用独立的 `.local/browser-profiles/<platform>` 持久化 Profile，平台生成的
+- 严格匿名模式下每个平台使用独立的 `.local/browser-profiles/anonymous/<platform>` Profile，平台生成的
   `ttwid`、`msToken`、`UIFID`、`x-s` 等状态由浏览器自己维护并自然过期。
-- 浏览器退出前把当前 storage-state 以 0600 权限同步到 `.local/platform-sessions`，后续
-  协议请求可直接复用刚建立的游客/登录会话，避免每次都重新启动浏览器。
+- 浏览器退出前把当前 storage-state 以 0600 权限同步到 `.local/platform-sessions/anonymous`，
+  后续协议请求只复用游客状态，避免每次都重新启动浏览器。
 - 使用代理时启用 Camoufox GeoIP/时区对齐，browser 可选依赖包含免费的 `maxminddb`。
   可丢弃的快手游客压测 Profile 可在 IP 变化时重建设备状态；该开关默认关闭，不会清除
   用户的真实登录会话。
@@ -29,8 +29,8 @@
 - 对支持懒加载的平台先尝试打开“评论/重试/刷新”入口，再同时滚动页面与弹层内部的可滚动
   容器，触发真实翻页请求；验证码、登录和安全验证不会伪造通过，结果会带 `blocked` 和
   诊断原因。
-- `creator-engagement-login` 支持九个平台，也可通过 `--url` 直接打开同平台内容页。人工
-  登录完成后，协议适配器读取 storage-state Cookie，浏览器回退复用同平台持久化 Profile。
+- `creator-engagement-login` 只保留历史兼容，不属于严格匿名生产链路。小红书评论使用部署方
+  显式提供的 `XIAOHONGSHU_COOKIE`，不会通过该命令启动浏览器登录取 Cookie。
 
 ## 配置
 
@@ -58,8 +58,8 @@ Xvfb 的运行环境单独配置，不要把人工验证码结果提交到仓库
 快手游客页会自动生成 `kwssectoken/kwscode` 等设备状态；项目在同一页面上下文请求目标
 `visionVideoDetail` 和一级评论 REST 接口，无需用户登录。全量旧 URL 实测表明成功响应
 数据可信，但游客态覆盖率仍低，不能写成稳定全覆盖。小红书互动已改为单次匿名 SSR，
-不会因协议失败再启动浏览器；游客页可返回首屏评论，出现“登录查看全部评论”时会停止
-分页，绝不把首屏重复标成后续页。深分页只能复用调用方自己的有效会话。公众号生产路径
+不会因协议失败再启动浏览器。评论只在 `XIAOHONGSHU_SESSION_MODE=cookie` 时使用调用方
+提供的有效会话走纯协议 cursor 分页，绝不把首屏重复标成后续页。公众号生产路径
 明确禁用浏览器兜底，只使用调用方 Cookie + 纯 HTTP；匿名页 `show_comment=0` 不能证明
 作者关闭评论，只有评论接口明确返回 `enabled=0` 才能确认。缺会话返回 `unsupported`，
 验证页或频控返回 `blocked`。

@@ -86,6 +86,7 @@ class PlatformFetchHandler(Protocol):
         limit: int,
         *,
         page: int,
+        comment_cursor: str | None,
         include_stats: bool,
         include_comments: bool,
     ) -> Awaitable[EngagementResult]: ...

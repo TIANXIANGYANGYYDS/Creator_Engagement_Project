@@ -548,6 +548,45 @@ def test_bilibili_comments_use_requested_page() -> None:
     assert client.calls[4][1]["params"]["pagination_str"] == '{"offset":"token-3"}'
 
 
+def test_bilibili_comments_resume_from_known_cursor_without_replaying_pages() -> None:
+    client = FakeClient(
+        FakeResponse(payload={
+            "code": 0,
+            "data": {"bvid": "BVgood", "aid": 123, "stat": {}},
+        }),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {"wbi_img": {
+                "img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz0123456789abcdefgh.png",
+                "sub_url": "https://i0.hdslb.com/bfs/wbi/ZYXWVUTSRQPONMLKJIHGFEDCBA987654321zyxwvutsrqponmlk.png",
+            }},
+        }),
+        FakeResponse(payload={
+            "code": 0,
+            "data": {
+                "cursor": {
+                    "next": 4,
+                    "all_count": 70,
+                    "pagination_reply": {"next_offset": "token-4"},
+                },
+                "replies": [],
+            },
+        }),
+    )
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "https://www.bilibili.com/video/BVgood",
+        "bilibili",
+        3,
+        cursor="token-3",
+    ))
+
+    assert result.next_page == 4
+    assert result.next_cursor == "token-4"
+    assert len(client.calls) == 3
+    assert client.calls[2][1]["params"]["pagination_str"] == '{"offset":"token-3"}'
+
+
 def test_bilibili_does_not_relabel_last_cursor_page() -> None:
     client = FakeClient(
         FakeResponse(payload={

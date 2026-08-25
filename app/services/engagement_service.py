@@ -139,11 +139,28 @@ class EngagementService:
                 api_url=settings.proxy_51_api_url,
             )
         strict_anonymous = settings.strict_anonymous_mode
+        xiaohongshu_cookie = ""
+        if settings.xiaohongshu_session_mode == "cookie":
+            xiaohongshu_cookie = (
+                settings.xiaohongshu_cookie.get_secret_value().strip()
+            )
+            cookie_names: set[str] = set()
+            for segment in xiaohongshu_cookie.split(";"):
+                name, separator, value = segment.strip().partition("=")
+                if separator and name and value.strip():
+                    cookie_names.add(name.lower())
+            missing_cookie_names = {"a1", "web_session"} - cookie_names
+            if missing_cookie_names:
+                missing = ", ".join(sorted(missing_cookie_names))
+                raise ValueError(
+                    "XIAOHONGSHU_SESSION_MODE=cookie 缺少必要 Cookie 字段: "
+                    f"{missing}"
+                )
         session_dir = Path(settings.platform_session_dir)
         profile_dir = Path(settings.browser_profile_dir)
         if strict_anonymous:
-            # Never reuse a historical account profile in the anonymous
-            # deployment. Kuaishou may persist only its disposable guest state.
+            # Never reuse a historical account profile. Kuaishou may persist
+            # guest state; XHS receives only its explicitly configured Secret.
             session_dir /= "anonymous"
             profile_dir /= "anonymous"
         session_store = PlatformSessionStore(session_dir)
@@ -175,13 +192,20 @@ class EngagementService:
                 if strict_anonymous
                 else settings.creator_engagement_cookie.get_secret_value()
             ),
-            platform_cookies=(
-                {}
-                if strict_anonymous
-                else {
-                    "wechat": settings.wechat_article_cookie.get_secret_value(),
-                }
-            ),
+            platform_cookies={
+                **(
+                    {}
+                    if strict_anonymous
+                    else {
+                        "wechat": settings.wechat_article_cookie.get_secret_value(),
+                    }
+                ),
+                **(
+                    {"xiaohongshu": xiaohongshu_cookie}
+                    if xiaohongshu_cookie
+                    else {}
+                ),
+            },
             proxy_provider=provider,
             proxy_mode=active_mode,
             browser_fallback=browser_fallback,
@@ -193,6 +217,7 @@ class EngagementService:
             ),
             protocol_retry_base_seconds=settings.protocol_retry_base_seconds,
             strict_anonymous_mode=strict_anonymous,
+            xiaohongshu_cookie_enabled=bool(xiaohongshu_cookie),
             wechat_mp_app_id=("" if strict_anonymous else settings.wechat_mp_app_id),
             wechat_mp_app_secret=(
                 ""
@@ -256,13 +281,17 @@ class EngagementService:
         url: str,
         media_name: str,
         page: int,
+        *,
+        cursor: str | None = None,
     ) -> CommentPageResult:
         if page <= 0:
             raise ValueError("page must be greater than zero")
         platform = normalize_media_name(media_name)
 
         async def collect() -> CachedResult:
-            return await self.crawler.fetch_comments(url, media_name, page)
+            if cursor is None:
+                return await self.crawler.fetch_comments(url, media_name, page)
+            return await self.crawler.fetch_comments(url, media_name, page, cursor=cursor)
 
         result = await self._fetch_cached(
             ("comments", platform, url, page),

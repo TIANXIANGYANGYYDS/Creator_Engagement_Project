@@ -39,6 +39,7 @@ async def fetch(
     limit: int,
     *,
     page: int,
+    comment_cursor: str | None,
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
@@ -106,8 +107,9 @@ async def fetch(
             sources.append("aweme/v1/web/aweme/detail")
 
         if include_comments:
-            cursor = "0"
-            for current_page in range(1, page + 1):
+            cursor = comment_cursor or "0"
+            start_page = page if comment_cursor is not None else 1
+            for current_page in range(start_page, page + 1):
                 comment_params = {
                     "device_platform": "webapp",
                     "aid": "6383",

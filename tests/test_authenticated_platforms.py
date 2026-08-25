@@ -84,6 +84,8 @@ def test_xiaohongshu_comments_sign_and_cursor_pagination() -> None:
 
     assert result.comments[0].comment_id == "x2"
     assert result.next_page is None
+    assert result.capabilities.root_comments == "all_public_pages"
+    assert result.capabilities.anonymous is False
     assert len(client.get_calls) == 2
     assert client.get_calls[0][0].startswith("https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?")
     assert client.get_calls[0][1]["headers"]["X-S"].startswith("XYS_")

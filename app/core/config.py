@@ -45,6 +45,14 @@ class Settings(BaseSettings):
         default=True,
         alias="STRICT_ANONYMOUS_MODE",
     )
+    xiaohongshu_session_mode: Literal["disabled", "cookie"] = Field(
+        default="disabled",
+        alias="XIAOHONGSHU_SESSION_MODE",
+    )
+    xiaohongshu_cookie: SecretStr = Field(
+        default=SecretStr(""),
+        alias="XIAOHONGSHU_COOKIE",
+    )
 
     creator_engagement_cookie: SecretStr = Field(
         default=SecretStr(""),

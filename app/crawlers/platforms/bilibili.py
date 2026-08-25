@@ -41,6 +41,7 @@ async def fetch(
     limit: int,
     *,
     page: int,
+    comment_cursor: str | None,
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
@@ -51,6 +52,7 @@ async def fetch(
             work_id.removeprefix("article:"),
             limit,
             page=page,
+            comment_cursor=comment_cursor,
             include_stats=include_stats,
             include_comments=include_comments,
         )
@@ -61,6 +63,7 @@ async def fetch(
             work_id.removeprefix("opus:"),
             limit,
             page=page,
+            comment_cursor=comment_cursor,
             include_stats=include_stats,
             include_comments=include_comments,
         )
@@ -70,6 +73,7 @@ async def fetch(
         work_id,
         limit,
         page=page,
+        comment_cursor=comment_cursor,
         include_stats=include_stats,
         include_comments=include_comments,
     )
@@ -82,6 +86,7 @@ async def fetch_video(
     limit: int,
     *,
     page: int,
+    comment_cursor: str | None,
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
@@ -110,6 +115,7 @@ async def fetch_video(
         aid = to_int(data.get("aid"))
         comments: list[EngagementComment] = []
         cursor: str | None = None
+        resume_cursor: str | None = None
         comment_source = ""
         if include_comments:
             comments_payload, comment_source = await fetch_comments(
@@ -117,10 +123,14 @@ async def fetch_video(
                 aid,
                 page,
                 limit,
+                comment_cursor=comment_cursor,
                 reply_type=1,
                 referer=f"https://www.bilibili.com/video/{actual_id}",
             )
             comments, cursor = parse_comments(comments_payload)
+            resume_cursor = (
+                comment_resume_cursor(comments_payload) if cursor is not None else None
+            )
             if not include_stats:
                 stats = EngagementStats(comments=comment_count(comments_payload))
         return EngagementResult(
@@ -139,6 +149,7 @@ async def fetch_video(
             stats=stats,
             comments=comments[:limit],
             next_cursor=cursor,
+            resume_cursor=resume_cursor,
         )
     except PlatformBlockedError as exc:
         return result_error("bilibili", url, work_id, "blocked", str(exc))
@@ -153,6 +164,7 @@ async def fetch_article(
     limit: int,
     *,
     page: int,
+    comment_cursor: str | None,
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
@@ -173,16 +185,19 @@ async def fetch_article(
 
         comments: list[EngagementComment] = []
         cursor: str | None = None
+        resume_cursor: str | None = None
         if include_comments:
             payload, comment_source = await fetch_comments(
                 crawler,
                 article_id,
                 page,
                 limit,
+                comment_cursor=comment_cursor,
                 reply_type=12,
                 referer=f"https://www.bilibili.com/read/cv{article_id}/",
             )
             comments, cursor = parse_comments(payload)
+            resume_cursor = comment_resume_cursor(payload) if cursor is not None else None
             if not include_stats:
                 stats = EngagementStats(comments=comment_count(payload))
             sources.append(comment_source)
@@ -201,6 +216,7 @@ async def fetch_article(
             stats=stats,
             comments=comments[:limit],
             next_cursor=cursor,
+            resume_cursor=resume_cursor,
         )
     except PlatformBlockedError as exc:
         return result_error("bilibili", url, article_id, "blocked", str(exc))
@@ -215,6 +231,7 @@ async def fetch_opus(
     limit: int,
     *,
     page: int,
+    comment_cursor: str | None,
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
@@ -236,6 +253,7 @@ async def fetch_opus(
         stats = parse_opus_stats(detail) if include_stats else EngagementStats()
         comments: list[EngagementComment] = []
         cursor: str | None = None
+        resume_cursor: str | None = None
         sources = ["opus __INITIAL_STATE__"]
         if include_comments:
             basic = detail.get("basic") or {}
@@ -250,10 +268,12 @@ async def fetch_opus(
                 comment_oid,
                 page,
                 limit,
+                comment_cursor=comment_cursor,
                 reply_type=reply_type,
                 referer=canonical_url,
             )
             comments, cursor = parse_comments(payload)
+            resume_cursor = comment_resume_cursor(payload) if cursor is not None else None
             if not include_stats:
                 stats = EngagementStats(comments=comment_count(payload))
             sources.append(comment_source)
@@ -272,6 +292,7 @@ async def fetch_opus(
             stats=stats,
             comments=comments[:limit],
             next_cursor=cursor,
+            resume_cursor=resume_cursor,
         )
     except PlatformBlockedError as exc:
         return result_error("bilibili", url, opus_id, "blocked", str(exc))
@@ -331,6 +352,7 @@ async def fetch_comments(
     page: int,
     limit: int,
     *,
+    comment_cursor: str | None,
     reply_type: int,
     referer: str,
 ) -> tuple[dict[str, Any], str]:
@@ -341,9 +363,10 @@ async def fetch_comments(
     try:
         nav = await crawler._get_json(NAV_URL)
         mixin_key = extract_wbi_mixin_key(nav)
-        offset = ""
+        offset = comment_cursor or ""
         payload: dict[str, Any] = {}
-        for current_page in range(1, page + 1):
+        start_page = page if comment_cursor is not None else 1
+        for current_page in range(start_page, page + 1):
             base_params = {
                 "oid": str(oid),
                 "type": str(reply_type),
@@ -444,6 +467,17 @@ def parse_comments(payload: dict[str, Any]) -> tuple[list[EngagementComment], st
     if page.get("num") and page.get("count", 0) > page.get("num", 1) * page.get("size", 1):
         return result, str(int(page.get("num", 1)) + 1)
     return result, None
+
+
+def comment_resume_cursor(payload: dict[str, Any]) -> str | None:
+    cursor = (payload.get("data") or {}).get("cursor") or {}
+    pagination_reply = cursor.get("pagination_reply") or {}
+    next_offset = (
+        pagination_reply.get("next_offset")
+        if isinstance(pagination_reply, dict)
+        else None
+    )
+    return str(next_offset) if next_offset else None
 
 
 def comment_count(payload: dict[str, Any]) -> int | None:

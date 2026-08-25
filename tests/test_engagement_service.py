@@ -198,6 +198,43 @@ def test_strict_anonymous_mode_ignores_account_credentials_and_profiles(tmp_path
     asyncio.run(service.aclose())
 
 
+def test_strict_mode_allows_only_explicit_xiaohongshu_cookie(tmp_path) -> None:
+    cookie = "a1=xhs-device; web_session=xhs-session"
+    settings = Settings(
+        _env_file=None,
+        strict_anonymous_mode=True,
+        xiaohongshu_session_mode="cookie",
+        xiaohongshu_cookie=cookie,
+        browser_fallback_enabled=False,
+        wechat_article_cookie="wap_sid2=wechat-account",
+        platform_session_dir=str(tmp_path / "sessions"),
+    )
+
+    service = EngagementService.from_settings(settings, proxy_mode="direct")
+
+    assert service.crawler._platform_cookie("xiaohongshu") == cookie
+    assert service.crawler._platform_cookie("wechat") == ""
+    assert service.crawler.platform_cookies == {"xiaohongshu": cookie}
+    assert service.crawler.xiaohongshu_cookie_enabled is True
+    asyncio.run(service.aclose())
+
+
+def test_xiaohongshu_cookie_mode_rejects_incomplete_cookie() -> None:
+    for cookie in ("", "a1=device-only", "web_session=session-only", "a1=; web_session="):
+        settings = Settings(
+            _env_file=None,
+            xiaohongshu_session_mode="cookie",
+            xiaohongshu_cookie=cookie,
+            browser_fallback_enabled=False,
+        )
+
+        with pytest.raises(ValueError, match="Cookie 字段") as exc_info:
+            EngagementService.from_settings(settings, proxy_mode="direct")
+
+        if cookie:
+            assert cookie not in str(exc_info.value)
+
+
 def test_retryable_failure_is_not_cached() -> None:
     class BlockedCrawler(FakeCrawler):
         async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:

@@ -59,6 +59,7 @@ class EngagementCrawler:
         max_protocol_attempts: int = 1,
         protocol_retry_base_seconds: float = 1,
         strict_anonymous_mode: bool = False,
+        xiaohongshu_cookie_enabled: bool = False,
         wechat_mp_app_id: str = "",
         wechat_mp_app_secret: str = "",
         wechat_mp_access_token: str = "",
@@ -93,6 +94,7 @@ class EngagementCrawler:
         self.max_protocol_attempts = max_protocol_attempts
         self.protocol_retry_base_seconds = protocol_retry_base_seconds
         self.strict_anonymous_mode = strict_anonymous_mode
+        self.xiaohongshu_cookie_enabled = xiaohongshu_cookie_enabled
         self.wechat_mp_app_id = wechat_mp_app_id.strip()
         self.wechat_mp_app_secret = wechat_mp_app_secret.strip()
         self._configured_wechat_mp_access_token = wechat_mp_access_token.strip()
@@ -159,7 +161,14 @@ class EngagementCrawler:
             result.model_dump(exclude={"comments", "next_cursor"})
         )
 
-    async def fetch_comments(self, url: str, media_name: str, page: int) -> CommentPageResult:
+    async def fetch_comments(
+        self,
+        url: str,
+        media_name: str,
+        page: int,
+        *,
+        cursor: str | None = None,
+    ) -> CommentPageResult:
         if page <= 0:
             raise ValueError("page must be greater than zero")
         result = await self._fetch(
@@ -167,15 +176,23 @@ class EngagementCrawler:
             media_name=media_name,
             limit=COMMENT_PAGE_SIZE,
             page=page,
+            comment_cursor=cursor,
             include_stats=False,
             include_comments=True,
         )
         return CommentPageResult.model_validate({
-            **result.model_dump(exclude={"stats", "next_cursor"}),
+            **result.model_dump(exclude={"stats", "next_cursor", "resume_cursor"}),
             "page": page,
             "next_page": page + 1 if result.next_cursor is not None else None,
+            "next_cursor": result.resume_cursor or result.next_cursor,
             "total_comments": result.stats.comments,
-            "capabilities": comment_capabilities(result.platform),
+            "capabilities": comment_capabilities(
+                result.platform,
+                xiaohongshu_cookie_enabled=(
+                    result.platform == "xiaohongshu"
+                    and bool(self._platform_cookie("xiaohongshu"))
+                ),
+            ),
         })
 
     async def _fetch(
@@ -185,6 +202,7 @@ class EngagementCrawler:
         media_name: str | None = None,
         limit: int,
         page: int,
+        comment_cursor: str | None = None,
         include_stats: bool,
         include_comments: bool,
     ) -> EngagementResult:
@@ -211,6 +229,7 @@ class EngagementCrawler:
                 work_id,
                 limit=limit,
                 page=page,
+                comment_cursor=comment_cursor,
                 include_stats=include_stats,
                 include_comments=include_comments,
             )
@@ -243,6 +262,7 @@ class EngagementCrawler:
         *,
         limit: int,
         page: int,
+        comment_cursor: str | None,
         include_stats: bool,
         include_comments: bool,
     ) -> EngagementResult:
@@ -257,6 +277,7 @@ class EngagementCrawler:
                         work_id,
                         limit,
                         page=page,
+                        comment_cursor=comment_cursor,
                         include_stats=include_stats,
                         include_comments=include_comments,
                     )
@@ -277,6 +298,7 @@ class EngagementCrawler:
                     work_id,
                     limit,
                     page=page,
+                    comment_cursor=comment_cursor,
                     include_stats=include_stats,
                     include_comments=include_comments,
                 )
@@ -554,7 +576,14 @@ class EngagementCrawler:
         return response
 
     def _platform_cookie(self, platform: EngagementPlatform) -> str:
-        if self.strict_anonymous_mode and platform not in {"douyin", "kuaishou"}:
+        if (
+            self.strict_anonymous_mode
+            and platform not in {"douyin", "kuaishou"}
+            and not (
+                platform == "xiaohongshu"
+                and self.xiaohongshu_cookie_enabled
+            )
+        ):
             return ""
         configured = self.platform_cookies.get(platform, "").strip()
         if configured:

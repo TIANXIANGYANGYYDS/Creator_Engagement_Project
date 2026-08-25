@@ -26,6 +26,7 @@ async def fetch(
     limit: int,
     *,
     page: int,
+    comment_cursor: str | None,
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
@@ -59,6 +60,8 @@ async def fetch(
             )
             sources.append("m.weibo.cn/statuses/show")
         if include_comments:
+            # Weibo's cursor also depends on max_id_type. Keep replaying from
+            # page 1 until both values are carried by the internal contract.
             request_cursor: str | None = None
             request_cursor_type = 0
             used_numbered_fallback = False

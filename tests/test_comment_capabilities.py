@@ -26,3 +26,14 @@ def test_root_comment_pagination_capabilities_are_truthful() -> None:
             "weibo",
         )
     )
+
+
+def test_xiaohongshu_cookie_mode_reports_authenticated_pagination() -> None:
+    capability = comment_capabilities(
+        "xiaohongshu",
+        xiaohongshu_cookie_enabled=True,
+    )
+
+    assert capability.root_comments == "all_public_pages"
+    assert capability.anonymous is False
+    assert "Cookie" in capability.note

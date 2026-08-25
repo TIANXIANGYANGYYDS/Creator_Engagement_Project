@@ -65,6 +65,7 @@ async def fetch(
     limit: int,
     *,
     page: int,
+    comment_cursor: str | None,
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
@@ -101,10 +102,11 @@ async def fetch(
                 sources.append(detail_source)
 
         if include_comments:
-            cursor = ""
+            cursor = comment_cursor or ""
             total: int | None = None
             seen_comment_ids: set[str] = set()
-            for current_page in range(1, page + 1):
+            start_page = page if comment_cursor is not None else 1
+            for current_page in range(start_page, page + 1):
                 comment_payload = await fetch_comment_page(crawler, work_id, cursor, headers)
                 page_comments = parse_comments(comment_payload.get("rootCommentsV2") or [])
                 comments = [

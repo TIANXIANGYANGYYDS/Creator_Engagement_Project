@@ -10,12 +10,14 @@ B 站和微博。微信公众号与微信视频号是两个不同的平台适配
 
 默认配置为 `STRICT_ANONYMOUS_MODE=true`，生产流程遵守以下约束：
 
-- 不需要人工登录、扫码或真实平台账号。
+- 服务本身不执行人工登录、扫码或验证码；小红书评论例外地需要部署方提供已有账号 Cookie。
 - 不接入付费数据供应商。
-- 历史账号 Cookie、公众号凭据、微信侧车和账号 Profile 均被忽略。
+- 历史账号 Cookie、公众号凭据、微信侧车和账号 Profile 均被忽略；只有显式启用的
+  `XIAOHONGSHU_SESSION_MODE=cookie` 可以注入小红书专用 Cookie。
 - 只获取一级评论正文，不获取评论下的回复正文。
 - 评论对象中的 `replies` 仅表示平台返回的回复数量，不会触发额外请求。
-- “全部评论”指匿名访客可见的全部一级评论，不包含删除、隐藏、审核折叠或仅账号可见内容。
+- “全部评论”指当前匿名访客或已配置小红书会话可见的全部一级评论，不包含删除、隐藏、审核
+  折叠或其他不可见内容。
 
 当前一级评论能力：
 
@@ -25,7 +27,7 @@ B 站和微博。微信公众号与微信视频号是两个不同的平台适配
 | 今日头条 | 可用，部分文章受 SSR 挑战影响 | 可用 | 可按 offset 翻到公开末页 |
 | 微信公众号 | 严格匿名模式不可稳定获取 | 不可用 | 不适用 |
 | 微信视频号 | 匿名公开预览可用，不含播放量 | 不可用 | 不适用 |
-| 小红书 | 带有效 `xsec_token` 的 URL 可匿名获取 | 不可用 | 不适用 |
+| 小红书 | 带有效 `xsec_token` 的 URL 可匿名获取 | 默认不可用；Cookie 模式可用 | Cookie 模式按 cursor 翻到会话可见末页 |
 | 好看视频 | 可用，未公开字段保持 `null` | 可用 | 可按页翻到公开末页 |
 | 快手 | 自动游客状态可用 | 可用 | 可按游标翻到公开末页 |
 | B 站 | 视频、专栏和 Opus 可用 | 可用 | 可翻到公开末页 |
@@ -39,10 +41,11 @@ B 站页面的评论总数可能包含评论下的回复数量，所以一级评
 
 ## 对外接口
 
-服务只保留两个数据接口：
+服务只保留两个业务数据接口，成功响应统一使用 `{"data": ...}`：
 
 ```text
 GET /api/v1/interactions?url=<URL>&media_name=<MEDIA>
+GET /api/v1/comments?url=<URL>&media_name=<MEDIA>
 GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1
 ```
 
@@ -51,6 +54,9 @@ GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1
 ```text
 GET /api/v1/health
 ```
+
+完整的请求参数、字段定义、错误响应和调用示例见 [API 接口文档](docs/API.md)。服务启动后也
+可以访问 `/docs`、`/redoc` 或 `/openapi.json` 查看 FastAPI 自动生成的接口定义。
 
 互动量与评论是两个独立业务请求，分别执行并分别缓存。一个代理 IP 可以在有效期内承载多个
 HTTP 请求；复用同一个 IP 不等于把互动量和评论合并成一次上游请求。
@@ -70,51 +76,72 @@ haokan / kuaishou / bilibili / weibo
 互动量：
 
 ```bash
-curl --get 'http://127.0.0.1:8200/api/v1/interactions' \
+curl --get 'http://39.106.202.228:8200/api/v1/interactions' \
   --data-urlencode 'url=<内容 URL>' \
   --data-urlencode 'media_name=抖音'
 ```
 
-一级评论第 1 页：
+全部可获取的一级评论：
 
 ```bash
-curl --get 'http://127.0.0.1:8200/api/v1/comments' \
+curl --get 'http://39.106.202.228:8200/api/v1/comments' \
+  --data-urlencode 'url=<内容 URL>' \
+  --data-urlencode 'media_name=抖音'
+```
+
+只获取一级评论第 1 页：
+
+```bash
+curl --get 'http://39.106.202.228:8200/api/v1/comments' \
   --data-urlencode 'url=<内容 URL>' \
   --data-urlencode 'media_name=抖音' \
   --data-urlencode 'page=1'
 ```
 
-评论页固定最多返回 20 条。响应中的 `next_page` 不为空时，继续请求对应页码。
+不传 `page` 时，服务从第 1 页顺序获取到当前可见末页、按评论 ID 去重后一次返回。传入
+`page=N` 时只获取第 N 页，每页最多 20 条，不包含前面页面。默认全量过程中如果深页触发
+平台风控，返回此前已经验证的数据；如果第一页就不可用则返回 HTTP 502。默认全量请求耗时
+随评论页数增加，下游需要固定延迟时应显式传入 `page`。
 
 ### 响应语义
 
-互动量响应主要字段：
+两个业务接口统一使用最小 `data` 外壳。互动量响应：
 
-```text
-platform / canonical_url / work_id / stats / coverage / reason / source
+```json
+{
+  "data": {
+    "views": 100,
+    "likes": 20,
+    "comments": 5,
+    "shares": 2,
+    "favorites": 3,
+    "coins": null,
+    "danmaku": null,
+    "reposts": null,
+    "recommendations": null
+  }
+}
 ```
 
-一级评论响应主要字段：
+评论响应：
 
-```text
-platform / canonical_url / work_id / page / comments / next_page /
-total_comments / capabilities / coverage / reason / source
+```json
+{
+  "data": [
+    {
+      "comment_id": "123",
+      "author": "用户昵称",
+      "text": "一级评论正文",
+      "created_at": "2026-08-25T03:20:31Z",
+      "likes": 2,
+      "replies": 1
+    }
+  ]
+}
 ```
 
-`capabilities.root_comments` 的可能值：
-
-- `all_public_pages`：可以按当前匿名协议翻到公开结束位置。
-- `paged_until_blocked`：可以翻多页，但深页可能被平台拦截。
-- `first_public_page`：只能稳定获取公开第一页；当前没有平台使用该状态。
-- `unavailable`：严格匿名模式下不能获取评论正文。
-
-`coverage` 的可能值：
-
-- `complete`：当前响应可以完整说明本页或明确的空结果。
-- `partial`：返回了可验证数据，但字段、可见范围或平台口径不完整。
-- `blocked`：验证码、登录挑战、频控或其他平台拒绝。
-- `failed`：网络、协议或解析失败。
-- `unsupported`：当前约束下没有可验证的数据来源。
+采集来源、覆盖状态、重试次数和能力说明仍保留在内部结果与日志中，不再要求下游消费。
+参数或 URL 不合法返回 HTTP 422；没有任何可用数据、平台拦截或协议失败返回 HTTP 502。
 
 ## 安装和启动
 
@@ -139,6 +166,10 @@ conda run -n MyAgent uvicorn app.api.app:create_app \
   --factory --host 0.0.0.0 --port 8200
 ```
 
+`0.0.0.0` 是服务端监听地址，调用方不能把它当作目标地址。当前公网调用地址为
+`http://39.106.202.228:8200`，同一内网也可以使用 `http://10.0.0.45:8200`。TCP 8200 已
+实测可从公网访问；当前接口没有业务鉴权，建议在云安全组中只允许下游服务器的来源 IP。
+
 也可以直接使用 CLI：
 
 ```bash
@@ -155,6 +186,8 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' B站 --page 1
 | 配置项 | 默认值 | 作用 |
 |---|---:|---|
 | `STRICT_ANONYMOUS_MODE` | `true` | 禁止复用账号 Cookie、凭据、侧车和历史账号 Profile |
+| `XIAOHONGSHU_SESSION_MODE` | `disabled` | 设为 `cookie` 时仅放行小红书专用会话 |
+| `XIAOHONGSHU_COOKIE` | 空 | 小红书 Cookie Secret，必须包含非空 `a1` 和 `web_session` |
 | `PROXY_MODE` | `prefer` | 有代理配置时优先代理，无代理时允许直连 |
 | `PROXY_51_API_URL` | 空 | Stock 项目同源的 51 代理供应接口 |
 | `PROXY_POOL_SIZE` | `4` | 代理池目标数量 |
@@ -181,8 +214,20 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' B站 --page 1
 .local/platform-sessions/anonymous/<platform>.json
 ```
 
-公众号、微信视频号和小红书评论不会通过历史账号 Profile 或浏览器登录绕过严格匿名边界。
-抖音签名、B 站 WBI 密钥以及快手短期游客状态均在运行时生成，不应硬编码到源码或日志。
+公众号和微信视频号评论不会通过历史账号 Profile 或浏览器登录绕过严格匿名边界。小红书只
+接受 `.local/env/.env` 中显式提供的 Cookie，不会启动浏览器模拟登录；Cookie 只发送给
+`edith.xiaohongshu.com` 评论接口，且不会出现在日志、错误原因或 API 响应中。抖音签名、
+B 站 WBI 密钥以及快手短期游客状态均在运行时生成，不应硬编码到源码或日志。
+
+启用小红书评论：
+
+```dotenv
+XIAOHONGSHU_SESSION_MODE="cookie"
+XIAOHONGSHU_COOKIE="a1=<设备会话>; web_session=<账号会话>; ..."
+```
+
+评论 URL 仍须带当前有效的 `xsec_token`。Cookie 失效后接口会返回明确失败状态，服务不会
+通过扫码、短信、验证码或浏览器自动登录恢复账号会话。
 
 ## 项目结构
 
@@ -214,7 +259,7 @@ xiaohongshu.py / haokan.py / kuaishou.py / bilibili.py / weibo.py
 当前全量自动化结果：
 
 ```text
-173 passed
+178 passed
 ruff check app tests: All checks passed
 ```
 
@@ -228,6 +273,7 @@ conda run -n MyAgent python -m compileall -q app tests
 
 ## 详细文档
 
+- [API 接口文档](docs/API.md)
 - [九个平台独立执行流程](docs/PLATFORM_FLOWS.md)
 - [协议能力矩阵](docs/PROTOCOL_MATRIX.md)
 - [浏览器兜底边界](docs/BROWSER_FALLBACK.md)

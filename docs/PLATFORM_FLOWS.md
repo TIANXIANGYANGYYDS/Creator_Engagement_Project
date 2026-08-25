@@ -9,12 +9,13 @@ Camoufox 兜底。互动量和评论是两条独立接口，也分别执行上�
 GET /api/v1/interactions?url=...&media_name=...
   -> include_stats=true, include_comments=false
 
-GET /api/v1/comments?url=...&media_name=...&page=N
+GET /api/v1/comments?url=...&media_name=...
   -> include_stats=false, include_comments=true
 ```
 
-评论接口只返回一级评论正文，不会继续展开评论下的回复。一级响应中的 `capabilities` 明确
-说明该平台是全公开分页、可翻多页但可能被拦截、仅第一页还是不可用。
+评论接口只返回一级评论正文，不会继续展开评论下的回复。不传 `page` 时自动翻到当前可见
+末页并合并数据；传 `page=N` 时只返回第 N 页。对外响应统一为 `{"data": ...}`，覆盖状态和
+分页能力保留在内部采集结果与日志中。
 
 只有接口类型、媒体、URL 和页码都相同的重复请求才会合并任务并命中 120 秒缓存。两个外部
 接口不会互相冒充结果；但某个平台为补齐互动中的“评论总数”时，内部可以调用评论总数
@@ -106,18 +107,21 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 
 代码：`app/crawlers/platforms/xiaohongshu.py`
 
-当前生产只启用匿名互动量。评论正文需要账号 `web_session`，不符合零真实账号约束，
-因此 `capabilities` 标为 `unavailable`；下列签名路径只作历史兼容说明。
+默认只启用匿名互动量。部署方显式配置 `XIAOHONGSHU_SESSION_MODE=cookie` 和包含非空
+`a1/web_session` 的 `XIAOHONGSHU_COOKIE` 后，评论能力切换为 `all_public_pages`；服务不会
+启动浏览器模拟登录或自动获取账号会话。
 
 - 互动量：使用 URL 中当前有效的 `xsec_token` 匿名直访笔记页，缺少时自动补
   `xsec_source=pc_feed`，从 SSR `noteDetailMap` 解析点赞、收藏、评论和分享；严格不携带
   评论 Cookie。真实百测为 1 GET/次、100/100 有数据。
 - 评论：使用 `xhshow` 为 `/api/sns/web/v2/comment/page` 动态生成完整签名头，按 cursor
   遍历到指定页。旧 `XYS_` 被 HTTP 406 拒绝时自动重试 `XYW_`。
+- Cookie 隔离：评论 Cookie 只发送到 `edith.xiaohongshu.com`；互动 SSR 请求不带评论
+  Cookie。配置缺少 `a1` 或 `web_session` 时服务启动失败，错误只列字段名。
 - 失败处理：缺/过期 token 是 URL 本身的能力边界；匿名 SSR 无目标数据时直接返回明确状态，
   不再启动高成本浏览器或把同一固定出口无意义重试三次。默认 `prefer` 模式绕过已实测不适合
   此路径的代理；只有调用方明确指定 `required` 时才使用代理并按语义失败换出口。
-- 会话边界：互动量无需账号；评论仍需要可用 `web_session` 与有效 `xsec_token`。SSR HTML
+- 会话边界：互动量无需账号；评论需要调用方提供的有效 `web_session` 与 URL `xsec_token`。SSR HTML
   没有评论正文，因此互动量和评论必须保持两个独立上游请求。
 
 ## 好看视频
