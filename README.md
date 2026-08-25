@@ -1,201 +1,239 @@
 # Creator Engagement Project
 
-独立的协议优先 URL 互动量和公开评论采集项目，与 `Stock_Project` 无代码依赖。
-当前运行环境为 `MyAgent`（Python 3.13）。项目采用 Stock_Project 同类的
-`app/core`、`app/crawlers`、`app/services`、`app/api`、`app/models`、`tests`
-分层；Mongo、调度器和 worker 目录先作为后续持久化/订阅功能的扩展位。
+根据公开内容 URL 获取互动量和一级评论的独立项目，与 `Stock_Project` 无代码依赖。当前部署
+运行于 `MyAgent`（Python 3.13.12），采用协议优先、浏览器兜底、代理池复用和企业级重试。
 
-## 项目结构
+项目当前支持九个渠道：抖音、今日头条、微信公众号、微信视频号、小红书、好看视频、快手、
+B 站和微博。微信公众号与微信视频号是两个不同的平台适配器。
 
-统一接口和九个平台实现已经分开。微信公众号与微信视频号是两个独立渠道。调用链保持为：
+## 当前业务边界
+
+默认配置为 `STRICT_ANONYMOUS_MODE=true`，生产流程遵守以下约束：
+
+- 不需要人工登录、扫码或真实平台账号。
+- 不接入付费数据供应商。
+- 历史账号 Cookie、公众号凭据、微信侧车和账号 Profile 均被忽略。
+- 只获取一级评论正文，不获取评论下的回复正文。
+- 评论对象中的 `replies` 仅表示平台返回的回复数量，不会触发额外请求。
+- “全部评论”指匿名访客可见的全部一级评论，不包含删除、隐藏、审核折叠或仅账号可见内容。
+
+当前一级评论能力：
+
+| 平台 | 互动量 | 一级评论正文 | 一级评论分页 |
+|---|---|---|---|
+| 抖音 | 匿名协议可用 | 可用 | 可翻到公开末游标 |
+| 今日头条 | 可用，部分文章受 SSR 挑战影响 | 可用 | 可按 offset 翻到公开末页 |
+| 微信公众号 | 严格匿名模式不可稳定获取 | 不可用 | 不适用 |
+| 微信视频号 | 匿名公开预览可用，不含播放量 | 不可用 | 不适用 |
+| 小红书 | 带有效 `xsec_token` 的 URL 可匿名获取 | 不可用 | 不适用 |
+| 好看视频 | 可用，未公开字段保持 `null` | 可用 | 可按页翻到公开末页 |
+| 快手 | 自动游客状态可用 | 可用 | 可按游标翻到公开末页 |
+| B 站 | 视频、专栏和 Opus 可用 | 可用 | 可翻到公开末页 |
+| 微博 | 访客公开字段可用 | 可用 | 可翻多页，但不能保证到底 |
+
+当前没有固定“只能获取第一页”的平台。微博已经验证能够获取第二页，但更深页可能触发
+`ok=-100`、登录跳转或风控，因此不能归为“仅第一页”，也不能承诺全部。
+
+B 站页面的评论总数可能包含评论下的回复数量，所以一级评论行数少于 `total_comments` 不一定
+表示漏页。B 站直播不在业务范围内，`live.bilibili.com` 会在请求上游前被拒绝。
+
+## 对外接口
+
+服务只保留两个数据接口：
 
 ```text
-app/api                 HTTP 参数和响应
-  -> app/services       业务服务
-  -> app/crawlers/engagement.py
-                         URL 校验、平台路由、浏览器兜底判定
-  -> app/crawlers/platforms/
-       douyin.py         抖音协议流程
-       toutiao.py        头条协议流程
-       wechat.py         公众号协议流程
-       wechat_channels.py 视频号公开分享流程
-       xiaohongshu.py    小红书协议和签名流程
-       haokan.py         好看协议流程
-       kuaishou.py       快手协议流程
-       bilibili.py       B 站协议和 WBI 签名流程
-       weibo.py          微博协议流程
-       registry.py       媒体名称和 URL 识别
-       common.py         数值、时间和失败结果等无平台状态工具
-  -> app/crawlers/browser_fallback.py
-                         协议失败后的统一浏览器生命周期和响应监听
+GET /api/v1/interactions?url=<URL>&media_name=<MEDIA>
+GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1
 ```
 
-新增或调整某个平台时，只修改对应的 `platforms/<media>.py`；统一 API、服务层和其他
-平台不需要跟着变化。九个平台各自的互动量、评论、分页、会话和兜底流程见
-[`docs/PLATFORM_FLOWS.md`](docs/PLATFORM_FLOWS.md)。
+另有健康检查：
 
-## 运行
+```text
+GET /api/v1/health
+```
 
-首次使用时，把当前项目安装到 `MyAgent`，这样模块和两个命令行入口使用的是同一份依赖：
+互动量与评论是两个独立业务请求，分别执行并分别缓存。一个代理 IP 可以在有效期内承载多个
+HTTP 请求；复用同一个 IP 不等于把互动量和评论合并成一次上游请求。
+
+`media_name` 的规范值为：
+
+```text
+douyin / toutiao / wechat / wechat_channels / xiaohongshu /
+haokan / kuaishou / bilibili / weibo
+```
+
+接口也接受抖音、头条、公众号、微信视频号、小红书、好看、快手、B站和微博等中文名称。
+服务会同时校验 URL 平台和 `media_name`；两者不一致时返回 HTTP 422。
+
+### 调用示例
+
+互动量：
 
 ```bash
-conda run -n MyAgent python -m pip install '.[browser]'
+curl --get 'http://127.0.0.1:8200/api/v1/interactions' \
+  --data-urlencode 'url=<内容 URL>' \
+  --data-urlencode 'media_name=抖音'
 ```
 
-随后可在项目根目录执行模块入口：
+一级评论第 1 页：
 
 ```bash
-conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement interactions '<内容 URL>' bilibili
-conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement comments '<内容 URL>' B站 --page 1
+curl --get 'http://127.0.0.1:8200/api/v1/comments' \
+  --data-urlencode 'url=<内容 URL>' \
+  --data-urlencode 'media_name=抖音' \
+  --data-urlencode 'page=1'
 ```
 
-也可以使用安装后生成的 `creator-engagement` 命令；若代码有更新，重新执行上述安装命令：
+评论页固定最多返回 20 条。响应中的 `next_page` 不为空时，继续请求对应页码。
+
+### 响应语义
+
+互动量响应主要字段：
+
+```text
+platform / canonical_url / work_id / stats / coverage / reason / source
+```
+
+一级评论响应主要字段：
+
+```text
+platform / canonical_url / work_id / page / comments / next_page /
+total_comments / capabilities / coverage / reason / source
+```
+
+`capabilities.root_comments` 的可能值：
+
+- `all_public_pages`：可以按当前匿名协议翻到公开结束位置。
+- `paged_until_blocked`：可以翻多页，但深页可能被平台拦截。
+- `first_public_page`：只能稳定获取公开第一页；当前没有平台使用该状态。
+- `unavailable`：严格匿名模式下不能获取评论正文。
+
+`coverage` 的可能值：
+
+- `complete`：当前响应可以完整说明本页或明确的空结果。
+- `partial`：返回了可验证数据，但字段、可见范围或平台口径不完整。
+- `blocked`：验证码、登录挑战、频控或其他平台拒绝。
+- `failed`：网络、协议或解析失败。
+- `unsupported`：当前约束下没有可验证的数据来源。
+
+## 安装和启动
+
+项目不使用 Python 3.8。安装和运行统一使用 `MyAgent`：
 
 ```bash
-conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
+cd /home/txy/Agent_first/Creator_Engagement_Project
+conda run -n MyAgent python -m pip install '.[browser,test]'
 ```
 
-抖音默认会自行初始化第一方访客 `ttwid`、生成随机 `msToken` 并用纯 Python 计算
-`a_bogus`，不要求登录。可选的调用方 Cookie 仍可通过 `CREATOR_ENGAGEMENT_COOKIE`
-注入；为兼容 Stock_Project 现有环境，也接受 `DOUYIN_SESSION_COOKIE` 作为回退变量名。
-该 Cookie 只会注入抖音域名，不会污染快手、小红书等平台的游客会话。
-
-快手公开作品默认复用本地游客设备状态走纯协议详情和评论接口，状态失效时才由浏览器重新
-生成，不需要账号。小红书互动对带当前有效 `xsec_token` 的 URL 使用匿名 SSR，最新百测
-100/100；评论则单独复用调用方自己的平台会话。项目不接入付费数据供应商；小红书评论
-分页和任意第三方公众号文章的互动/评论仍受各自会话边界约束。公众号现已提供纯协议
-Cookie-only 路径：在 `.local/env/.env` 配置 `WECHAT_ARTICLE_COOKIE` 后，文章 HTML、
-`getappmsgext` 和 `appmsg_comment` 会在同一 Cookie/IP 租约中请求，不启动浏览器或微信
-客户端；配置与字段边界见
-[`docs/WECHAT_COOKIE_PROTOCOL.md`](docs/WECHAT_COOKIE_PROTOCOL.md)。旧的本地微信会话桥
-只保留为可选兼容模块。视频号公开分享链接的点赞、评论总数、转发和收藏可匿名直连获取；
-评论正文可选接入调用方 Windows 微信客户端侧车，主服务器不保存微信会话。部署方式见
-[`docs/WECHAT_CHANNELS_BRIDGE.md`](docs/WECHAT_CHANNELS_BRIDGE.md)。九个平台都可以在
-带桌面环境的本机建立独立 Profile：
+创建本地配置：
 
 ```bash
-conda run -n MyAgent creator-engagement-login <platform>
+mkdir -p .local/env
+cp .env.example .local/env/.env
 ```
-
-`platform` 可选 `douyin / toutiao / wechat / wechat_channels / xiaohongshu / haokan /
-kuaishou / bilibili / weibo`。需要在具体内容页完成登录或安全验证时传入同平台 URL：
-
-```bash
-conda run -n MyAgent creator-engagement-login xiaohongshu --url '<小红书笔记 URL>'
-```
-
-登录完成后按 Enter，状态只写入 `.local/browser-profiles/<platform>` 和
-`.local/platform-sessions/<platform>.json`。公众号还要求文章本身开启评论；微信网页会话
-不能保证等价于文章会话 Cookie；当前公众号生产路径不会自动进入浏览器兜底。
-
-自有公众号可在 `.local/env/.env` 配置 `WECHAT_MP_APP_ID` 与
-`WECHAT_MP_APP_SECRET`，或注入已有 `WECHAT_MP_ACCESS_TOKEN`。服务通过微信
-`stable_token` 缓存令牌，互动量使用当前 `getarticletotaldetail`，评论使用官方
-`comment/list`；该授权只能读取凭据所属公众号，不能读取任意第三方公众号文章。
-不能使用官方授权时优先配置 `WECHAT_ARTICLE_COOKIE`。Cookie 不完整或过期时接口会返回
-缺失字段名或 `no session`，不会输出 Cookie 值，也不会调用浏览器冒充成功。
 
 启动 API：
 
 ```bash
-conda run -n MyAgent uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8200
+conda run -n MyAgent uvicorn app.api.app:create_app \
+  --factory --host 0.0.0.0 --port 8200
 ```
 
-## 配置和代理池
+也可以直接使用 CLI：
 
-项目从 `.local/env/.env` 读取部署配置；`.env.example` 已列出 Stock_Project 中可复用的
-LLM、Mongo、51 代理 API 和日志参数。当前代理模式：
+```bash
+conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
+conda run -n MyAgent creator-engagement comments '<内容 URL>' B站 --page 1
+```
 
-- `PROXY_MODE=direct`：只使用本机直连。
-- `PROXY_MODE=prefer`：配置 51 代理时通常使用 `AsyncDailiProxyPool`；小红书互动按百测结果
-  自动直连，其他路径没有代理时允许直连。
-- `PROXY_MODE=required`：必须取得代理，否则请求直接失败，不会静默直连。
+增加 `--direct` 可以让单次 CLI 调用绕过代理配置。
 
-51 代理池沿用 Stock_Project 的 3 分钟 IP TTL、批量补池、单 IP 并发上限、失败淘汰、
-过期排空和供应商 API 限流机制。一次业务接口内部的预热和数据请求可共享代理租约，但每个
-HTTP 调用仍单独计入上游请求数；互动量接口和评论接口分别执行、分别缓存。
+## 配置、代理和稳定性
 
-默认启用 `RELIABILITY_MODE=enterprise`：最多 3 次协议尝试，HTTP 200 但业务空包/验证码
-也会淘汰当前代理；失败结果不写入 120 秒缓存。服务最多同时运行 4 个采集任务、1 个浏览器
-任务，代理池维护 4 个 IP 且每个 IP 单并发。小红书、快手、公众号和视频号另有平台级串行与启动
-间隔，避免全局 4 并发直接压到单个平台。相同接口、相同 URL 和相同页码的并发重复请求会
-合并，成功或有效部分结果缓存 120 秒（最多 1000 项）。配置项、真实内存测试和 51 代理成本公式见
-[`docs/COST_AND_CAPACITY.md`](docs/COST_AND_CAPACITY.md)。
+运行配置读取自 `.local/env/.env`，完整模板见 `.env.example`。当前主要配置：
 
-运行时以最终获取数据为验收标准：先走成本更低的协议请求；协议返回
-`unsupported/blocked/failed`、空响应或缺少目标字段时，如果
-`BROWSER_FALLBACK_ENABLED=true`，服务会使用 MyAgent 中的 Camoufox 持久化浏览器重新
-访问页面并监听真实 `document/xhr/fetch` 响应。每个平台的 Profile 位于
-`.local/browser-profiles/<platform>`，动态 Cookie 和签名由浏览器生成，不会硬编码。
-实现细节和挑战边界见 [`docs/BROWSER_FALLBACK.md`](docs/BROWSER_FALLBACK.md)。
+| 配置项 | 默认值 | 作用 |
+|---|---:|---|
+| `STRICT_ANONYMOUS_MODE` | `true` | 禁止复用账号 Cookie、凭据、侧车和历史账号 Profile |
+| `PROXY_MODE` | `prefer` | 有代理配置时优先代理，无代理时允许直连 |
+| `PROXY_51_API_URL` | 空 | Stock 项目同源的 51 代理供应接口 |
+| `PROXY_POOL_SIZE` | `4` | 代理池目标数量 |
+| `PROXY_MAX_CONCURRENCY` | `1` | 单个代理的最大并发 |
+| `RELIABILITY_MODE` | `enterprise` | 启用协议重试、语义失败换 IP 和平台保护 |
+| `PROTOCOL_MAX_ATTEMPTS` | `3` | 企业模式最大协议尝试次数 |
+| `COLLECTION_MAX_CONCURRENCY` | `4` | 全局采集并发 |
+| `BROWSER_FALLBACK_ENABLED` | `true` | 协议不可用时允许浏览器兜底 |
+| `BROWSER_MAX_CONCURRENCY` | `1` | 浏览器最大并发，避免服务器内存被打满 |
+| `ENGAGEMENT_CACHE_TTL_SECONDS` | `120` | 成功结果缓存时间 |
+| `ENGAGEMENT_CACHE_MAX_ENTRIES` | `1000` | 最大缓存项数 |
 
-接口：
+代理池支持批量补池、IP TTL、单 IP 并发限制、失败淘汰和供应商 API 限流。一次业务调用内部的
+预热和数据请求可以共用代理租约，但每个 HTTP 调用仍分别计入上游请求量。
 
-- `GET /api/v1/health`
-- `GET /api/v1/interactions?url=<URL>&media_name=<MEDIA>`
-- `GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1`
+默认企业模式最多进行 3 次协议尝试。HTTP 200 空包、验证码或缺少目标字段不会被当作成功；
+可重试的语义失败会淘汰当前代理。相同接口、相同 URL、相同页码的并发请求会合并，成功或
+有效部分结果缓存 120 秒。
 
-`media_name` 的规范值为 `douyin / toutiao / wechat / wechat_channels / xiaohongshu /
-haokan / kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微信、视频号/微信视频号、
-小红书、好看、快手、B站、微博等中文名称。服务会同时识别 URL 所属平台；如果 URL 与
-`media_name` 不一致，接口返回 HTTP 422，不会把请求转给错误的平台适配器。
+浏览器兜底默认限制为单并发。严格匿名模式下，浏览器和游客状态写入：
 
-## 能力范围
+```text
+.local/browser-profiles/anonymous/<platform>
+.local/platform-sessions/anonymous/<platform>.json
+```
 
-默认 `STRICT_ANONYMOUS_MODE=true`。该模式会忽略历史账号 Cookie、公众号凭据、微信侧车和
-原账号 Profile，并把自动游客状态隔离到 `anonymous/` 子目录；不要在生产环境关闭它。
+公众号、微信视频号和小红书评论不会通过历史账号 Profile 或浏览器登录绕过严格匿名边界。
+抖音签名、B 站 WBI 密钥以及快手短期游客状态均在运行时生成，不应硬编码到源码或日志。
 
-互动量接口返回 `platform / work_id / stats / coverage / reason`；一级评论接口返回
-`platform / work_id / page / comments / next_page / total_comments / capabilities / coverage / reason`。
-评论页固定最多 20 条，只返回一级评论正文；每条评论的 `replies` 是回复数量，不会展开回复
-正文。`coverage`
-不是装饰字段：`complete` 表示当前接口可完整说明本页，`partial` 表示只能拿到公开可见
-部分，`blocked` 表示平台拒绝请求或进入验证码/登录挑战，`unsupported` 表示协议和浏览器
-都没有捕获到可验证的目标数据。
+## 项目结构
 
-下表采用当前部署硬约束：不允许人工登录、扫码或真实账号。历史上带 Cookie、官方自有号
-凭据或微信侧车的代码只保留兼容，不计入“可用”。“全公开页”表示按平台游标翻到匿名访客
-可见的结束位置，不含已删、隐藏、审核折叠内容。
+```text
+app/api/                         HTTP 路由和参数校验
+app/core/                        配置与日志
+app/models/engagement.py         统一响应模型
+app/services/engagement_service.py
+                                 缓存、并发、代理和业务服务
+app/crawlers/engagement.py       URL 校验、平台路由和浏览器兜底
+app/crawlers/comment_capabilities.py
+                                 九个平台一级评论能力定义
+app/crawlers/platforms/          每个平台独立协议实现
+app/crawlers/browser_fallback.py Camoufox 浏览器兜底
+app/crawlers/proxy_provider.py   代理池和限流
+tests/                           自动化测试
+docs/                            流程、协议、成本和测试报告
+```
 
-| 平台 | 一级评论分页能力 | 零账号结论 |
-|---|---|---|
-| B 站 | 全公开页 | 视频、专栏和 Opus 匿名纯协议可用；直播 URL 已拒绝 |
-| 好看 | 全公开页 | `comment/get` 按 `pn` 翻到公开末页 |
-| 快手 | 全公开页 | 自动游客验证状态，不使用真实账号；验证码时返回 `blocked` |
-| 抖音 | 全公开页 | 匿名签名协议按游标翻页 |
-| 头条 | 全公开页 | 匿名 `tab_comments` 按 offset 翻页 |
-| 微博 | 可翻多页，不保证到底 | 第 2 页已实测；更深页可能被登录或风控拦截 |
-| 小红书 | 不可用 | 互动量仍可匿名；评论签名端点需要账号会话，严格模式关闭 |
-| 公众号 | 不可用 | 匿名页不能稳定取得任意文章精选评论正文 |
-| 微信视频号 | 不可用 | 匿名预览只给评论总数；正文依赖真实微信客户端会话，严格模式关闭 |
+平台文件相互独立：
 
-当前没有一个平台被标为“固定只能获取第一页”。微博能获取多页，但不能承诺到末页；因此
-不能把它归为“仅第一页”，也不能归为“全部”。
+```text
+douyin.py / toutiao.py / wechat.py / wechat_channels.py /
+xiaohongshu.py / haokan.py / kuaishou.py / bilibili.py / weibo.py
+```
 
-真实输入 URL 同时兼容头条 `/i{id}`、快手 `c.kuaishou.com/fw/photo/{id}`、微博桌面端
-`/用户ID/base62短ID`，以及 B 站 `/read/cv{id}`、`/read/mobile?id=...`、`/opus/{id}`。
-这些变体只在路由层规范化，平台采集器仍校验目标 ID，不会把用户 ID 或推荐内容当成目标作品；
-`live.bilibili.com` 会在请求上游前拒绝。
+## 验证
 
-不要把浏览器抓到的临时 Cookie、`x-s`、`hk_sign` 或其他签名硬编码到服务代码。抖音的
-访客状态由运行时向第一方初始化，`a_bogus` 由本地算法按请求即时计算；若协议受风控，
-再进入浏览器兜底。B 站评论的 WBI 密钥每次从公开导航接口动态读取，不依赖浏览器或登录
-Cookie。
+当前全量自动化结果：
 
-逐项证据和“无法稳定获取”的阻断原因见 [`docs/PROTOCOL_MATRIX.md`](docs/PROTOCOL_MATRIX.md)，
-代码入口和执行顺序见 [`docs/PLATFORM_FLOWS.md`](docs/PLATFORM_FLOWS.md)。
-本轮自动化、API、CLI、代理和九个平台真实 URL 的验证结果见
-[`docs/TEST_REPORT.md`](docs/TEST_REPORT.md)。
+```text
+173 passed
+ruff check app tests: All checks passed
+```
 
-头条评论接口已验证：`/article/v4/tab_comments/` 使用 `aid/app_name/offset/count/group_id/item_id` 即可返回 `err_no=0`、`total_number`、`has_more` 和评论列表，不需要把浏览器请求里的 `_signature` 写入代码。
+本地复验：
 
-快手不能用“GraphQL 返回 HTTP 200”作为成功判据。项目复用本地游客状态直接调用
-`visionVideoDetail` 和 `/rest/v/photo/comment/list`，REST 受限时尝试 GraphQL 评论通道，
-详情传输失败时解析目标页 `__APOLLO_STATE__`；所有结果必须严格匹配 `photoId`。游客状态
-自然过期后才由浏览器重新生成，不把 `kww/kwssectoken` 写入代码。
+```bash
+conda run -n MyAgent pytest -q
+conda run -n MyAgent ruff check app tests
+conda run -n MyAgent python -m compileall -q app tests
+```
 
-小红书互动量使用 URL 中的当前有效 `xsec_token` 匿名读取笔记 SSR，自动补
-`xsec_source=pc_feed`，每次只有 1 个 GET，且不会混入评论 Cookie。评论接口是独立的
-`api/sns/web/v2/comment/page`：使用 `xhshow==0.2.0` 和调用方自己的 `web_session` 动态
-签名并按游标请求；旧 `XYS_` 返回 406 时自动重试 `XYW_`。游客 UI 阻止继续翻页时，项目
-不会把第一页冒充成第二页。
+## 详细文档
+
+- [九个平台独立执行流程](docs/PLATFORM_FLOWS.md)
+- [协议能力矩阵](docs/PROTOCOL_MATRIX.md)
+- [浏览器兜底边界](docs/BROWSER_FALLBACK.md)
+- [成本、容量与服务器保护](docs/COST_AND_CAPACITY.md)
+- [HTML 成本单](docs/ENGAGEMENT_COST_SHEET.html)
+- [真实测试报告](docs/TEST_REPORT.md)
+
+历史账号、公众号 Cookie、官方自有号和微信客户端侧车相关文档仅用于兼容代码维护；默认严格
+匿名部署不会启用这些能力，也不应把它们计入当前生产成功率。
