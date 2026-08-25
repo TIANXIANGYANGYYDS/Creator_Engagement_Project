@@ -13,6 +13,9 @@ GET /api/v1/comments?url=...&media_name=...&page=N
   -> include_stats=false, include_comments=true
 ```
 
+评论接口只返回一级评论正文，不会继续展开评论下的回复。一级响应中的 `capabilities` 明确
+说明该平台是全公开分页、可翻多页但可能被拦截、仅第一页还是不可用。
+
 只有接口类型、媒体、URL 和页码都相同的重复请求才会合并任务并命中 120 秒缓存。两个外部
 接口不会互相冒充结果；但某个平台为补齐互动中的“评论总数”时，内部可以调用评论总数
 端点，其返回的评论正文不会写入互动响应。一个代理 IP 可以承载多次 HTTP 请求；共用代理
@@ -28,6 +31,7 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 - 互动量：请求 `/aweme/v1/web/aweme/detail/`，解析播放、点赞、评论、分享、收藏等字段。
 - 评论：从 cursor=0 开始请求 `/aweme/v1/web/comment/list/`，按公开 `page` 顺序遍历游标；
   访客实测首屏 20 条、总数 2909。
+- 评论对象保留平台返回的回复数量，但不会请求回复正文。
 - 失败处理：HTTP 200 空包不算成功；标记 `blocked` 后进入目标作品页浏览器兜底。
 - 会话边界：访客 `ttwid` 只保留在当前请求/客户端生命周期；可选调用方 Cookie 仍只注入
   抖音域，临时状态不会写入源码或日志。
@@ -38,12 +42,16 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 
 - 互动量：读取文章 HTML 中的 SSR `itemCounter/likeData`。
 - 评论：请求 `/article/v4/tab_comments/`，公开页码转换为 `offset`。
+- 评论对象保留平台返回的回复数量，但不会请求回复正文。
 - 失败处理：SSR 没有计数时进入浏览器兜底；评论接口异常时返回明确失败原因。
 - 会话边界：当前评论路径无需账号，互动字段可能受页面 JSVM 挑战影响。
 
 ## 微信公众号
 
 代码：`app/crawlers/platforms/wechat.py`
+
+当前生产硬约束禁止人工操作和真实账号，因此评论正文统一返回 `unsupported`；下列 Cookie/
+官方接口是历史兼容路径，不计入严格模式可用能力。
 
 - 任意公众号生产路径：调用方把完整文章 Cookie Header 写入本机
   `WECHAT_ARTICLE_COOKIE`。适配器从 Cookie、URL 与 `window.cgiDataNew` 合并
@@ -73,23 +81,33 @@ GET /api/v1/comments?url=...&media_name=...&page=N
 
 代码：`app/crawlers/platforms/wechat_channels.py`
 
+当前生产只启用匿名预览互动量；依赖真实微信客户端的评论侧车关闭，评论正文返回
+`unsupported`。下列侧车流程只作历史实现说明。
+
 - URL：独立识别 `weixin.qq.com/sph/{shortUri}`、公开预览 `pages/sph?id=...`，以及带
   `eid/token` 的预览链接；不会再路由到微信公众号适配器。
 - 互动量：一次匿名 POST 请求腾讯公开预览端点
   `/finder-preview/api/feed/get_feed_info`，返回页面展示的点赞、评论总数、转发和收藏。
   `万/W/亿/+` 按公开显示值转换为整数；带 `+` 时仅代表可验证下限，因此标记 `partial`。
-- 评论：同一个公开预览响应只能取得评论总数，不含评论正文。评论业务接口仍独立执行一次
-  上游请求，返回 `unsupported`、准确总数和原因，不把总数伪装成评论行。
+- 评论：配置 `WECHAT_CHANNELS_BRIDGE_URL` 后，评论业务直接把分享 URL 交给授权 Windows
+  微信侧车；侧车调用页面内部 `finderGetCommentList`，按 `lastBuffer` 依次翻到外部页码，
+  返回一级评论正文、点赞数和回复数。分享详情缺 nonce 时，只接受标题和作者唯一精确匹配。
+  未配置或侧车不可用时，再请求公开预览并返回 `unsupported`、准确总数和原因，不把总数
+  伪装成评论行。
 - 失败处理：目标分享已失效或响应没有目标 feed 时明确返回 `unsupported`；默认
   `direct/prefer` 绕过代理，不消耗采购 IP，也不启动 Camoufox；显式 `required` 仍尊重
   运维要求使用代理。
-- 会话边界：全网可复现的评论正文方案依赖微信视频号客户端及其
-  `finderGetCommentList` 会话（objectId、objectNonceId、lastBuffer）。这不是匿名网页请求，
-  当前纯服务端实现不注入微信客户端，也不采集或硬编码个人凭据。
+- 会话边界：评论正文依赖微信视频号客户端及其 `finderGetCommentList` 会话
+  （objectId、objectNonceId、lastBuffer），不是匿名网页请求。客户端账号状态保留在侧车，
+  主 API 只传公开 URL/页码；远程桥必须使用 HTTPS+token，或通过隧道映射到回环地址。详见
+  [`WECHAT_CHANNELS_BRIDGE.md`](WECHAT_CHANNELS_BRIDGE.md)。
 
 ## 小红书
 
 代码：`app/crawlers/platforms/xiaohongshu.py`
+
+当前生产只启用匿名互动量。评论正文需要账号 `web_session`，不符合零真实账号约束，
+因此 `capabilities` 标为 `unavailable`；下列签名路径只作历史兼容说明。
 
 - 互动量：使用 URL 中当前有效的 `xsec_token` 匿名直访笔记页，缺少时自动补
   `xsec_source=pc_feed`，从 SSR `noteDetailMap` 解析点赞、收藏、评论和分享；严格不携带
@@ -127,7 +145,7 @@ GET /api/v1/comments?url=...&media_name=...&page=N
   仍能验证的评论总数，并在 `reason` 中标明字段不完整。
 - URL：同时接受 `www.kuaishou.com/short-video/{id}` 和 `c.kuaishou.com/fw/photo/{id}`；
   分享链接在浏览器阶段自动规范化为同作品详情页。
-- 会话边界：公开作品首屏不要求账号；只返回一级评论，不混入推荐流或子回复。398 条真实
+- 会话边界：公开作品首屏不要求账号；只返回一级评论，不混入推荐流。398 条真实
   URL 企业实测互动/评论均为 398/398 有数据，全程零浏览器；互动中 34 条仅剩评论数。
 
 ## B 站

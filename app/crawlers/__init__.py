@@ -10,6 +10,7 @@ from app.crawlers.platforms.registry import (
     validate_media_url,
 )
 from app.models.engagement import (
+    CommentCapabilities,
     CommentPageResult,
     EngagementComment,
     EngagementResult,
@@ -19,6 +20,7 @@ from app.models.engagement import (
 
 __all__ = [
     "CommentPageResult",
+    "CommentCapabilities",
     "EngagementComment",
     "EngagementCrawler",
     "EngagementResult",

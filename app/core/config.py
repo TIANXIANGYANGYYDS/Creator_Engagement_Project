@@ -41,6 +41,11 @@ class Settings(BaseSettings):
         ge=1,
     )
 
+    strict_anonymous_mode: bool = Field(
+        default=True,
+        alias="STRICT_ANONYMOUS_MODE",
+    )
+
     creator_engagement_cookie: SecretStr = Field(
         default=SecretStr(""),
         validation_alias=AliasChoices(
@@ -68,6 +73,14 @@ class Settings(BaseSettings):
     wechat_session_bridge_token: SecretStr = Field(
         default=SecretStr(""),
         alias="WECHAT_SESSION_BRIDGE_TOKEN",
+    )
+    wechat_channels_bridge_url: str = Field(
+        default="",
+        alias="WECHAT_CHANNELS_BRIDGE_URL",
+    )
+    wechat_channels_bridge_token: SecretStr = Field(
+        default=SecretStr(""),
+        alias="WECHAT_CHANNELS_BRIDGE_TOKEN",
     )
     request_timeout_seconds: float = Field(
         default=20,

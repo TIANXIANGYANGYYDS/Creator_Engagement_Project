@@ -14,7 +14,11 @@ from bs4 import BeautifulSoup
 from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
 from app.crawlers.platforms.base import PlatformCrawlerContext
 from app.crawlers.platforms.common import COMMENT_PAGE_SIZE, result_error, to_int
-from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
+from app.models.engagement import (
+    EngagementComment,
+    EngagementResult,
+    EngagementStats,
+)
 
 
 NAV_URL = "https://api.bilibili.com/x/web-interface/nav"

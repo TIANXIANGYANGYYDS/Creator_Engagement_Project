@@ -161,7 +161,7 @@ async def fetch(
         elif include_stats and detail_reason:
             reason = f"{detail_reason}；仅返回仍可验证的评论总数"
         elif include_comments:
-            reason = "快手会话可读取指定页一级评论；子回复未包含在本接口"
+            reason = "快手游客会话可按公开游标读取指定页一级评论"
         else:
             reason = "快手会话可读取目标作品当前互动量"
 

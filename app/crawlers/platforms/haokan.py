@@ -11,7 +11,14 @@ from bs4 import BeautifulSoup
 from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
 from app.crawlers.platforms.base import PlatformCrawlerContext
 from app.crawlers.platforms.common import COMMENT_PAGE_SIZE, result_error, to_int
-from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
+from app.models.engagement import (
+    EngagementComment,
+    EngagementResult,
+    EngagementStats,
+)
+
+
+COMMENT_URL = "https://haokan.baidu.com/haokan/ui-web/v2/comment/get"
 
 
 async def fetch(
@@ -51,7 +58,7 @@ async def fetch(
         next_cursor: str | None = None
         if include_comments or stats.comments is None:
             payload = await crawler._get_json(
-                "https://haokan.baidu.com/haokan/ui-web/v2/comment/get",
+                COMMENT_URL,
                 params={
                     "rn": min(limit, COMMENT_PAGE_SIZE),
                     "url_key": work_id,

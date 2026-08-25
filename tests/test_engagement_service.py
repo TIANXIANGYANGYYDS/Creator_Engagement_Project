@@ -6,7 +6,12 @@ from time import monotonic
 import pytest
 
 from app.core.config import Settings
-from app.models.engagement import CommentPageResult, EngagementComment, EngagementResult, InteractionResult
+from app.models.engagement import (
+    CommentPageResult,
+    EngagementComment,
+    EngagementResult,
+    InteractionResult,
+)
 from app.services.engagement_service import (
     EngagementService,
     PlatformTrafficPolicy,
@@ -156,6 +161,7 @@ def test_service_injects_dedicated_wechat_cookie(monkeypatch) -> None:
     monkeypatch.delenv("DOUYIN_SESSION_COOKIE", raising=False)
     settings = Settings(
         _env_file=None,
+        strict_anonymous_mode=False,
         browser_fallback_enabled=False,
         creator_engagement_cookie="",
         wechat_article_cookie="wap_sid2=wechat-only",
@@ -165,6 +171,30 @@ def test_service_injects_dedicated_wechat_cookie(monkeypatch) -> None:
 
     assert service.crawler._platform_cookie("wechat") == "wap_sid2=wechat-only"
     assert service.crawler.platform_cookies == {"wechat": "wap_sid2=wechat-only"}
+    asyncio.run(service.aclose())
+
+
+def test_strict_anonymous_mode_ignores_account_credentials_and_profiles(tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        strict_anonymous_mode=True,
+        browser_fallback_enabled=False,
+        creator_engagement_cookie="account-cookie",
+        wechat_article_cookie="wap_sid2=wechat-account",
+        wechat_mp_app_id="wx-account",
+        wechat_mp_app_secret="secret",
+        wechat_channels_bridge_url="http://127.0.0.1:2026",
+        platform_session_dir=str(tmp_path / "sessions"),
+    )
+
+    service = EngagementService.from_settings(settings, proxy_mode="direct")
+
+    assert service.crawler.strict_anonymous_mode is True
+    assert service.crawler.cookies == ""
+    assert service.crawler.platform_cookies == {}
+    assert service.crawler.wechat_mp_app_id == ""
+    assert service.crawler.wechat_channels_bridge_client is None
+    assert service.crawler.session_store.root == tmp_path / "sessions" / "anonymous"
     asyncio.run(service.aclose())
 
 

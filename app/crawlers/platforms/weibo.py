@@ -13,8 +13,11 @@ from bs4 import BeautifulSoup
 from app.crawlers.http_client import PlatformBlockedError
 from app.crawlers.platforms.base import PlatformCrawlerContext
 from app.crawlers.platforms.common import result_error, to_int
-from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
-
+from app.models.engagement import (
+    EngagementComment,
+    EngagementResult,
+    EngagementStats,
+)
 
 async def fetch(
     crawler: PlatformCrawlerContext,
@@ -137,8 +140,15 @@ async def fetch(
 
 def parse_comments(payload: dict[str, Any]) -> tuple[list[EngagementComment], str | None]:
     data = payload.get("data") or {}
+    result = parse_comment_items(data.get("data") or [])
+    return result, str(data.get("max_id")) if data.get("max_id") else None
+
+
+def parse_comment_items(items: list[Any]) -> list[EngagementComment]:
     result: list[EngagementComment] = []
-    for item in data.get("data") or []:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
         user = item.get("user") or {}
         comment_id = str(item.get("idstr") or item.get("id") or "")
         if not comment_id:
@@ -151,7 +161,7 @@ def parse_comments(payload: dict[str, Any]) -> tuple[list[EngagementComment], st
             likes=to_int(item.get("like_count")),
             replies=to_int(item.get("total_number")),
         ))
-    return result, str(data.get("max_id")) if data.get("max_id") else None
+    return result
 
 
 def parse_numbered_comments(

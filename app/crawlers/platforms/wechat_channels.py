@@ -1,8 +1,9 @@
-"""Public WeChat Channels share-page counters.
+"""WeChat Channels public counters and authorized-client comments.
 
 WeChat Channels is independent from Official Account articles.  Its public
-preview page exposes display-formatted counters through one JSON request, but
-deliberately sends users into the WeChat client to read comment bodies.
+preview page exposes display-formatted counters through one JSON request.
+Comment bodies can optionally be read through a separately authorized desktop
+WeChat sidecar; the API process never receives the WeChat account session.
 """
 
 from __future__ import annotations
@@ -16,8 +17,13 @@ from urllib.parse import parse_qs, urlparse
 
 from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
 from app.crawlers.platforms.base import PlatformCrawlerContext
-from app.crawlers.platforms.common import result_error
-from app.models.engagement import EngagementResult, EngagementStats
+from app.crawlers.platforms.common import (
+    first_present,
+    result_error,
+    timestamp,
+    to_int,
+)
+from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
 
 
 FEED_INFO_URL = (
@@ -35,9 +41,44 @@ async def fetch(
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
-    del limit, page
     try:
         body, referer, page_url = build_feed_request(url)
+        bridge_issue = ""
+        if include_comments:
+            try:
+                bridge_payload = await crawler._wechat_channels_bridge_comments(
+                    url=url,
+                    page=page,
+                    limit=limit,
+                )
+            except (PlatformBlockedError, PlatformCrawlerError) as exc:
+                bridge_payload = None
+                bridge_issue = str(exc)
+            if bridge_payload is not None:
+                comments = parse_bridge_comments(bridge_payload.get("comments"))
+                total = _to_int(bridge_payload.get("total_comments"))
+                next_marker = str(bridge_payload.get("next_marker") or "").strip()
+                exhausted = bool(bridge_payload.get("exhausted"))
+                if comments or total == 0 or exhausted:
+                    return EngagementResult(
+                        platform="wechat_channels",
+                        canonical_url=url,
+                        work_id=work_id,
+                        coverage="complete" if exhausted or total == 0 else "partial",
+                        reason=(
+                            "已授权微信客户端会话返回视频号一级评论；返回内容受平台公开、"
+                            "删除和折叠规则影响"
+                        ),
+                        source=str(
+                            bridge_payload.get("source")
+                            or "wx_channel/finderGetCommentList"
+                        ),
+                        stats=EngagementStats(comments=total),
+                        comments=comments[:limit],
+                        next_cursor=next_marker or None,
+                    )
+                bridge_issue = "视频号会话桥成功响应但没有返回目标评论正文"
+
         payload = await crawler._post_json(
             FEED_INFO_URL,
             params={
@@ -98,7 +139,12 @@ async def fetch(
                 coverage="unsupported",
                 reason=(
                     "视频号公开预览只下发评论总数，不下发评论正文；正文由微信客户端 "
-                    "finderGetCommentList 会话接口提供，匿名网页请求无法稳定复现"
+                    "finderGetCommentList 会话接口提供"
+                    + (
+                        f"；会话桥: {bridge_issue}"
+                        if bridge_issue
+                        else "；未配置 WECHAT_CHANNELS_BRIDGE_URL"
+                    )
                 ),
                 source="finder-preview/api/feed/get_feed_info",
                 stats=EngagementStats(comments=stats.comments),
@@ -190,6 +236,43 @@ def parse_formatted_count(value: Any) -> int | None:
         return int(Decimal(match.group(1)) * multipliers[match.group(2)])
     except (InvalidOperation, ValueError):
         return None
+
+
+def parse_bridge_comments(value: Any) -> list[EngagementComment]:
+    if not isinstance(value, list):
+        return []
+    comments: list[EngagementComment] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(
+            first_present(item, "commentId", "comment_id", "id") or ""
+        ).strip()
+        if not comment_id:
+            continue
+        replies = first_present(
+            item,
+            "expandCommentCount",
+            "subCommentCount",
+            "replyCount",
+        )
+        comments.append(
+            EngagementComment(
+                comment_id=comment_id,
+                author=str(
+                    first_present(item, "nickname", "authorName", "username") or ""
+                ),
+                text=str(first_present(item, "content", "text") or ""),
+                created_at=timestamp(
+                    first_present(item, "createtime", "createTime", "timestamp")
+                ),
+                likes=to_int(
+                    first_present(item, "likeCount", "likedCount", "like_count")
+                ),
+                replies=to_int(replies),
+            )
+        )
+    return comments
 
 
 def _to_int(value: Any) -> int | None:

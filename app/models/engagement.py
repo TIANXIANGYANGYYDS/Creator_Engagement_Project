@@ -24,6 +24,12 @@ EngagementCoverage = Literal[
     "failed",
     "unsupported",
 ]
+CommentPaginationMode = Literal[
+    "all_public_pages",
+    "paged_until_blocked",
+    "first_public_page",
+    "unavailable",
+]
 
 
 class EngagementStats(BaseModel):
@@ -51,6 +57,22 @@ class EngagementComment(BaseModel):
     replies: int | None = Field(default=None, ge=0)
 
 
+class CommentCapabilities(BaseModel):
+    """Anonymous comment coverage exposed by the current deployment."""
+
+    root_comments: CommentPaginationMode
+    anonymous: bool
+    note: str = ""
+
+
+def unavailable_comment_capabilities() -> CommentCapabilities:
+    return CommentCapabilities(
+        root_comments="unavailable",
+        anonymous=False,
+        note="capability metadata was not supplied",
+    )
+
+
 class CollectionResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -76,6 +98,9 @@ class CommentPageResult(CollectionResult):
     comments: list[EngagementComment] = Field(default_factory=list)
     next_page: int | None = Field(default=None, ge=1)
     total_comments: int | None = Field(default=None, ge=0)
+    capabilities: CommentCapabilities = Field(
+        default_factory=unavailable_comment_capabilities
+    )
 
 
 class EngagementResult(CollectionResult):

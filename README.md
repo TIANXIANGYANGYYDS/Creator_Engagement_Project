@@ -68,8 +68,9 @@ Cookie-only 路径：在 `.local/env/.env` 配置 `WECHAT_ARTICLE_COOKIE` 后，
 `getappmsgext` 和 `appmsg_comment` 会在同一 Cookie/IP 租约中请求，不启动浏览器或微信
 客户端；配置与字段边界见
 [`docs/WECHAT_COOKIE_PROTOCOL.md`](docs/WECHAT_COOKIE_PROTOCOL.md)。旧的本地微信会话桥
-只保留为可选兼容模块。视频号公开分享链接的
-点赞、评论总数、转发和收藏可匿名直连获取，但评论正文不在公开预览响应中。九个平台都可以在
+只保留为可选兼容模块。视频号公开分享链接的点赞、评论总数、转发和收藏可匿名直连获取；
+评论正文可选接入调用方 Windows 微信客户端侧车，主服务器不保存微信会话。部署方式见
+[`docs/WECHAT_CHANNELS_BRIDGE.md`](docs/WECHAT_CHANNELS_BRIDGE.md)。九个平台都可以在
 带桌面环境的本机建立独立 Profile：
 
 ```bash
@@ -141,24 +142,35 @@ haokan / kuaishou / bilibili / weibo`，也接受抖音、头条、公众号/微
 
 ## 能力范围
 
-互动量接口返回 `platform / work_id / stats / coverage / reason`；评论接口返回
-`platform / work_id / page / comments / next_page / total_comments / coverage / reason`。
-评论页固定最多 20 条。`coverage`
+默认 `STRICT_ANONYMOUS_MODE=true`。该模式会忽略历史账号 Cookie、公众号凭据、微信侧车和
+原账号 Profile，并把自动游客状态隔离到 `anonymous/` 子目录；不要在生产环境关闭它。
+
+互动量接口返回 `platform / work_id / stats / coverage / reason`；一级评论接口返回
+`platform / work_id / page / comments / next_page / total_comments / capabilities / coverage / reason`。
+评论页固定最多 20 条，只返回一级评论正文；每条评论的 `replies` 是回复数量，不会展开回复
+正文。`coverage`
 不是装饰字段：`complete` 表示当前接口可完整说明本页，`partial` 表示只能拿到公开可见
 部分，`blocked` 表示平台拒绝请求或进入验证码/登录挑战，`unsupported` 表示协议和浏览器
 都没有捕获到可验证的目标数据。
 
-| 平台 | 当前能力 | 协议证据 | 状态 |
-|---|---|---|---|
-| B 站 | 视频、专栏/图文互动量和一级评论 | 视频 `x/web-interface/view`；专栏 `x/article/viewinfo` 或 Opus SSR；评论 `x/v2/reply/wbi/main` | 匿名纯协议可用；直播 URL 不在本项目业务范围 |
-| 微博 | 点赞、评论、转发和匿名评论分页 | `statuses/show`、`comments/hotflow`、`api/comments/show` | 可用，访客态部分覆盖 |
-| 好看 | 播放、点赞、评论总数和一级评论 | 目标页 SSR、`haokan/ui-web/v2/comment/get` | 纯协议匿名可用；收藏/分享未公开 |
-| 小红书 | 点赞、收藏、分享、评论总数和一级评论 | 互动匿名 SSR；评论 `xhshow` 动态签名 | 互动新鲜 URL 100/100、无需登录；评论低频 20/20，仍需要 `web_session` 与有效 token |
-| 抖音 | 匿名纯协议互动量和评论分页；浏览器仅作风控兜底 | 第一方访客 `ttwid`、纯 Python `a_bogus`、`/aweme/v1/web/aweme/detail/`、`/aweme/v1/web/comment/list/` | 真实首屏 20 条、总数 2909；平台隐藏 `play_count` 时播放保持 `null` |
-| 头条 | 文章 SSR 统计（若首包可解析）、评论总数和一级评论 | `article SSR itemCounter/likeData`、`article/v4/tab_comments` | 评论可用；互动统计受 JSVM/挑战影响 |
-| 公众号 | 任意公开文章的会话化互动量和精选评论；自有号保留官方降级 | 调用方文章 Cookie；页面 SSR、`getappmsgext`、`appmsg_comment`；官方接口 | Cookie-only 纯协议已实现，待真实 Cookie 实测；不自动启动浏览器、微信客户端或旧会话桥 |
-| 微信视频号 | 点赞、评论总数、转发、收藏 | 公开预览 `finder-preview/api/feed/get_feed_info` | 互动量匿名 100/100；评论总数可取，评论正文需微信客户端会话，当前明确不可用 |
-| 快手 | 播放、点赞、评论总数和一级评论 | `visionVideoDetail`、SSR Apollo、REST/GraphQL 评论双通道 | 无需账号；398 条互动和 398 条评论企业实测均有数据，详情已下线时仅返回可验证评论数 |
+下表采用当前部署硬约束：不允许人工登录、扫码或真实账号。历史上带 Cookie、官方自有号
+凭据或微信侧车的代码只保留兼容，不计入“可用”。“全公开页”表示按平台游标翻到匿名访客
+可见的结束位置，不含已删、隐藏、审核折叠内容。
+
+| 平台 | 一级评论分页能力 | 零账号结论 |
+|---|---|---|
+| B 站 | 全公开页 | 视频、专栏和 Opus 匿名纯协议可用；直播 URL 已拒绝 |
+| 好看 | 全公开页 | `comment/get` 按 `pn` 翻到公开末页 |
+| 快手 | 全公开页 | 自动游客验证状态，不使用真实账号；验证码时返回 `blocked` |
+| 抖音 | 全公开页 | 匿名签名协议按游标翻页 |
+| 头条 | 全公开页 | 匿名 `tab_comments` 按 offset 翻页 |
+| 微博 | 可翻多页，不保证到底 | 第 2 页已实测；更深页可能被登录或风控拦截 |
+| 小红书 | 不可用 | 互动量仍可匿名；评论签名端点需要账号会话，严格模式关闭 |
+| 公众号 | 不可用 | 匿名页不能稳定取得任意文章精选评论正文 |
+| 微信视频号 | 不可用 | 匿名预览只给评论总数；正文依赖真实微信客户端会话，严格模式关闭 |
+
+当前没有一个平台被标为“固定只能获取第一页”。微博能获取多页，但不能承诺到末页；因此
+不能把它归为“仅第一页”，也不能归为“全部”。
 
 真实输入 URL 同时兼容头条 `/i{id}`、快手 `c.kuaishou.com/fw/photo/{id}`、微博桌面端
 `/用户ID/base62短ID`，以及 B 站 `/read/cv{id}`、`/read/mobile?id=...`、`/opus/{id}`。

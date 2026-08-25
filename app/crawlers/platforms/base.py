@@ -68,6 +68,14 @@ class PlatformCrawlerContext(Protocol):
         limit: int,
     ) -> dict[str, Any] | None: ...
 
+    async def _wechat_channels_bridge_comments(
+        self,
+        *,
+        url: str,
+        page: int,
+        limit: int,
+    ) -> dict[str, Any] | None: ...
+
 
 class PlatformFetchHandler(Protocol):
     def __call__(

@@ -18,6 +18,7 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.proxy_mode == "prefer"
     assert settings.proxy_pool_size == 4
     assert settings.proxy_max_concurrency == 1
+    assert settings.strict_anonymous_mode is True
     assert settings.collection_max_concurrency == 4
     assert settings.reliability_mode == "enterprise"
     assert settings.protocol_max_attempts == 3
@@ -48,6 +49,19 @@ def test_wechat_session_bridge_credentials_are_optional_secrets(monkeypatch) -> 
     assert (
         settings.wechat_session_bridge_token.get_secret_value()
         == "local-bridge-token-secret"
+    )
+
+
+def test_wechat_channels_bridge_credentials_are_optional_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("WECHAT_CHANNELS_BRIDGE_URL", "http://127.0.0.1:2026")
+    monkeypatch.setenv("WECHAT_CHANNELS_BRIDGE_TOKEN", "channels-local-secret")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.wechat_channels_bridge_url == "http://127.0.0.1:2026"
+    assert (
+        settings.wechat_channels_bridge_token.get_secret_value()
+        == "channels-local-secret"
     )
 
 

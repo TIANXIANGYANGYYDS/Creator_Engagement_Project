@@ -197,7 +197,7 @@
     <header class="heading">
       <div>
         <h1>互动量与公开评论采集实测成本单</h1>
-        <div class="subtitle">按独立业务接口列示真实成功率、耗时和 IP 成本；互动量与评论按实际上游响应分别计数</div>
+        <div class="subtitle">默认 STRICT_ANONYMOUS_MODE；不使用人工、扫码或真实账号；互动量与评论按实际上游响应分别计数</div>
       </div>
       <div class="badge">更新 2026-08-24 · MyAgent / Python 3.13</div>
     </header>
@@ -208,7 +208,7 @@
       <div class="metric"><strong>64 个 IP</strong><span>两个接口独立实耗</span></div>
       <div class="metric"><strong>¥0.05376</strong><span>快手两接口 IP 总成本</span></div>
       <div class="metric"><strong>100 / 100</strong><span>小红书互动匿名 SSR</span></div>
-      <div class="metric"><strong>1 GET · ¥0</strong><span>小红书互动单次成本</span></div>
+      <div class="metric"><strong>5 个渠道</strong><span>一级评论可翻到公开末页</span></div>
     </section>
 
     <table aria-label="九个平台十八项独立接口成本明细">
@@ -253,13 +253,13 @@
           <td class="platform-cell">公众号</td><td class="service-cell">互动量</td><td>5</td>
           <td class="upstream-cell">1 GET 文章；完整 Cookie 时至多再 1 POST <code>getappmsgext</code></td><td class="result-bad">0 / 5<br>无 Cookie</td>
           <td class="time-cell"><strong>1.611 / 1.889s*</strong></td><td class="cost-cell">本次直连：¥0<br>新 IP 上限 ¥0.00084</td>
-          <td>Cookie-only 已实现且禁用浏览器；待调用方 Cookie 实测，匿名不伪报成功</td>
+          <td>严格匿名模式不可用；历史 Cookie 路径不计入当前能力</td>
         </tr>
         <tr>
           <td class="platform-cell">公众号</td><td class="service-cell">评论第 1 页</td><td>5</td>
           <td class="upstream-cell">1 GET 文章；完整 Cookie 时再 1 GET <code>appmsg_comment</code></td><td class="result-bad">0 / 5<br>无 Cookie</td>
           <td class="time-cell"><strong>0.896 / 1.065s*</strong></td><td class="cost-cell">本次直连：¥0<br>新 IP 上限 ¥0.00084</td>
-          <td>buffer 分页已实现；show_comment=0 不再误报作者关闭，待 Cookie 实测</td>
+          <td>严格匿名模式不可用；不把评论总数或空预载冒充正文</td>
         </tr>
 
         <tr class="group-even">
@@ -270,9 +270,9 @@
         </tr>
         <tr class="group-even">
           <td class="platform-cell">微信视频号</td><td class="service-cell">评论第 1 页</td><td>100</td>
-          <td class="upstream-cell">1 POST：仅返回评论总数</td><td class="result-bad">正文 0 / 100<br>总数 100 / 100</td>
+          <td class="upstream-cell">匿名降级 1 POST；授权侧车 1 profile + 0/1 search + 1 comment/list</td><td class="result-bad">匿名正文 0 / 100<br>侧车 contract 通过</td>
           <td class="time-cell"><strong>同端点 0.063 / 0.088s‡</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>正文不可用；百任务队列 P95 22.348s；需微信客户端会话</td>
+          <td>严格匿名模式不可用；历史 Windows 微信侧车已关闭</td>
         </tr>
 
         <tr>
@@ -283,9 +283,9 @@
         </tr>
         <tr>
           <td class="platform-cell">小红书</td><td class="service-cell">评论第 1 页</td><td>20</td>
-          <td class="upstream-cell">1 GET：动态签名 <code>comment/page</code></td><td class="result-ok">20 / 20<br>100%</td>
+          <td class="upstream-cell">历史：账号会话 + 动态签名 <code>comment/page</code></td><td class="result-bad">严格匿名 0<br>历史 20 / 20</td>
           <td class="time-cell"><strong>0.300 / 0.723s</strong></td><td class="cost-cell">直连：¥0</td>
-          <td>低频可用；4 秒启动间隔，共返回 200 行</td>
+          <td>当前不可用；历史 20/20 使用了 web_session，不符合零账号约束</td>
         </tr>
 
         <tr class="group-even">
@@ -344,7 +344,7 @@
 
     <section class="notes">
       <p><strong>计费口径：</strong>84 元 ÷ 100000 IP = 0.00084 元/IP。快手互动实耗 41 IP / ¥0.03444，评论实耗 23 IP / ¥0.01932；两个独立接口合计 <strong>64 IP / ¥0.05376</strong>，按 398 个 URL 各调两项摊销 ¥0.00013508/URL。视频号本次直连且默认 prefer 绕过代理，实际 IP 成本 ¥0；显式 required 除外。</p>
-      <p><strong>范围与风险：</strong>P50/P95 均绕过业务缓存；* 公众号只有 5 个最终实现样本，第二个数字为最大值。‡ 视频号单请求耗时来自最终采集器 20 次顺序探针（20/20）；另有互动/评论各 100 个任务同时入队的企业节奏实测，队列 P95 为 21.663/22.348 秒。公众号只用 Cookie + IP 纯协议，当前服务器没有调用方文章 Cookie，故 0/5 是匿名权限边界，不是完整 Cookie 路径的失败率。</p>
+      <p><strong>一级评论边界：</strong>评论接口只读取一级评论正文，不会为每条评论继续扇出回复请求。抖音、头条、好看、快手和 B 站可按公开游标翻到末页；微博可翻多页但深页可能被登录或风控拦截；公众号、视频号和小红书在严格零账号模式下不可用。P50/P95 均绕过业务缓存；‡ 视频号时间只代表匿名公开预览。</p>
     </section>
   </main>
 </body>

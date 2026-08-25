@@ -5,11 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from app.models.engagement import (
-    EngagementCoverage,
-    EngagementPlatform,
-    EngagementResult,
-)
+from app.models.engagement import EngagementCoverage, EngagementPlatform, EngagementResult
 
 
 COMMENT_PAGE_SIZE = 20

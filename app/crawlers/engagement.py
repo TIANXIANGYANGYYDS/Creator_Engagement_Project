@@ -18,6 +18,7 @@ from app.crawlers.http_client import (
     PlatformBlockedError,
     PlatformCrawlerError,
 )
+from app.crawlers.comment_capabilities import comment_capabilities
 from app.crawlers.platforms import PLATFORM_HANDLERS
 from app.crawlers.platforms.common import COMMENT_PAGE_SIZE, result_error
 from app.crawlers.platforms.registry import (
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
     from app.crawlers.browser_fallback import BrowserFallback
     from app.crawlers.platform_session import PlatformSessionStore
     from app.crawlers.wechat_session_bridge import HttpWeChatSessionBridgeClient
+    from app.crawlers.wechat_channels_bridge import HttpWeChatChannelsBridgeClient
 
 
 logger = logging.getLogger(__name__)
@@ -56,12 +58,16 @@ class EngagementCrawler:
         platform_cookies: dict[EngagementPlatform, str] | None = None,
         max_protocol_attempts: int = 1,
         protocol_retry_base_seconds: float = 1,
+        strict_anonymous_mode: bool = False,
         wechat_mp_app_id: str = "",
         wechat_mp_app_secret: str = "",
         wechat_mp_access_token: str = "",
         wechat_session_bridge_url: str = "",
         wechat_session_bridge_token: str = "",
         wechat_session_bridge_client: "HttpWeChatSessionBridgeClient | Any | None" = None,
+        wechat_channels_bridge_url: str = "",
+        wechat_channels_bridge_token: str = "",
+        wechat_channels_bridge_client: "HttpWeChatChannelsBridgeClient | Any | None" = None,
     ) -> None:
         if max_protocol_attempts <= 0:
             raise ValueError("max_protocol_attempts must be greater than zero")
@@ -86,6 +92,7 @@ class EngagementCrawler:
         self.platform_cookies = platform_cookies or {}
         self.max_protocol_attempts = max_protocol_attempts
         self.protocol_retry_base_seconds = protocol_retry_base_seconds
+        self.strict_anonymous_mode = strict_anonymous_mode
         self.wechat_mp_app_id = wechat_mp_app_id.strip()
         self.wechat_mp_app_secret = wechat_mp_app_secret.strip()
         self._configured_wechat_mp_access_token = wechat_mp_access_token.strip()
@@ -103,12 +110,30 @@ class EngagementCrawler:
                 timeout_seconds=timeout_seconds,
             )
             self._owns_wechat_session_bridge_client = True
+        self._owns_wechat_channels_bridge_client = False
+        self.wechat_channels_bridge_client = wechat_channels_bridge_client
+        if (
+            self.wechat_channels_bridge_client is None
+            and wechat_channels_bridge_url.strip()
+        ):
+            from app.crawlers.wechat_channels_bridge import (
+                HttpWeChatChannelsBridgeClient,
+            )
+
+            self.wechat_channels_bridge_client = HttpWeChatChannelsBridgeClient(
+                wechat_channels_bridge_url,
+                wechat_channels_bridge_token,
+                timeout_seconds=timeout_seconds,
+            )
+            self._owns_wechat_channels_bridge_client = True
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self.client.aclose()  # type: ignore[attr-defined]
         if self._owns_wechat_session_bridge_client:
             await self.wechat_session_bridge_client.aclose()
+        if self._owns_wechat_channels_bridge_client:
+            await self.wechat_channels_bridge_client.aclose()
 
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         if comment_limit <= 0:
@@ -150,6 +175,7 @@ class EngagementCrawler:
             "page": page,
             "next_page": page + 1 if result.next_cursor is not None else None,
             "total_comments": result.stats.comments,
+            "capabilities": comment_capabilities(result.platform),
         })
 
     async def _fetch(
@@ -335,13 +361,19 @@ class EngagementCrawler:
             return True
         return False
 
-    @staticmethod
     def _should_use_browser_fallback(
+        self,
         result: EngagementResult,
         *,
         include_stats: bool,
         include_comments: bool,
     ) -> bool:
+        if (
+            self.strict_anonymous_mode
+            and include_comments
+            and result.platform in {"wechat", "wechat_channels", "xiaohongshu"}
+        ):
+            return False
         if result.platform == "wechat":
             # Article counters/comments are session protocols. An anonymous
             # browser cannot turn a weak Cookie into a WeChat article session,
@@ -522,6 +554,8 @@ class EngagementCrawler:
         return response
 
     def _platform_cookie(self, platform: EngagementPlatform) -> str:
+        if self.strict_anonymous_mode and platform not in {"douyin", "kuaishou"}:
+            return ""
         configured = self.platform_cookies.get(platform, "").strip()
         if configured:
             return configured
@@ -598,6 +632,21 @@ class EngagementCrawler:
             operation,
             url=url,
             metadata=metadata,
+            page=page,
+            limit=limit,
+        )
+
+    async def _wechat_channels_bridge_comments(
+        self,
+        *,
+        url: str,
+        page: int,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        if self.wechat_channels_bridge_client is None:
+            return None
+        return await self.wechat_channels_bridge_client.fetch_comments(
+            url,
             page=page,
             limit=limit,
         )

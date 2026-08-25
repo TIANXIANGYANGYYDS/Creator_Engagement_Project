@@ -32,7 +32,6 @@ class FakeService:
             total_comments=28,
         )
 
-
 def test_health_interactions_and_comments_routes() -> None:
     app = create_app()
     app.dependency_overrides[get_engagement_service] = lambda: FakeService()

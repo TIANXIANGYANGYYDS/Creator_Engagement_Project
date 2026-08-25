@@ -138,7 +138,15 @@ class EngagementService:
                 max_concurrency_per_proxy=settings.proxy_max_concurrency,
                 api_url=settings.proxy_51_api_url,
             )
-        session_store = PlatformSessionStore(Path(settings.platform_session_dir))
+        strict_anonymous = settings.strict_anonymous_mode
+        session_dir = Path(settings.platform_session_dir)
+        profile_dir = Path(settings.browser_profile_dir)
+        if strict_anonymous:
+            # Never reuse a historical account profile in the anonymous
+            # deployment. Kuaishou may persist only its disposable guest state.
+            session_dir /= "anonymous"
+            profile_dir /= "anonymous"
+        session_store = PlatformSessionStore(session_dir)
         browser_fallback = None
         if settings.browser_fallback_enabled:
             browser_fallback = BrowserFallback(
@@ -147,21 +155,33 @@ class EngagementService:
                     challenge_wait_seconds=settings.browser_challenge_wait_seconds,
                     headless=settings.browser_headless,
                     max_concurrency=settings.browser_max_concurrency,
-                    profile_dir=Path(settings.browser_profile_dir),
+                    profile_dir=profile_dir,
                     reset_guest_state_on_proxy_change=(
                         settings.browser_reset_guest_state_on_proxy_change
                     ),
                 ),
                 proxy_provider=provider,
                 session_store=session_store,
-                cookies=settings.creator_engagement_cookie.get_secret_value(),
+                cookies=(
+                    ""
+                    if strict_anonymous
+                    else settings.creator_engagement_cookie.get_secret_value()
+                ),
             )
         crawler = EngagementCrawler(
             timeout_seconds=settings.request_timeout_seconds,
-            cookies=settings.creator_engagement_cookie.get_secret_value(),
-            platform_cookies={
-                "wechat": settings.wechat_article_cookie.get_secret_value(),
-            },
+            cookies=(
+                ""
+                if strict_anonymous
+                else settings.creator_engagement_cookie.get_secret_value()
+            ),
+            platform_cookies=(
+                {}
+                if strict_anonymous
+                else {
+                    "wechat": settings.wechat_article_cookie.get_secret_value(),
+                }
+            ),
             proxy_provider=provider,
             proxy_mode=active_mode,
             browser_fallback=browser_fallback,
@@ -172,14 +192,33 @@ class EngagementService:
                 else 1
             ),
             protocol_retry_base_seconds=settings.protocol_retry_base_seconds,
-            wechat_mp_app_id=settings.wechat_mp_app_id,
-            wechat_mp_app_secret=settings.wechat_mp_app_secret.get_secret_value(),
-            wechat_mp_access_token=(
-                settings.wechat_mp_access_token.get_secret_value()
+            strict_anonymous_mode=strict_anonymous,
+            wechat_mp_app_id=("" if strict_anonymous else settings.wechat_mp_app_id),
+            wechat_mp_app_secret=(
+                ""
+                if strict_anonymous
+                else settings.wechat_mp_app_secret.get_secret_value()
             ),
-            wechat_session_bridge_url=settings.wechat_session_bridge_url,
+            wechat_mp_access_token=(
+                ""
+                if strict_anonymous
+                else settings.wechat_mp_access_token.get_secret_value()
+            ),
+            wechat_session_bridge_url=(
+                "" if strict_anonymous else settings.wechat_session_bridge_url
+            ),
             wechat_session_bridge_token=(
-                settings.wechat_session_bridge_token.get_secret_value()
+                ""
+                if strict_anonymous
+                else settings.wechat_session_bridge_token.get_secret_value()
+            ),
+            wechat_channels_bridge_url=(
+                "" if strict_anonymous else settings.wechat_channels_bridge_url
+            ),
+            wechat_channels_bridge_token=(
+                ""
+                if strict_anonymous
+                else settings.wechat_channels_bridge_token.get_secret_value()
             ),
         )
         return cls(

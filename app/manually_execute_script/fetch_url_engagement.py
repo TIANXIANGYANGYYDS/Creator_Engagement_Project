@@ -1,4 +1,4 @@
-"""Fetch interactions or a public comment page for one content URL."""
+"""Fetch interactions or a public root-comment page for one content URL."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="抖音、头条、公众号、微信视频号、小红书、好看、快手、B站或微博 URL",
     )
     parser.add_argument("media_name", help="媒体规范名或中文名，例如 bilibili/B站")
-    parser.add_argument("--page", type=int, default=1, help="评论页码，仅 comments 模式使用")
+    parser.add_argument("--page", type=int, default=1, help="一级评论页码，仅 comments 模式使用")
     parser.add_argument("--direct", action="store_true", help="本次强制直连，忽略代理配置")
     return parser
 

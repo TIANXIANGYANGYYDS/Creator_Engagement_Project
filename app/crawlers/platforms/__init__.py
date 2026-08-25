@@ -27,5 +27,4 @@ PLATFORM_HANDLERS: dict[EngagementPlatform, PlatformFetchHandler] = {
     "weibo": weibo.fetch,
 }
 
-
 __all__ = ["PLATFORM_HANDLERS"]
