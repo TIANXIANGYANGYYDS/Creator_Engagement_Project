@@ -32,6 +32,7 @@ class BrowserFallbackSettings:
     challenge_wait_seconds: float = 5
     headless: bool | str = True
     max_concurrency: int = 2
+    geoip: bool = False
     profile_dir: Path = Path(".local/browser-profiles")
     reset_guest_state_on_proxy_change: bool = False
 
@@ -48,12 +49,15 @@ class BrowserFallback:
         cookies: str = "",
     ) -> None:
         self.settings = settings or BrowserFallbackSettings()
+        if self.settings.max_concurrency <= 0:
+            raise ValueError("browser max_concurrency must be greater than zero")
         self.proxy_provider = proxy_provider
         self.session_store = session_store
         self.cookies = cookies
-        self._locks: dict[EngagementPlatform, asyncio.Lock] = {}
+        self._profile_slots: dict[EngagementPlatform, asyncio.Queue[int]] = {}
+        self._session_locks: dict[EngagementPlatform, asyncio.Lock] = {}
         self._semaphore = asyncio.Semaphore(self.settings.max_concurrency)
-        self._proxy_identities: dict[EngagementPlatform, str] = {}
+        self._proxy_identities: dict[tuple[EngagementPlatform, int], str] = {}
 
     async def fetch(
         self,
@@ -66,9 +70,15 @@ class BrowserFallback:
         include_stats: bool,
         include_comments: bool,
     ) -> EngagementResult:
-        lock = self._locks.setdefault(platform, asyncio.Lock())
-        async with lock:
-            async with self._semaphore:
+        slots = self._profile_slots.get(platform)
+        if slots is None:
+            slots = asyncio.Queue()
+            for slot in range(self.settings.max_concurrency):
+                slots.put_nowait(slot)
+            self._profile_slots[platform] = slots
+        async with self._semaphore:
+            profile_slot = await slots.get()
+            try:
                 return await self._fetch_locked(
                     url,
                     platform,
@@ -77,7 +87,10 @@ class BrowserFallback:
                     limit=limit,
                     include_stats=include_stats,
                     include_comments=include_comments,
+                    profile_slot=profile_slot,
                 )
+            finally:
+                slots.put_nowait(profile_slot)
 
     async def _fetch_locked(
         self,
@@ -89,6 +102,7 @@ class BrowserFallback:
         limit: int,
         include_stats: bool,
         include_comments: bool,
+        profile_slot: int = 0,
     ) -> EngagementResult:
         proxy_mapping = None
         lease_ok = False
@@ -97,6 +111,8 @@ class BrowserFallback:
                 proxy_mapping = await self.proxy_provider.get_requests_proxies()
             proxy = _playwright_proxy(proxy_mapping)
             profile_dir = self.settings.profile_dir / platform
+            if profile_slot:
+                profile_dir = self.settings.profile_dir / f"{platform}-worker-{profile_slot}"
             profile_dir.mkdir(parents=True, exist_ok=True)
             target_url = _browser_target_url(url, platform, work_id)
 
@@ -110,7 +126,7 @@ class BrowserFallback:
                 humanize=True,
                 block_webrtc=True,
                 proxy=proxy,
-                geoip=bool(proxy),
+                geoip=bool(proxy) and self.settings.geoip,
                 persistent_context=True,
                 user_data_dir=str(profile_dir),
                 exclude_addons=[DefaultAddons.UBO],
@@ -120,6 +136,7 @@ class BrowserFallback:
                     context,
                     platform,
                     proxy_mapping,
+                    profile_slot,
                 )
                 await self._seed_cookies(context, target_url, platform)
                 page_obj = context.pages[0] if context.pages else await context.new_page()
@@ -191,7 +208,19 @@ class BrowserFallback:
                         include_comments=include_comments,
                     )
                 await self._persist_session(platform, context)
-            lease_ok = True
+            stats_ok = not include_stats or any(
+                value is not None for value in result.stats.model_dump().values()
+            )
+            comments_ok = (
+                not include_comments
+                or bool(result.comments)
+                or result.stats.comments == 0
+            )
+            lease_ok = (
+                result.coverage in {"complete", "partial"}
+                and stats_ok
+                and comments_ok
+            )
             return result
         except Exception as exc:
             return EngagementResult(
@@ -219,7 +248,9 @@ class BrowserFallback:
         if self.session_store is None:
             return
         try:
-            await self.session_store.save_context(platform, context)
+            lock = self._session_locks.setdefault(platform, asyncio.Lock())
+            async with lock:
+                await self.session_store.save_context(platform, context)
         except Exception:
             # A read-only profile or interrupted write must not discard an
             # otherwise valid collection result.
@@ -230,6 +261,7 @@ class BrowserFallback:
         context: Any,
         platform: EngagementPlatform,
         proxy_mapping: dict[str, str] | None,
+        profile_slot: int = 0,
     ) -> None:
         """Reset an explicitly disposable Kuaishou guest profile after IP rotation."""
         if (
@@ -239,7 +271,8 @@ class BrowserFallback:
         ):
             return
         identity = proxy_mapping.get("https") or proxy_mapping.get("http") or ""
-        if not identity or self._proxy_identities.get(platform) == identity:
+        identity_key = (platform, profile_slot)
+        if not identity or self._proxy_identities.get(identity_key) == identity:
             return
         await context.clear_cookies()
         await context.add_init_script(
@@ -250,7 +283,7 @@ class BrowserFallback:
             }
             """
         )
-        self._proxy_identities[platform] = identity
+        self._proxy_identities[identity_key] = identity
 
     async def _seed_cookies(self, context: Any, url: str, platform: EngagementPlatform) -> None:
         # The compatibility setting is a Douyin session cookie.  Reusing the

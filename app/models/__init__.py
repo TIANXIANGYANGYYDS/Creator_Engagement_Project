@@ -1,6 +1,11 @@
 from app.models.engagement import (
     CommentDataResponse,
     CommentPageResult,
+    CollectItemRequest,
+    CollectItemResponse,
+    CollectRequest,
+    CollectResponse,
+    CollectResultData,
     EngagementComment,
     EngagementCoverage,
     EngagementPlatform,
@@ -13,6 +18,11 @@ from app.models.engagement import (
 __all__ = [
     "CommentDataResponse",
     "CommentPageResult",
+    "CollectItemRequest",
+    "CollectItemResponse",
+    "CollectRequest",
+    "CollectResponse",
+    "CollectResultData",
     "EngagementComment",
     "EngagementCoverage",
     "EngagementPlatform",

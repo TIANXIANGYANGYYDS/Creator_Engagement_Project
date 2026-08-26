@@ -34,7 +34,7 @@ class Settings(BaseSettings):
         default="prefer",
         alias="PROXY_MODE",
     )
-    proxy_pool_size: int = Field(default=4, alias="PROXY_POOL_SIZE", ge=1, le=200)
+    proxy_pool_size: int = Field(default=8, alias="PROXY_POOL_SIZE", ge=1, le=200)
     proxy_max_concurrency: int = Field(
         default=1,
         alias="PROXY_MAX_CONCURRENCY",
@@ -96,7 +96,7 @@ class Settings(BaseSettings):
         gt=0,
     )
     collection_max_concurrency: int = Field(
-        default=4,
+        default=8,
         alias="COLLECTION_MAX_CONCURRENCY",
         ge=1,
     )
@@ -115,6 +115,18 @@ class Settings(BaseSettings):
         alias="PROTOCOL_RETRY_BASE_SECONDS",
         ge=0,
         le=30,
+    )
+    toutiao_protocol_max_attempts: int = Field(
+        default=1,
+        alias="TOUTIAO_PROTOCOL_MAX_ATTEMPTS",
+        ge=1,
+        le=10,
+    )
+    douyin_protocol_max_attempts: int = Field(
+        default=5,
+        alias="DOUYIN_PROTOCOL_MAX_ATTEMPTS",
+        ge=1,
+        le=10,
     )
     engagement_cache_ttl_seconds: float = Field(
         default=120,
@@ -135,10 +147,17 @@ class Settings(BaseSettings):
     )
     browser_headless: bool = Field(default=True, alias="BROWSER_HEADLESS")
     browser_max_concurrency: int = Field(
-        default=1,
+        default=3,
         alias="BROWSER_MAX_CONCURRENCY",
         ge=1,
     )
+    browser_max_attempts: int = Field(
+        default=3,
+        alias="BROWSER_MAX_ATTEMPTS",
+        ge=1,
+        le=5,
+    )
+    browser_geoip_enabled: bool = Field(default=False, alias="BROWSER_GEOIP_ENABLED")
     browser_reset_guest_state_on_proxy_change: bool = Field(
         default=True,
         alias="BROWSER_RESET_GUEST_STATE_ON_PROXY_CHANGE",

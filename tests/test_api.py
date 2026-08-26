@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from app.api.app import create_app
@@ -10,6 +13,11 @@ from app.models.engagement import CommentPageResult, EngagementComment, Interact
 class FakeService:
     def __init__(self) -> None:
         self.comment_calls: list[tuple[int, str | None]] = []
+        self.added_proxy_ips = 0
+
+    @asynccontextmanager
+    async def proxy_usage_scope(self):
+        yield SimpleNamespace(added_endpoint_count=self.added_proxy_ips)
 
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
         if media_name == "微博":
@@ -45,6 +53,18 @@ class FakeService:
         )
 
 
+class CanonicalNameService(FakeService):
+    async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+        platform = "wechat" if media_name == "微信公众号" else "bilibili"
+        return InteractionResult(
+            platform=platform,
+            canonical_url=url,
+            work_id="123",
+            coverage="complete",
+            stats={"likes": 1},
+        )
+
+
 def test_health_interactions_and_comments_routes() -> None:
     app = create_app()
     service = FakeService()
@@ -74,6 +94,10 @@ def test_health_interactions_and_comments_routes() -> None:
 
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
+    assert health.json()["collection_max_concurrency"] == 8
+    assert health.json()["browser_max_concurrency"] == 3
+    assert health.json()["browser_max_attempts"] == 3
+    assert health.json()["douyin_protocol_max_attempts"] == 5
     assert interactions.status_code == 200
     assert interactions.json()["data"]["comments"] == 28
     assert set(interactions.json()) == {"data"}
@@ -102,3 +126,204 @@ def test_api_rejects_invalid_page_and_media_mismatch() -> None:
     assert invalid_page.status_code == 422
     assert mismatch.status_code == 422
     assert "does not match" in mismatch.json()["detail"]
+
+
+def test_collect_returns_uniform_results_chinese_media_and_batch_cost() -> None:
+    app = create_app()
+    service = FakeService()
+    service.added_proxy_ips = 2
+    app.dependency_overrides[get_engagement_service] = lambda: service
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/collect",
+            json={
+                "items": [
+                    {
+                        "url": "https://www.toutiao.com/article/123/",
+                        "media_name": "头条",
+                        "type": "interactions",
+                    },
+                    {
+                        "url": "https://www.toutiao.com/article/456/",
+                        "media_name": "今日头条",
+                        "type": "comments",
+                    },
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cost_yuan"] == 0.00168
+    assert payload["duration_ms"] >= 0
+    assert [item["media_name"] for item in payload["data"]] == [
+        "今日头条",
+        "今日头条",
+    ]
+    assert [item["status"] for item in payload["data"]] == ["partial", "partial"]
+    result_keys = {
+        "views",
+        "likes",
+        "total_comments",
+        "shares",
+        "favorites",
+        "coins",
+        "danmaku",
+        "reposts",
+        "recommendations",
+        "comment_list",
+    }
+    assert set(payload["data"][0]["result"]) == result_keys
+    assert set(payload["data"][1]["result"]) == result_keys
+    assert payload["data"][0]["result"]["total_comments"] == 28
+    assert payload["data"][0]["result"]["comment_list"] is None
+    assert payload["data"][1]["result"]["views"] is None
+    assert [
+        comment["comment_id"] for comment in payload["data"][1]["result"]["comment_list"]
+    ] == ["c1", "c2"]
+    assert service.comment_calls == [(1, None), (2, "cursor-2")]
+
+
+def test_collect_has_no_item_count_limit_and_isolates_item_failures() -> None:
+    app = create_app()
+    service = FakeService()
+    app.dependency_overrides[get_engagement_service] = lambda: service
+    items = [
+        {
+            "url": f"https://www.toutiao.com/article/{index}/",
+            "media_name": "今日头条",
+            "type": "interactions",
+        }
+        for index in range(101)
+    ]
+    items.append({
+        "url": "https://www.toutiao.com/article/999/",
+        "media_name": "微博",
+        "type": "interactions",
+    })
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/collect", json={"items": items})
+        invalid_type = client.post(
+            "/api/v1/collect",
+            json={
+                "items": [{
+                    "url": "https://www.toutiao.com/article/123/",
+                    "media_name": "今日头条",
+                    "type": "all",
+                }]
+            },
+        )
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 102
+    failed = response.json()["data"][-1]
+    assert failed["status"] == "failed"
+    assert failed["media_name"] == "微博"
+    assert failed["error"] == "media_name does not match URL platform"
+    assert all(value is None for value in failed["result"].values())
+    assert invalid_type.status_code == 422
+
+
+def test_collect_returns_canonical_wechat_and_bilibili_names() -> None:
+    app = create_app()
+    app.dependency_overrides[get_engagement_service] = lambda: CanonicalNameService()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/collect",
+            json={
+                "items": [
+                    {
+                        "url": "https://mp.weixin.qq.com/s/article",
+                        "media_name": "微信公众号",
+                        "type": "interactions",
+                    },
+                    {
+                        "url": "https://www.bilibili.com/video/BVxxx",
+                        "media_name": "B站",
+                        "type": "interactions",
+                    },
+                    {
+                        "url": "https://www.bilibili.com/video/BVyyy",
+                        "media_name": "哔哩哔哩",
+                        "type": "interactions",
+                    },
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert [item["media_name"] for item in response.json()["data"]] == [
+        "微信",
+        "哔哩哔哩",
+        "哔哩哔哩",
+    ]
+
+
+def test_collect_comments_without_page_fetches_all_pages() -> None:
+    app = create_app()
+    service = FakeService()
+    app.dependency_overrides[get_engagement_service] = lambda: service
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/collect",
+            json={
+                "items": [{
+                    "url": "https://www.toutiao.com/article/123/",
+                    "media_name": "今日头条",
+                    "type": "comments",
+                }]
+            },
+        )
+
+    assert response.status_code == 200
+    assert service.comment_calls == [(1, None), (2, "cursor-2")]
+    assert len(response.json()["data"][0]["result"]["comment_list"]) == 2
+
+
+def test_collect_comments_with_numeric_page_fetches_only_that_page() -> None:
+    app = create_app()
+    service = FakeService()
+    app.dependency_overrides[get_engagement_service] = lambda: service
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/collect",
+            json={
+                "items": [{
+                    "url": "https://www.toutiao.com/article/123/",
+                    "media_name": "今日头条",
+                    "type": "comments",
+                    "page": 2,
+                }]
+            },
+        )
+
+    assert response.status_code == 200
+    assert service.comment_calls == [(2, None)]
+    assert [
+        comment["comment_id"] for comment in response.json()["data"][0]["result"]["comment_list"]
+    ] == ["c2"]
+
+
+def test_collect_comment_page_must_be_a_json_number() -> None:
+    app = create_app()
+    app.dependency_overrides[get_engagement_service] = lambda: FakeService()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/collect",
+            json={
+                "items": [{
+                    "url": "https://www.toutiao.com/article/123/",
+                    "media_name": "今日头条",
+                    "type": "comments",
+                    "page": "2",
+                }]
+            },
+        )
+
+    assert response.status_code == 422

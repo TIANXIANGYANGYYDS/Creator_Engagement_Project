@@ -23,4 +23,22 @@ async def health() -> dict[str, object]:
         ),
         "proxy_pool_size": settings.proxy_pool_size,
         "proxy_max_concurrency": settings.proxy_max_concurrency,
+        "collection_max_concurrency": settings.collection_max_concurrency,
+        "toutiao_protocol_max_attempts": (
+            settings.toutiao_protocol_max_attempts
+            if settings.reliability_mode == "enterprise"
+            else 1
+        ),
+        "douyin_protocol_max_attempts": (
+            settings.douyin_protocol_max_attempts
+            if settings.reliability_mode == "enterprise"
+            else 1
+        ),
+        "browser_max_concurrency": settings.browser_max_concurrency,
+        "browser_max_attempts": (
+            settings.browser_max_attempts
+            if settings.reliability_mode == "enterprise"
+            else 1
+        ),
+        "browser_geoip_enabled": settings.browser_geoip_enabled,
     }

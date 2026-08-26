@@ -37,6 +37,7 @@ MEDIA_ALIASES: dict[str, EngagementPlatform] = {
     "快手": "kuaishou",
     "bilibili": "bilibili",
     "b站": "bilibili",
+    "哔哩哔哩": "bilibili",
     "weibo": "weibo",
     "微博": "weibo",
 }

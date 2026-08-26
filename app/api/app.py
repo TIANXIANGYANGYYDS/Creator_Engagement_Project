@@ -37,7 +37,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Creator Engagement API",
         version="0.1.0",
-        description="按公开内容 URL 获取互动统计和公开评论。",
+        description="按公开内容 URL 获取互动统计和公开评论，支持批量采集。",
         lifespan=lifespan,
     )
     app.add_exception_handler(Exception, _unexpected_error_handler)

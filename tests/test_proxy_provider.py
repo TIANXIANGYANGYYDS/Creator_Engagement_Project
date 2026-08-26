@@ -73,9 +73,11 @@ def test_async_pool_limits_concurrency_and_refills_failed_slot(monkeypatch) -> N
 
     async def run() -> None:
         try:
-            leases = await asyncio.gather(
-                *(provider.get_requests_proxies() for _ in range(4))
-            )
+            async with provider.usage_scope() as usage:
+                leases = await asyncio.gather(
+                    *(provider.get_requests_proxies() for _ in range(4))
+                )
+            assert usage.added_endpoint_count == 2
             assert Counter(lease["https"] for lease in leases) == Counter({
                 "http://127.0.0.1:8000": 2,
                 "http://127.0.0.1:8001": 2,

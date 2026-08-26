@@ -3,8 +3,8 @@
 根据公开内容 URL 获取互动量和一级评论的独立项目，与 `Stock_Project` 无代码依赖。当前部署
 运行于 `MyAgent`（Python 3.13.12），采用协议优先、浏览器兜底、代理池复用和企业级重试。
 
-项目当前支持九个渠道：抖音、今日头条、微信公众号、微信视频号、小红书、好看视频、快手、
-B 站和微博。微信公众号与微信视频号是两个不同的平台适配器。
+项目当前支持九个渠道：抖音、今日头条、微信（微信公众号）、微信视频号、小红书、好看视频、
+快手、哔哩哔哩和微博。微信公众号与微信视频号是两个不同的平台适配器。
 
 ## 当前业务边界
 
@@ -25,25 +25,26 @@ B 站和微博。微信公众号与微信视频号是两个不同的平台适配
 |---|---|---|---|
 | 抖音 | 匿名协议可用 | 可用 | 可翻到公开末游标 |
 | 今日头条 | 可用，部分文章受 SSR 挑战影响 | 可用 | 可按 offset 翻到公开末页 |
-| 微信公众号 | 严格匿名模式不可稳定获取 | 不可用 | 不适用 |
+| 微信（微信公众号） | 严格匿名模式不可稳定获取 | 不可用 | 不适用 |
 | 微信视频号 | 匿名公开预览可用，不含播放量 | 不可用 | 不适用 |
 | 小红书 | 带有效 `xsec_token` 的 URL 可匿名获取 | 默认不可用；Cookie 模式可用 | Cookie 模式按 cursor 翻到会话可见末页 |
 | 好看视频 | 可用，未公开字段保持 `null` | 可用 | 可按页翻到公开末页 |
 | 快手 | 自动游客状态可用 | 可用 | 可按游标翻到公开末页 |
-| B 站 | 视频、专栏和 Opus 可用 | 可用 | 可翻到公开末页 |
+| 哔哩哔哩 | 视频、专栏和 Opus 可用 | 可用 | 可翻到公开末页 |
 | 微博 | 访客公开字段可用 | 可用 | 可翻多页，但不能保证到底 |
 
 当前没有固定“只能获取第一页”的平台。微博已经验证能够获取第二页，但更深页可能触发
 `ok=-100`、登录跳转或风控，因此不能归为“仅第一页”，也不能承诺全部。
 
-B 站页面的评论总数可能包含评论下的回复数量，所以一级评论行数少于 `total_comments` 不一定
-表示漏页。B 站直播不在业务范围内，`live.bilibili.com` 会在请求上游前被拒绝。
+哔哩哔哩页面的评论总数可能包含评论下的回复数量，所以一级评论行数少于 `total_comments`
+不一定表示漏页。哔哩哔哩直播不在业务范围内，`live.bilibili.com` 会在请求上游前被拒绝。
 
 ## 对外接口
 
-服务只保留两个业务数据接口，成功响应统一使用 `{"data": ...}`：
+服务提供一个批量接口和两个兼容的单项接口：
 
 ```text
+POST /api/v1/collect
 GET /api/v1/interactions?url=<URL>&media_name=<MEDIA>
 GET /api/v1/comments?url=<URL>&media_name=<MEDIA>
 GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1
@@ -68,8 +69,16 @@ douyin / toutiao / wechat / wechat_channels / xiaohongshu /
 haokan / kuaishou / bilibili / weibo
 ```
 
-接口也接受抖音、头条、公众号、微信视频号、小红书、好看、快手、B站和微博等中文名称。
-服务会同时校验 URL 平台和 `media_name`；两者不一致时返回 HTTP 422。
+接口也接受抖音、头条、微信、微信公众号、微信视频号、小红书、好看、快手、哔哩哔哩、
+B站和微博等中文名称。
+服务会同时校验 URL 平台和 `media_name`；两者不一致时，单项接口返回 HTTP 422，批量接口
+把对应项标为 `failed` 并继续处理其他项。
+
+批量接口接收包含 `url`、中文 `media_name`、`type` 和可选 `page` 的 `items` 数组，不设置
+业务条数上限。评论项不传 `page` 时获取全部当前可见一级评论，传数字时只获取对应页。响应
+使用规范名“微信”和“哔哩哔哩”，同时继续接受“微信公众号”和“B站”。返回项使用固定字段
+结构，平台没有公开的字段为 `null`，并在批次顶层返回总耗时 `duration_ms` 和本批次触发新增
+代理 IP 的采购成本 `cost_yuan`。完整示例见接口文档。
 
 ### 调用示例
 
@@ -174,7 +183,7 @@ conda run -n MyAgent uvicorn app.api.app:create_app \
 
 ```bash
 conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
-conda run -n MyAgent creator-engagement comments '<内容 URL>' B站 --page 1
+conda run -n MyAgent creator-engagement comments '<内容 URL>' 哔哩哔哩 --page 1
 ```
 
 增加 `--direct` 可以让单次 CLI 调用绕过代理配置。
@@ -190,20 +199,24 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' B站 --page 1
 | `XIAOHONGSHU_COOKIE` | 空 | 小红书 Cookie Secret，必须包含非空 `a1` 和 `web_session` |
 | `PROXY_MODE` | `prefer` | 有代理配置时优先代理，无代理时允许直连 |
 | `PROXY_51_API_URL` | 空 | Stock 项目同源的 51 代理供应接口 |
-| `PROXY_POOL_SIZE` | `4` | 代理池目标数量 |
+| `PROXY_POOL_SIZE` | `8` | 代理池目标数量 |
 | `PROXY_MAX_CONCURRENCY` | `1` | 单个代理的最大并发 |
 | `RELIABILITY_MODE` | `enterprise` | 启用协议重试、语义失败换 IP 和平台保护 |
 | `PROTOCOL_MAX_ATTEMPTS` | `3` | 企业模式最大协议尝试次数 |
-| `COLLECTION_MAX_CONCURRENCY` | `4` | 全局采集并发 |
+| `TOUTIAO_PROTOCOL_MAX_ATTEMPTS` | `1` | 头条 SSR 能力探测次数；避免确定性空结果重复换 IP |
+| `DOUYIN_PROTOCOL_MAX_ATTEMPTS` | `5` | 抖音 HTTP 200 空包时的协议换 IP 上限 |
+| `COLLECTION_MAX_CONCURRENCY` | `8` | 全局采集并发 |
 | `BROWSER_FALLBACK_ENABLED` | `true` | 协议不可用时允许浏览器兜底 |
-| `BROWSER_MAX_CONCURRENCY` | `1` | 浏览器最大并发，避免服务器内存被打满 |
+| `BROWSER_MAX_CONCURRENCY` | `3` | 浏览器最大并发；每个并发槽使用独立持久化 Profile |
+| `BROWSER_MAX_ATTEMPTS` | `3` | 兜底空结果或阻断时换 IP 再试的次数 |
+| `BROWSER_GEOIP_ENABLED` | `false` | 是否额外查询代理 GeoIP；默认关闭以避免外部探测超时 |
 | `ENGAGEMENT_CACHE_TTL_SECONDS` | `120` | 成功结果缓存时间 |
 | `ENGAGEMENT_CACHE_MAX_ENTRIES` | `1000` | 最大缓存项数 |
 
 代理池支持批量补池、IP TTL、单 IP 并发限制、失败淘汰和供应商 API 限流。一次业务调用内部的
 预热和数据请求可以共用代理租约，但每个 HTTP 调用仍分别计入上游请求量。
 
-默认企业模式最多进行 3 次协议尝试。HTTP 200 空包、验证码或缺少目标字段不会被当作成功；
+默认企业模式最多进行 3 次协议尝试，头条互动 SSR 探测根据实测单独限制为 1 次，抖音空包最多尝试 5 个协议出口；浏览器兜底最多换 IP 尝试 3 次。HTTP 200 空包、验证码或缺少目标字段不会被当作成功；
 可重试的语义失败会淘汰当前代理。相同接口、相同 URL、相同页码的并发请求会合并，成功或
 有效部分结果缓存 120 秒。
 
@@ -217,7 +230,7 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' B站 --page 1
 公众号和微信视频号评论不会通过历史账号 Profile 或浏览器登录绕过严格匿名边界。小红书只
 接受 `.local/env/.env` 中显式提供的 Cookie，不会启动浏览器模拟登录；Cookie 只发送给
 `edith.xiaohongshu.com` 评论接口，且不会出现在日志、错误原因或 API 响应中。抖音签名、
-B 站 WBI 密钥以及快手短期游客状态均在运行时生成，不应硬编码到源码或日志。
+哔哩哔哩 WBI 密钥以及快手短期游客状态均在运行时生成，不应硬编码到源码或日志。
 
 启用小红书评论：
 
@@ -259,7 +272,7 @@ xiaohongshu.py / haokan.py / kuaishou.py / bilibili.py / weibo.py
 当前全量自动化结果：
 
 ```text
-178 passed
+191 passed
 ruff check app tests: All checks passed
 ```
 

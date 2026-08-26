@@ -30,6 +30,8 @@ CommentPaginationMode = Literal[
     "first_public_page",
     "unavailable",
 ]
+CollectOperation = Literal["interactions", "comments"]
+CollectStatus = Literal["success", "partial", "failed"]
 
 
 class EngagementStats(BaseModel):
@@ -110,6 +112,45 @@ class InteractionDataResponse(BaseModel):
 
 class CommentDataResponse(BaseModel):
     data: list[EngagementComment] = Field(default_factory=list)
+
+
+class CollectItemRequest(BaseModel):
+    url: str = Field(min_length=1)
+    media_name: str = Field(min_length=1)
+    type: CollectOperation
+    page: int | None = Field(default=None, ge=1, strict=True)
+
+
+class CollectRequest(BaseModel):
+    items: list[CollectItemRequest] = Field(min_length=1)
+
+
+class CollectResultData(BaseModel):
+    views: int | None = Field(default=None, ge=0)
+    likes: int | None = Field(default=None, ge=0)
+    total_comments: int | None = Field(default=None, ge=0)
+    shares: int | None = Field(default=None, ge=0)
+    favorites: int | None = Field(default=None, ge=0)
+    coins: int | None = Field(default=None, ge=0)
+    danmaku: int | None = Field(default=None, ge=0)
+    reposts: int | None = Field(default=None, ge=0)
+    recommendations: int | None = Field(default=None, ge=0)
+    comment_list: list[EngagementComment] | None = None
+
+
+class CollectItemResponse(BaseModel):
+    url: str
+    media_name: str
+    type: CollectOperation
+    status: CollectStatus
+    result: CollectResultData
+    error: str | None = None
+
+
+class CollectResponse(BaseModel):
+    data: list[CollectItemResponse]
+    duration_ms: int = Field(ge=0)
+    cost_yuan: float = Field(ge=0)
 
 
 class EngagementResult(CollectionResult):

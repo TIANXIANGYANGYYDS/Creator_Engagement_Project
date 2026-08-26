@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, AsyncIterator, Dict, List, Optional, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -539,6 +541,13 @@ class ProxyPoolStats:
     max_in_flight: int = 0  #: 池内所有槽位同时在途请求数的历史峰值。
 
 
+@dataclass
+class ProxyUsage:
+    """新增代理端点用量，用于核算一个批次触发的采购成本。"""
+
+    added_endpoint_count: int = 0
+
+
 class AsyncDailiProxyPool(DailiProxyProvider):
     """维护多个 51 代理 IP，并限制每个端点的并发租约数。
 
@@ -577,6 +586,10 @@ class AsyncDailiProxyPool(DailiProxyProvider):
         self._slots: List[_ProxyPoolSlot] = []  #: 当前有效或正在排空的代理槽位集合。
         self._fetching = False  #: 是否已有协程离开条件锁并正在调用供应商补池。
         self.stats = ProxyPoolStats()  #: 暴露给诊断和测试读取的累计运行指标。
+        self._usage: ContextVar[ProxyUsage | None] = ContextVar(
+            "creator_engagement_proxy_usage",
+            default=None,
+        )
 
     @property
     def _condition(self) -> asyncio.Condition:
@@ -584,6 +597,17 @@ class AsyncDailiProxyPool(DailiProxyProvider):
         if self._condition_instance is None:
             self._condition_instance = asyncio.Condition()
         return self._condition_instance
+
+    @asynccontextmanager
+    async def usage_scope(self) -> AsyncIterator[ProxyUsage]:
+        """记录当前协程树触发加入代理池的新端点数量。"""
+
+        usage = ProxyUsage()
+        token = self._usage.set(usage)
+        try:
+            yield usage
+        finally:
+            self._usage.reset(token)
 
     def _slot_expire_at(self) -> float:
         """计算新槽位在单调时钟上的提前刷新截止点。"""
@@ -703,6 +727,9 @@ class AsyncDailiProxyPool(DailiProxyProvider):
                     added += 1
                     self.stats.added_endpoint_count += 1
                 self._fetching = False
+                usage = self._usage.get()
+                if usage is not None:
+                    usage.added_endpoint_count += added
                 self._condition.notify_all()
                 if added:
                     logger.info(

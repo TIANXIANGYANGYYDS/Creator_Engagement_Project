@@ -57,6 +57,8 @@ class EngagementCrawler:
         session_store: "PlatformSessionStore | None" = None,
         platform_cookies: dict[EngagementPlatform, str] | None = None,
         max_protocol_attempts: int = 1,
+        platform_protocol_max_attempts: dict[EngagementPlatform, int] | None = None,
+        max_browser_attempts: int = 1,
         protocol_retry_base_seconds: float = 1,
         strict_anonymous_mode: bool = False,
         xiaohongshu_cookie_enabled: bool = False,
@@ -72,6 +74,13 @@ class EngagementCrawler:
     ) -> None:
         if max_protocol_attempts <= 0:
             raise ValueError("max_protocol_attempts must be greater than zero")
+        if any(
+            attempts <= 0
+            for attempts in (platform_protocol_max_attempts or {}).values()
+        ):
+            raise ValueError("platform protocol attempts must be greater than zero")
+        if max_browser_attempts <= 0:
+            raise ValueError("max_browser_attempts must be greater than zero")
         if protocol_retry_base_seconds < 0:
             raise ValueError("protocol_retry_base_seconds must not be negative")
         self._owns_client = client is None
@@ -92,6 +101,8 @@ class EngagementCrawler:
         self.session_store = session_store
         self.platform_cookies = platform_cookies or {}
         self.max_protocol_attempts = max_protocol_attempts
+        self.platform_protocol_max_attempts = platform_protocol_max_attempts or {}
+        self.max_browser_attempts = max_browser_attempts
         self.protocol_retry_base_seconds = protocol_retry_base_seconds
         self.strict_anonymous_mode = strict_anonymous_mode
         self.xiaohongshu_cookie_enabled = xiaohongshu_cookie_enabled
@@ -267,7 +278,11 @@ class EngagementCrawler:
         include_comments: bool,
     ) -> EngagementResult:
         result: EngagementResult | None = None
-        for attempt in range(1, self.max_protocol_attempts + 1):
+        max_attempts = self.platform_protocol_max_attempts.get(
+            platform,
+            self.max_protocol_attempts,
+        )
+        for attempt in range(1, max_attempts + 1):
             lease_scope = getattr(self.client, "lease_scope", None)
             if callable(lease_scope):
                 async with lease_scope():
@@ -319,7 +334,7 @@ class EngagementCrawler:
                 # A fixed direct exit cannot recover from the note-page wall.
                 # Retrying is useful only when the next attempt can rotate IP.
                 return result
-            if not should_retry or attempt == self.max_protocol_attempts:
+            if not should_retry or attempt == max_attempts:
                 return result
 
             delay = self._retry_delay(
@@ -333,7 +348,7 @@ class EngagementCrawler:
                 platform,
                 work_id,
                 attempt,
-                self.max_protocol_attempts,
+                max_attempts,
                 delay,
                 result.coverage,
                 result.reason,
@@ -438,24 +453,51 @@ class EngagementCrawler:
     ) -> EngagementResult | None:
         if self.browser_fallback is None:
             return None
-        try:
-            return await self.browser_fallback.fetch(
-                url,
-                platform,
-                work_id,
-                page=page,
-                limit=limit,
-                include_stats=include_stats,
-                include_comments=include_comments,
+        result: EngagementResult | None = None
+        for attempt in range(1, self.max_browser_attempts + 1):
+            try:
+                result = await self.browser_fallback.fetch(
+                    url,
+                    platform,
+                    work_id,
+                    page=page,
+                    limit=limit,
+                    include_stats=include_stats,
+                    include_comments=include_comments,
+                )
+            except Exception as exc:
+                result = result_error(
+                    platform,
+                    url,
+                    work_id,
+                    "failed",
+                    f"浏览器兜底调用失败: {type(exc).__name__}: {exc}",
+                )
+            stats_ok = not include_stats or any(
+                value is not None for value in result.stats.model_dump().values()
             )
-        except Exception as exc:
-            return result_error(
-                platform,
-                url,
-                work_id,
-                "failed",
-                f"浏览器兜底调用失败: {type(exc).__name__}: {exc}",
+            comments_ok = (
+                not include_comments
+                or bool(result.comments)
+                or result.stats.comments == 0
             )
+            if (
+                result.coverage in {"complete", "partial"}
+                and stats_ok
+                and comments_ok
+            ):
+                return result
+            if attempt < self.max_browser_attempts:
+                logger.warning(
+                    "browser_retry platform=%s work_id=%s attempt=%s/%s coverage=%s reason=%s",
+                    platform,
+                    work_id,
+                    attempt,
+                    self.max_browser_attempts,
+                    result.coverage,
+                    result.reason,
+                )
+        return result
 
     async def _get_json(
         self,

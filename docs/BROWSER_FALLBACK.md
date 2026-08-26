@@ -9,15 +9,19 @@
 
 - `EngagementService.from_settings()` 创建一个 `BrowserFallback`，与协议客户端共用
   同一个 51 代理池。
-- 浏览器全局并发由 `BROWSER_MAX_CONCURRENCY` 限制；同一平台另外串行执行，避免多个进程
-  同时写一个持久化 Profile。默认最多 1 个浏览器，确认内存充足并压测后才建议设为 2。
+- 浏览器全局并发由 `BROWSER_MAX_CONCURRENCY` 限制。每个并发槽使用独立持久化 Profile；
+  `slot 0` 保留原平台 Profile，其他槽写入 `<platform>-worker-N`，避免并行浏览器争用同一目录。
+  当前 16 核、29 GiB 服务器默认使用 3 个浏览器槽。
+- 企业模式下，浏览器返回空字段、挑战或执行失败时最多换 IP 尝试 3 次；无数据结果会把
+  当前代理标记失败，不再把受阻出口放回代理池继续复用。
 - 互动接口和评论接口分别进入浏览器兜底、分别缓存；不会因为两个请求使用同一个浏览器
   Profile 或同一个代理 IP，就把它们记录成一次上游请求。
 - 严格匿名模式下每个平台使用独立的 `.local/browser-profiles/anonymous/<platform>` Profile，平台生成的
   `ttwid`、`msToken`、`UIFID`、`x-s` 等状态由浏览器自己维护并自然过期。
 - 浏览器退出前把当前 storage-state 以 0600 权限同步到 `.local/platform-sessions/anonymous`，
   后续协议请求只复用游客状态，避免每次都重新启动浏览器。
-- 使用代理时启用 Camoufox GeoIP/时区对齐，browser 可选依赖包含免费的 `maxminddb`。
+- 代理 GeoIP 探测默认关闭，避免 `ipecho.net` 等第三方探测超时让有效代理被误判失败；只有
+  目标平台确实依赖地理位置时才显式设置 `BROWSER_GEOIP_ENABLED=true`。
   可丢弃的快手游客压测 Profile 可在 IP 变化时重建设备状态；该开关默认关闭，不会清除
   用户的真实登录会话。
 - `CREATOR_ENGAGEMENT_COOKIE` 是兼容 Stock 配置的抖音会话，只注入抖音域名，既不打印也
@@ -39,7 +43,9 @@ BROWSER_FALLBACK_ENABLED=true
 BROWSER_TIMEOUT_SECONDS=35
 BROWSER_CHALLENGE_WAIT_SECONDS=5
 BROWSER_HEADLESS=true
-BROWSER_MAX_CONCURRENCY=1
+BROWSER_MAX_CONCURRENCY=3
+BROWSER_MAX_ATTEMPTS=3
+BROWSER_GEOIP_ENABLED=false
 BROWSER_RESET_GUEST_STATE_ON_PROXY_CHANGE=false
 BROWSER_PROFILE_DIR=".local/browser-profiles"
 PLATFORM_SESSION_DIR=".local/platform-sessions"

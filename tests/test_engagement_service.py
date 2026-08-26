@@ -156,6 +156,21 @@ def test_required_proxy_mode_requires_api_url() -> None:
         EngagementService.from_settings(settings)
 
 
+def test_economy_mode_disables_platform_and_browser_retry_overrides() -> None:
+    settings = Settings(
+        _env_file=None,
+        reliability_mode="economy",
+        browser_fallback_enabled=False,
+    )
+
+    service = EngagementService.from_settings(settings, proxy_mode="direct")
+
+    assert service.crawler.max_protocol_attempts == 1
+    assert service.crawler.platform_protocol_max_attempts == {}
+    assert service.crawler.max_browser_attempts == 1
+    asyncio.run(service.aclose())
+
+
 def test_service_injects_dedicated_wechat_cookie(monkeypatch) -> None:
     monkeypatch.delenv("CREATOR_ENGAGEMENT_COOKIE", raising=False)
     monkeypatch.delenv("DOUYIN_SESSION_COOKIE", raising=False)

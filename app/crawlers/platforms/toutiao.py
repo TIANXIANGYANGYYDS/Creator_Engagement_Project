@@ -42,6 +42,7 @@ async def fetch(
                         "Accept": "text/html,application/xhtml+xml",
                         "Referer": f"https://www.toutiao.com/article/{work_id}/",
                     },
+                    force_direct=True,
                 )
                 stats = parse_stats(str(getattr(article_response, "text", "") or ""))
                 if _has_stats(stats):

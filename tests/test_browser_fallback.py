@@ -96,6 +96,41 @@ def test_browser_fallback_has_a_global_concurrency_limit() -> None:
     assert browser.max_active == 2
 
 
+def test_browser_fallback_parallelizes_same_platform_with_profile_slots() -> None:
+    class CountingBrowserFallback(BrowserFallback):
+        def __init__(self) -> None:
+            super().__init__(settings=BrowserFallbackSettings(max_concurrency=2))
+            self.active = 0
+            self.max_active = 0
+            self.slots = set()
+
+        async def _fetch_locked(self, url, platform, work_id, **kwargs):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.slots.add(kwargs["profile_slot"])
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            return EngagementResult(
+                platform=platform,
+                canonical_url=url,
+                work_id=work_id,
+                coverage="partial",
+            )
+
+    async def run() -> CountingBrowserFallback:
+        browser = CountingBrowserFallback()
+        await asyncio.gather(
+            browser.fetch("u1", "toutiao", "1", page=1, limit=20, include_stats=True, include_comments=False),
+            browser.fetch("u2", "toutiao", "2", page=1, limit=20, include_stats=True, include_comments=False),
+        )
+        return browser
+
+    browser = asyncio.run(run())
+
+    assert browser.max_active == 2
+    assert browser.slots == {0, 1}
+
+
 def test_wechat_protocol_result_never_uses_accounted_browser_fallback() -> None:
     browser = FakeBrowserFallback()
     result = asyncio.run(

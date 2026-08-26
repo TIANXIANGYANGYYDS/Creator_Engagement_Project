@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -17,6 +18,7 @@ from app.crawlers.proxy_provider import (
     AsyncDailiProxyPool,
     AsyncProxyProvider,
     AsyncRequestRateLimiter,
+    ProxyUsage,
 )
 from app.models.engagement import (
     CommentPageResult,
@@ -39,6 +41,8 @@ class PlatformTrafficPolicy:
 
 
 ENTERPRISE_PLATFORM_POLICIES: dict[EngagementPlatform, PlatformTrafficPolicy] = {
+    "douyin": PlatformTrafficPolicy(max_concurrency=2, min_interval_seconds=0),
+    "toutiao": PlatformTrafficPolicy(max_concurrency=3, min_interval_seconds=0),
     "xiaohongshu": PlatformTrafficPolicy(
         max_concurrency=1,
         min_interval_seconds=4,
@@ -172,6 +176,7 @@ class EngagementService:
                     challenge_wait_seconds=settings.browser_challenge_wait_seconds,
                     headless=settings.browser_headless,
                     max_concurrency=settings.browser_max_concurrency,
+                    geoip=settings.browser_geoip_enabled,
                     profile_dir=profile_dir,
                     reset_guest_state_on_proxy_change=(
                         settings.browser_reset_guest_state_on_proxy_change
@@ -212,6 +217,19 @@ class EngagementService:
             session_store=session_store,
             max_protocol_attempts=(
                 settings.protocol_max_attempts
+                if settings.reliability_mode == "enterprise"
+                else 1
+            ),
+            platform_protocol_max_attempts=(
+                {
+                    "douyin": settings.douyin_protocol_max_attempts,
+                    "toutiao": settings.toutiao_protocol_max_attempts,
+                }
+                if settings.reliability_mode == "enterprise"
+                else None
+            ),
+            max_browser_attempts=(
+                settings.browser_max_attempts
                 if settings.reliability_mode == "enterprise"
                 else 1
             ),
@@ -262,6 +280,15 @@ class EngagementService:
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         async with self._collection_semaphore:
             return await self.crawler.fetch(url, comment_limit=comment_limit)
+
+    @asynccontextmanager
+    async def proxy_usage_scope(self) -> AsyncIterator[ProxyUsage]:
+        usage_scope = getattr(self.proxy_provider, "usage_scope", None)
+        if callable(usage_scope):
+            async with usage_scope() as usage:
+                yield usage
+            return
+        yield ProxyUsage()
 
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
         platform = normalize_media_name(media_name)

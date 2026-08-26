@@ -162,6 +162,152 @@ def test_protocol_does_not_retry_intrinsic_unsupported_result(monkeypatch) -> No
     assert client.invalidations == []
 
 
+def test_platform_protocol_attempt_cap_avoids_known_useless_retries(monkeypatch) -> None:
+    calls = 0
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        nonlocal calls
+        calls += 1
+        return EngagementResult(
+            platform="toutiao",
+            canonical_url="https://www.toutiao.com/article/1234567890/",
+            work_id="1234567890",
+            coverage="partial",
+            reason="SSR missing itemCounter",
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "toutiao", handler)
+    client = LeaseAwareClient()
+    crawler = EngagementCrawler(
+        client=client,
+        max_protocol_attempts=3,
+        platform_protocol_max_attempts={"toutiao": 1},
+        protocol_retry_base_seconds=0,
+    )
+
+    result = asyncio.run(crawler.fetch_interactions(
+        "https://www.toutiao.com/article/1234567890/",
+        "toutiao",
+    ))
+
+    assert result.protocol_attempts == 1
+    assert calls == 1
+    assert client.lease_count == 1
+    assert len(client.invalidations) == 1
+
+
+def test_platform_protocol_attempt_override_can_exceed_global_default(monkeypatch) -> None:
+    calls = 0
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        nonlocal calls
+        calls += 1
+        if calls < 5:
+            return EngagementResult(
+                platform="douyin",
+                canonical_url="https://www.douyin.com/video/7665718789363309172",
+                work_id="7665718789363309172",
+                coverage="blocked",
+                reason="empty detail payload",
+            )
+        return EngagementResult(
+            platform="douyin",
+            canonical_url="https://www.douyin.com/video/7665718789363309172",
+            work_id="7665718789363309172",
+            coverage="partial",
+            stats=EngagementStats(likes=3),
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "douyin", handler)
+    crawler = EngagementCrawler(
+        client=LeaseAwareClient(),
+        max_protocol_attempts=3,
+        platform_protocol_max_attempts={"douyin": 5},
+        protocol_retry_base_seconds=0,
+    )
+
+    result = asyncio.run(crawler.fetch_interactions(
+        "https://www.douyin.com/video/7665718789363309172",
+        "douyin",
+    ))
+
+    assert result.stats.likes == 3
+    assert result.protocol_attempts == 5
+    assert calls == 5
+
+
+def test_toutiao_ssr_probe_bypasses_preferred_proxy() -> None:
+    class DirectAwareClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(FakeResponse(text="<html></html>"))
+            self.direct_scopes = 0
+
+        @asynccontextmanager
+        async def direct_scope(self):
+            self.direct_scopes += 1
+            yield
+
+    client = DirectAwareClient()
+    crawler = EngagementCrawler(client=client)
+
+    result = asyncio.run(crawler.fetch_interactions(
+        "https://www.toutiao.com/article/1234567890/",
+        "toutiao",
+    ))
+
+    assert result.coverage == "partial"
+    assert client.direct_scopes == 1
+
+
+def test_browser_fallback_retries_unusable_result(monkeypatch) -> None:
+    class RetryBrowserFallback:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def fetch(self, url, platform, work_id, **kwargs):
+            self.calls.append((url, platform, work_id, kwargs))
+            if len(self.calls) == 1:
+                return EngagementResult(
+                    platform=platform,
+                    canonical_url=url,
+                    work_id=work_id,
+                    coverage="unsupported",
+                    reason="empty browser response",
+                )
+            return EngagementResult(
+                platform=platform,
+                canonical_url=url,
+                work_id=work_id,
+                coverage="partial",
+                stats=EngagementStats(likes=9),
+            )
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        return EngagementResult(
+            platform="weibo",
+            canonical_url="https://m.weibo.cn/detail/12345678",
+            work_id="12345678",
+            coverage="blocked",
+            reason="protocol blocked",
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "weibo", handler)
+    browser = RetryBrowserFallback()
+    crawler = EngagementCrawler(
+        client=LeaseAwareClient(),
+        browser_fallback=browser,
+        max_browser_attempts=2,
+    )
+
+    result = asyncio.run(crawler.fetch_interactions(
+        "https://m.weibo.cn/detail/12345678",
+        "weibo",
+    ))
+
+    assert result.stats.likes == 9
+    assert len(browser.calls) == 2
+
+
 def test_xiaohongshu_interaction_wall_does_not_retry_fixed_direct_exit(
     monkeypatch,
 ) -> None:
@@ -408,6 +554,7 @@ def test_bilibili_live_url_is_outside_content_scope() -> None:
         ("好看视频", "haokan"),
         ("快手", "kuaishou"),
         ("B 站", "bilibili"),
+        ("哔哩哔哩", "bilibili"),
         ("微博", "weibo"),
     ],
 )
