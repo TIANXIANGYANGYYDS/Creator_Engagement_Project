@@ -71,6 +71,14 @@ def test_wechat_channels_bridge_credentials_are_optional_secrets(monkeypatch) ->
     )
 
 
+def test_wechat_channels_midu_source_is_optional(monkeypatch) -> None:
+    monkeypatch.setenv("WECHAT_CHANNELS_MIDU_URL", "https://127.0.0.1:8095")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.wechat_channels_midu_url == "https://127.0.0.1:8095"
+
+
 def test_wechat_article_cookie_is_an_independent_secret(monkeypatch) -> None:
     monkeypatch.setenv("CREATOR_ENGAGEMENT_COOKIE", "douyin-cookie")
     monkeypatch.setenv("WECHAT_ARTICLE_COOKIE", "wap_sid2=wechat-session")

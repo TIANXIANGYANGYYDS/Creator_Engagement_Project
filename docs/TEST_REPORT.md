@@ -1,5 +1,24 @@
 # 功能测试报告
 
+## 2026-08-28 视频号无账号数据源
+
+对业务文件中的 36 条 `commonFinderJsApi/feedID` URL 继续验证：浏览器注入
+`WeixinJSBridge`、模拟点击、把完整或去前缀的 `export/...` 分别作为公开 `shortUri/exportId`，
+均不能得到可播放的 `sph/eid` 页面或详情请求。这类 token 不能直接转换为公开分享 ID。
+
+现有蜜度服务可按同一批原始 URL 36/36 恢复 `skId`，再返回 `skCommentsCount`、点赞和转发。
+评论数分布为 0 条评论 32 项、1 条 2 项、2 条 1 项、5 条 1 项。将 4 条评论数大于 0 的 URL
+调用蜜度一级评论接口，响应仍全部为空，因此本项目只把评论总数纳入互动接口，不声称支持正文。
+
+实现使用一次 URL 批量查询加一次 `skId` 批量查询，最多每 300 条分块；严格匿名模式允许该
+无账号数据源，授权 Windows 微信侧车仍仅用于评论正文。`cost_yuan` 只统计代理 IP，不包含
+蜜度合同或配额成本。
+
+重启主服务后，仅通过 `POST /api/v1/collect` 请求 Excel 中 36 条 URL：36/36 返回 `partial`、
+失败 0 条，评论总数覆盖 36/36、点赞 28/36、转发 36/36，首次批量耗时 17.844 秒，代理成本
+¥0；120 秒内相同批次缓存命中耗时 1 毫秒。当前主项目 `203 passed`，Ruff、`compileall` 和
+`git diff --check` 均通过。
+
 ## 2026-08-26 互动接口并发优化
 
 `MyAgent` / Python 3.13.12 下，178 条修改前测试和最终 191 条测试均通过。使用同一批 414
@@ -11,6 +30,21 @@
 新增 `POST /api/v1/collect` 批量接口测试覆盖中文媒体名规范化、互动与评论固定字段结构、
 “微信公众号/B站”兼容别名、评论默认全量与数字页码、逐项失败隔离、102 项无固定条数上限
 请求，以及按批次新增代理 IP 核算采购成本。
+
+## 2026-08-27 视频号客户端跳转 URL
+
+业务互动文件中的视频号 URL 均为
+`mobile/commonFinderJsApi.html?api=openFinderView&extInfo.feedID=export/...`，不是此前已支持的
+`sph/eid` 公开分享页。结构化读取 CSV 后共有 36 条、36 个唯一 URL，新识别器 36/36 全部通过。
+
+普通浏览器网络只出现跳转页、合法性检查和统计上报，没有目标视频详情请求；将 `feedID`
+直接作为公开 `get_feed_info.exportId` 实测返回“此内容暂时无法播放”。当前实现因此把经过严格
+JSON/字符集校验的 `feedID` 作为授权客户端 `finderGetCommentDetail.encrypted_objectid`，恢复
+`objectId/objectNonceId` 后读取精确互动量，并用 `finderGetCommentList/lastBuffer` 分页评论。
+
+主项目 `198 passed`，Ruff、`compileall`、`git diff --check` 均通过。针对上游
+`wx_channel v5.7.7` 的补丁已做源码适用性检查；当前 Linux 服务器没有 Go 工具链和授权
+Windows 微信页面，因此不能把第三方 Go 单测或真实账号成功率伪装为已完成。
 
 验证日期：2026-08-24。运行环境：`MyAgent` / Python 3.13.12。测试原则为协议优先，
 必要时验证现有 Camoufox 兜底；不使用付费接口，不把空包、过期 URL 或登录跳转记录为成功。

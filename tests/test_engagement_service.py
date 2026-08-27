@@ -199,6 +199,7 @@ def test_strict_anonymous_mode_ignores_account_credentials_and_profiles(tmp_path
         wechat_mp_app_id="wx-account",
         wechat_mp_app_secret="secret",
         wechat_channels_bridge_url="http://127.0.0.1:2026",
+        wechat_channels_midu_url="https://127.0.0.1:8095",
         platform_session_dir=str(tmp_path / "sessions"),
     )
 
@@ -209,6 +210,7 @@ def test_strict_anonymous_mode_ignores_account_credentials_and_profiles(tmp_path
     assert service.crawler.platform_cookies == {}
     assert service.crawler.wechat_mp_app_id == ""
     assert service.crawler.wechat_channels_bridge_client is None
+    assert service.crawler.wechat_channels_midu_client is not None
     assert service.crawler.session_store.root == tmp_path / "sessions" / "anonymous"
     asyncio.run(service.aclose())
 

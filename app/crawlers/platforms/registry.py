@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -9,6 +10,7 @@ from app.models.engagement import EngagementPlatform
 
 
 WEIBO_BASE62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+WECHAT_CHANNELS_MOBILE_PATH = "/mobile/commonFinderJsApi.html"
 
 
 MEDIA_ALIASES: dict[str, EngagementPlatform] = {
@@ -82,6 +84,38 @@ def weibo_bid_to_mid(bid: str) -> str:
     return mid.lstrip("0") or "0"
 
 
+def extract_wechat_channels_mobile_feed_id(url: str) -> str:
+    """Extract an encrypted feed ID from a WeChat Channels client jump URL."""
+
+    parsed = urlparse(url)
+    if (
+        parsed.hostname != "channels.weixin.qq.com"
+        or parsed.path != WECHAT_CHANNELS_MOBILE_PATH
+    ):
+        return ""
+
+    query = parse_qs(parsed.query)
+    if query.get("api", [""])[0] != "openFinderView":
+        return ""
+    raw_ext_info = query.get("extInfo", query.get("extinfo", [""]))[0]
+    try:
+        ext_info = json.loads(raw_ext_info)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(ext_info, dict) or ext_info.get("action") != "openFinderFeed":
+        return ""
+
+    feed_id = ext_info.get("feedID")
+    if not isinstance(feed_id, str):
+        return ""
+    feed_id = feed_id.strip()
+    if not 8 <= len(feed_id) <= 512:
+        return ""
+    if re.fullmatch(r"export/[0-9A-Za-z_-]+", feed_id) is None:
+        return ""
+    return feed_id
+
+
 def identify_url(url: str) -> tuple[EngagementPlatform, str]:
     parsed = urlparse(url)
     host = parsed.netloc.lower().split(":", 1)[0]
@@ -128,6 +162,9 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
         if match:
             return "wechat_channels", match.group(1)
     if host == "channels.weixin.qq.com":
+        mobile_feed_id = extract_wechat_channels_mobile_feed_id(url)
+        if mobile_feed_id:
+            return "wechat_channels", mobile_feed_id
         short_match = re.search(r"/finder-preview/pages/sph(?:/|$)", path)
         if short_match:
             return "wechat_channels", query.get("id", [""])[0]

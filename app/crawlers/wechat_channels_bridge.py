@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
+from app.crawlers.platforms.registry import extract_wechat_channels_mobile_feed_id
 
 
 class HttpWeChatChannelsBridgeClient:
@@ -41,6 +42,16 @@ class HttpWeChatChannelsBridgeClient:
         if self._owns_client:
             await self.client.aclose()
 
+    async def fetch_interactions(self, url: str) -> dict[str, Any]:
+        profile = await self._fetch_profile(url)
+        stats = _profile_stats(profile)
+        if not any(value is not None for value in stats.values()):
+            raise PlatformCrawlerError("视频号会话桥详情响应缺少互动量")
+        return {
+            "stats": stats,
+            "source": "wx_channel/finderGetCommentDetail",
+        }
+
     async def fetch_comments(
         self,
         url: str,
@@ -48,10 +59,7 @@ class HttpWeChatChannelsBridgeClient:
         page: int,
         limit: int,
     ) -> dict[str, Any]:
-        profile = await self._get(
-            "/api/channels/feed/profile",
-            params={"url": url},
-        )
+        profile = await self._fetch_profile(url)
         object_id, nonce_id = _profile_identity(profile)
         if not object_id or not nonce_id:
             title, author = _profile_title_author(profile)
@@ -112,6 +120,15 @@ class HttpWeChatChannelsBridgeClient:
             marker = next_marker
 
         raise AssertionError("unreachable comment page loop")
+
+    async def _fetch_profile(self, url: str) -> dict[str, Any]:
+        encrypted_object_id = extract_wechat_channels_mobile_feed_id(url)
+        params = (
+            {"encrypted_object_id": encrypted_object_id}
+            if encrypted_object_id
+            else {"url": url}
+        )
+        return await self._get("/api/channels/feed/profile", params=params)
 
     async def _get(self, path: str, *, params: dict[str, str]) -> dict[str, Any]:
         headers = {"Accept": "application/json"}
@@ -186,6 +203,24 @@ def _profile_title_author(payload: dict[str, Any]) -> tuple[str, str]:
         if title and author:
             break
     return title, author
+
+
+def _profile_stats(payload: dict[str, Any]) -> dict[str, int | None]:
+    count_keys = {
+        "views": "readCount",
+        "likes": "likeCount",
+        "comments": "commentCount",
+        "shares": "forwardCount",
+        "favorites": "favCount",
+    }
+    for item in _walk_dicts(payload):
+        if not any(key in item for key in count_keys.values()):
+            continue
+        return {
+            name: _to_int(item.get(key))
+            for name, key in count_keys.items()
+        }
+    return {name: None for name in count_keys}
 
 
 def _matching_search_identity(

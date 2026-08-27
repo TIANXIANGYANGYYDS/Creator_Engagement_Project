@@ -11,6 +11,7 @@ from app.crawlers.engagement import EngagementCrawler
 from app.crawlers.platforms import PLATFORM_HANDLERS
 from app.crawlers.platforms.bilibili import extract_wbi_mixin_key, sign_wbi_params
 from app.crawlers.platforms.registry import (
+    extract_wechat_channels_mobile_feed_id,
     identify_url,
     normalize_media_name,
     weibo_bid_to_mid,
@@ -410,10 +411,42 @@ def test_xiaohongshu_interaction_wall_retries_with_required_proxy(
         ("https://mp.weixin.qq.com/s/XKB0QLWfxHAJrOo-QvHsVw", ("wechat", "XKB0QLWfxHAJrOo-QvHsVw")),
         ("https://weixin.qq.com/sph/AoPX5bEBDd", ("wechat_channels", "AoPX5bEBDd")),
         ("https://channels.weixin.qq.com/finder-preview/pages/sph?id=Ali0QjN99U", ("wechat_channels", "Ali0QjN99U")),
+        (
+            "https://channels.weixin.qq.com/mobile/commonFinderJsApi.html?"
+            "api=openFinderView&extInfo=%7B%22action%22%3A%22openFinderFeed%22%2C"
+            "%22feedID%22%3A%22export%2FUzFfBgAAxN6jAAkGAmPvk8zT4DCJorvgXiwL15tbF2yqxVCjFw%22%7D",
+            (
+                "wechat_channels",
+                "export/UzFfBgAAxN6jAAkGAmPvk8zT4DCJorvgXiwL15tbF2yqxVCjFw",
+            ),
+        ),
     ],
 )
 def test_identify_url(url: str, expected: tuple[str, str]) -> None:
     assert identify_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        (
+            "https://channels.weixin.qq.com/mobile/commonFinderJsApi.html?"
+            "api=openFinderView&extInfo=not-json"
+        ),
+        (
+            "https://channels.weixin.qq.com/mobile/commonFinderJsApi.html?"
+            "api=openFinderView&extInfo=%7B%22action%22%3A%22openFinderFeed%22%2C"
+            "%22feedID%22%3A%22https%3A%2F%2Fexample.com%22%7D"
+        ),
+        (
+            "https://channels.weixin.qq.com/mobile/commonFinderJsApi.html?"
+            "api=openFinderView&extInfo=%7B%22action%22%3A%22other%22%2C"
+            "%22feedID%22%3A%22export%2Fabc12345%22%7D"
+        ),
+    ],
+)
+def test_mobile_wechat_channels_url_rejects_invalid_ext_info(url: str) -> None:
+    assert extract_wechat_channels_mobile_feed_id(url) == ""
 
 
 def test_weibo_desktop_bid_conversion() -> None:

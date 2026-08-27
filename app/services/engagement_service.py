@@ -263,6 +263,7 @@ class EngagementService:
                 if strict_anonymous
                 else settings.wechat_channels_bridge_token.get_secret_value()
             ),
+            wechat_channels_midu_url=settings.wechat_channels_midu_url,
         )
         return cls(
             crawler,
@@ -302,6 +303,9 @@ class EngagementService:
         )
         assert isinstance(result, InteractionResult)
         return result
+
+    async def prefetch_wechat_channels_midu(self, urls: list[str]) -> None:
+        await self.crawler._prefetch_wechat_channels_midu(urls)
 
     async def fetch_comments(
         self,

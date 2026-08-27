@@ -7,6 +7,10 @@ from time import monotonic
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.dependencies import get_engagement_service
+from app.crawlers.platforms.registry import (
+    extract_wechat_channels_mobile_feed_id,
+    normalize_media_name,
+)
 from app.models.engagement import (
     CommentDataResponse,
     CommentPageResult,
@@ -19,7 +23,6 @@ from app.models.engagement import (
     InteractionDataResponse,
     InteractionResult,
 )
-from app.crawlers.platforms.registry import normalize_media_name
 from app.services.engagement_service import EngagementService
 
 
@@ -82,6 +85,23 @@ async def collect(
 ) -> CollectResponse:
     started_at = monotonic()
     async with service.proxy_usage_scope() as proxy_usage:
+        mobile_channel_urls = []
+        for item in request.items:
+            try:
+                is_channel = normalize_media_name(item.media_name) == "wechat_channels"
+            except ValueError:
+                continue
+            if (
+                item.type == "interactions"
+                and is_channel
+                and extract_wechat_channels_mobile_feed_id(item.url)
+            ):
+                mobile_channel_urls.append(item.url)
+        if mobile_channel_urls:
+            try:
+                await service.prefetch_wechat_channels_midu(mobile_channel_urls)
+            except Exception:
+                logger.warning("视频号蜜度批量预取失败，将逐项返回真实错误", exc_info=True)
         results = await asyncio.gather(*(
             _collect_item(service, item) for item in request.items
         ))

@@ -90,6 +90,10 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         alias="WECHAT_CHANNELS_BRIDGE_TOKEN",
     )
+    wechat_channels_midu_url: str = Field(
+        default="",
+        alias="WECHAT_CHANNELS_MIDU_URL",
+    )
     request_timeout_seconds: float = Field(
         default=20,
         alias="REQUEST_TIMEOUT_SECONDS",

@@ -22,6 +22,12 @@ PUBLIC_PREVIEW = FakeResponse(payload={
         "errMsg": {"type": 0},
     },
 })
+MOBILE_FEED_ID = "export/UzFfBgAAxN6jAAkGAmPvk8zT4DCJorvgXiwL15tbF2yqxVCjFw"
+MOBILE_FEED_URL = (
+    "https://channels.weixin.qq.com/mobile/commonFinderJsApi.html?"
+    "api=openFinderView&extInfo=%7B%22action%22%3A%22openFinderFeed%22%2C"
+    "%22feedID%22%3A%22export%2FUzFfBgAAxN6jAAkGAmPvk8zT4DCJorvgXiwL15tbF2yqxVCjFw%22%7D"
+)
 
 
 def test_channels_bridge_rejects_unprotected_remote_http() -> None:
@@ -69,6 +75,39 @@ class UnavailableChannelsBridge:
         raise PlatformCrawlerError("没有可用的微信页面")
 
 
+class MobileChannelsBridge:
+    async def fetch_interactions(self, url: str) -> dict[str, Any]:
+        assert url == MOBILE_FEED_URL
+        return {
+            "stats": {
+                "views": 8765,
+                "likes": 432,
+                "comments": 21,
+                "shares": 18,
+                "favorites": 76,
+            },
+            "source": "wx_channel/finderGetCommentDetail",
+        }
+
+
+class MobileChannelsMidu:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def fetch_interactions(self, url: str) -> dict[str, Any]:
+        self.calls.append(url)
+        return {
+            "stats": {
+                "views": None,
+                "likes": 12,
+                "comments": 2,
+                "shares": None,
+                "reposts": 3,
+            },
+            "source": "midu/history_data+idata/md/engagement/query",
+        }
+
+
 def test_wechat_channels_comments_use_authorized_sidecar() -> None:
     client = FakeClient(PUBLIC_PREVIEW)
     result = asyncio.run(EngagementCrawler(
@@ -107,6 +146,68 @@ def test_wechat_channels_sidecar_failure_falls_back_to_public_count() -> None:
     assert result.comments == []
     assert "没有可用的微信页面" in result.reason
     assert len(client.calls) == 1
+
+
+def test_mobile_wechat_channels_interactions_use_authorized_sidecar() -> None:
+    client = FakeClient(FakeResponse(payload={}))
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        wechat_channels_bridge_client=MobileChannelsBridge(),
+    ).fetch_interactions(
+        MOBILE_FEED_URL,
+        "微信视频号",
+    ))
+
+    assert result.coverage == "partial"
+    assert result.work_id == MOBILE_FEED_ID
+    assert result.stats.views == 8765
+    assert result.stats.likes == 432
+    assert result.stats.comments == 21
+    assert result.source == "wx_channel/finderGetCommentDetail"
+    assert client.calls == []
+
+
+def test_mobile_wechat_channels_without_sidecar_does_not_fake_public_support() -> None:
+    client = FakeClient(FakeResponse(payload={}))
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        MOBILE_FEED_URL,
+        "微信视频号",
+    ))
+
+    assert result.coverage == "unsupported"
+    assert result.stats.model_dump() == {
+        "views": None,
+        "likes": None,
+        "comments": None,
+        "shares": None,
+        "favorites": None,
+        "coins": None,
+        "danmaku": None,
+        "reposts": None,
+        "recommendations": None,
+    }
+    assert "encrypted_object_id" in result.reason
+    assert client.calls == []
+
+
+def test_mobile_wechat_channels_interactions_use_no_account_midu_source() -> None:
+    client = FakeClient(FakeResponse(payload={}))
+    midu = MobileChannelsMidu()
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        wechat_channels_midu_client=midu,
+    ).fetch_interactions(
+        MOBILE_FEED_URL,
+        "微信视频号",
+    ))
+
+    assert result.coverage == "partial"
+    assert result.stats.likes == 12
+    assert result.stats.comments == 2
+    assert result.stats.reposts == 3
+    assert result.source == "midu/history_data+idata/md/engagement/query"
+    assert midu.calls == [MOBILE_FEED_URL]
+    assert client.calls == []
 
 
 def test_channels_bridge_resolves_profile_and_follows_opaque_cursor() -> None:
@@ -168,6 +269,75 @@ def test_channels_bridge_resolves_profile_and_follows_opaque_cursor() -> None:
     assert calls[1].url.params.get("next_marker") == ""
     assert calls[2].url.params.get("next_marker") == "opaque-next"
     assert all(call.headers["X-Local-Auth"] == "local-secret" for call in calls)
+
+
+def test_channels_bridge_uses_mobile_encrypted_feed_id_for_profile() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path == "/api/channels/feed/profile":
+            assert request.url.params["encrypted_object_id"] == MOBILE_FEED_ID
+            assert "url" not in request.url.params
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {
+                    "errCode": 0,
+                    "data": {
+                        "object": {
+                            "id": "object-mobile",
+                            "objectNonceId": "nonce-mobile",
+                            "readCount": 8765,
+                            "likeCount": 432,
+                            "commentCount": 21,
+                            "forwardCount": 18,
+                            "favCount": 76,
+                        }
+                    },
+                },
+            })
+        assert request.url.path == "/api/channels/feed/comment/list"
+        assert request.url.params["object_id"] == "object-mobile"
+        assert request.url.params["nonce_id"] == "nonce-mobile"
+        return httpx.Response(200, json={
+            "code": 0,
+            "data": {
+                "errCode": 0,
+                "data": {
+                    "commentInfo": [{"commentId": "mobile-comment"}],
+                    "countInfo": {"commentCount": 21},
+                    "lastBuffer": "",
+                },
+            },
+        })
+
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            bridge = HttpWeChatChannelsBridgeClient(
+                "http://127.0.0.1:2026",
+                client=client,
+            )
+            interactions = await bridge.fetch_interactions(MOBILE_FEED_URL)
+            comments = await bridge.fetch_comments(
+                MOBILE_FEED_URL,
+                page=1,
+                limit=20,
+            )
+            return interactions, comments
+
+    interactions, comments = asyncio.run(scenario())
+
+    assert interactions["stats"] == {
+        "views": 8765,
+        "likes": 432,
+        "comments": 21,
+        "shares": 18,
+        "favorites": 76,
+    }
+    assert comments["comments"][0]["commentId"] == "mobile-comment"
+    assert len(calls) == 3
 
 
 def test_channels_bridge_uses_exact_title_search_when_share_profile_lacks_nonce() -> None:

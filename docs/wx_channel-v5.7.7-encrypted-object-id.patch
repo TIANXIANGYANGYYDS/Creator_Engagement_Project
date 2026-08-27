@@ -1,0 +1,80 @@
+diff --git a/internal/api/search.go b/internal/api/search.go
+index d4dfd5f..b72c6ad 100644
+--- a/internal/api/search.go
++++ b/internal/api/search.go
+@@ -295,5 +295,6 @@
+ type GetFeedProfileRequest struct {
+-	ObjectID string `json:"object_id"`
+-	NonceID  string `json:"nonce_id"`
+-	URL      string `json:"url"`
++	ObjectID          string `json:"object_id"`
++	NonceID           string `json:"nonce_id"`
++	URL               string `json:"url"`
++	EncryptedObjectID string `json:"encrypted_object_id"`
+ }
+@@ -307,2 +308,6 @@ func decodeGetFeedProfileRequest(r *http.Request) (GetFeedProfileRequest, error)
+ 		req.URL = r.URL.Query().Get("url")
++		req.EncryptedObjectID = r.URL.Query().Get("encrypted_object_id")
++		if req.EncryptedObjectID == "" {
++			req.EncryptedObjectID = r.URL.Query().Get("eid")
++		}
+ 		return req, nil
+@@ -388,5 +393,6 @@
+ 	body := websocket.FeedProfileBody{
+-		ObjectID: req.ObjectID,
+-		NonceID:  req.NonceID,
+-		URL:      req.URL,
++		ObjectID:          req.ObjectID,
++		NonceID:           req.NonceID,
++		URL:               req.URL,
++		EncryptedObjectID: req.EncryptedObjectID,
+ 	}
+@@ -527,3 +533,3 @@ func (s *SearchService) GetFeedProfile(w http.ResponseWriter, r *http.Request) {
+-	if req.ObjectID == "" && req.URL == "" {
+-		response.Error(w, 400, "object_id or url is required")
++	if req.ObjectID == "" && req.URL == "" && req.EncryptedObjectID == "" {
++		response.Error(w, 400, "object_id, encrypted_object_id or url is required")
+ 		return
+diff --git a/internal/api/search_feed_profile_test.go b/internal/api/search_feed_profile_test.go
+index 0652fb3..c3ec2cb 100644
+--- a/internal/api/search_feed_profile_test.go
++++ b/internal/api/search_feed_profile_test.go
+@@ -99,1 +99,24 @@ func TestGetFeedProfileKeepsNormalRPCForFeedURLs(t *testing.T) {
++func TestGetFeedProfilePassesEncryptedObjectID(t *testing.T) {
++	t.Parallel()
++
++	var calledBody websocket.FeedProfileBody
++	service := &SearchService{
++		callAPI: func(_ string, body interface{}, _ time.Duration) ([]byte, error) {
++			calledBody = body.(websocket.FeedProfileBody)
++			return []byte(`{"errCode":0,"data":{"object":{"id":"feed-1"}}}`), nil
++		},
++	}
++
++	req := httptest.NewRequest(http.MethodGet, "/api/channels/feed/profile?encrypted_object_id=export%2Fabc_123", nil)
++	rec := httptest.NewRecorder()
++	service.GetFeedProfile(rec, req)
++
++	if rec.Code != http.StatusOK {
++		t.Fatalf("status = %d, want 200", rec.Code)
++	}
++	if calledBody.EncryptedObjectID != "export/abc_123" {
++		t.Fatalf("encrypted object ID = %q", calledBody.EncryptedObjectID)
++	}
++}
++
+ func TestGetSharedFeedProfileUsesPageRPCOnly(t *testing.T) {
+diff --git a/internal/websocket/types.go b/internal/websocket/types.go
+index 4aedb33..7560eaa 100644
+--- a/internal/websocket/types.go
++++ b/internal/websocket/types.go
+@@ -53,5 +53,6 @@
+ type FeedProfileBody struct {
+-	ObjectID string `json:"objectId"`
+-	NonceID  string `json:"nonceId"`
+-	URL      string `json:"url"`
++	ObjectID          string `json:"objectId"`
++	NonceID           string `json:"nonceId"`
++	URL               string `json:"url"`
++	EncryptedObjectID string `json:"encryptedObjectId"`
+ }
