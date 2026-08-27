@@ -37,7 +37,6 @@ if TYPE_CHECKING:
     from app.crawlers.platform_session import PlatformSessionStore
     from app.crawlers.wechat_session_bridge import HttpWeChatSessionBridgeClient
     from app.crawlers.wechat_channels_bridge import HttpWeChatChannelsBridgeClient
-    from app.crawlers.wechat_channels_midu import HttpWeChatChannelsMiduClient
 
 
 logger = logging.getLogger(__name__)
@@ -72,8 +71,6 @@ class EngagementCrawler:
         wechat_channels_bridge_url: str = "",
         wechat_channels_bridge_token: str = "",
         wechat_channels_bridge_client: "HttpWeChatChannelsBridgeClient | Any | None" = None,
-        wechat_channels_midu_url: str = "",
-        wechat_channels_midu_client: "HttpWeChatChannelsMiduClient | Any | None" = None,
     ) -> None:
         if max_protocol_attempts <= 0:
             raise ValueError("max_protocol_attempts must be greater than zero")
@@ -142,19 +139,6 @@ class EngagementCrawler:
                 timeout_seconds=timeout_seconds,
             )
             self._owns_wechat_channels_bridge_client = True
-        self._owns_wechat_channels_midu_client = False
-        self.wechat_channels_midu_client = wechat_channels_midu_client
-        if (
-            self.wechat_channels_midu_client is None
-            and wechat_channels_midu_url.strip()
-        ):
-            from app.crawlers.wechat_channels_midu import HttpWeChatChannelsMiduClient
-
-            self.wechat_channels_midu_client = HttpWeChatChannelsMiduClient(
-                wechat_channels_midu_url,
-                timeout_seconds=timeout_seconds,
-            )
-            self._owns_wechat_channels_midu_client = True
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -163,8 +147,6 @@ class EngagementCrawler:
             await self.wechat_session_bridge_client.aclose()
         if self._owns_wechat_channels_bridge_client:
             await self.wechat_channels_bridge_client.aclose()
-        if self._owns_wechat_channels_midu_client:
-            await self.wechat_channels_midu_client.aclose()
 
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         if comment_limit <= 0:
@@ -437,6 +419,13 @@ class EngagementCrawler:
         if result.platform == "wechat_channels" and include_comments:
             # The public preview UI intentionally redirects comment clicks to
             # WeChat and never requests comment bodies in the browser page.
+            return False
+        if (
+            result.platform == "wechat_channels"
+            and result.work_id.startswith("export/")
+        ):
+            # commonFinderJsApi/feedID pages only invoke the native WeChat
+            # client. A browser retry cannot recover counters or comments.
             return False
         if result.platform == "xiaohongshu" and include_stats and not include_comments:
             # A valid tokenized note URL is fully served by one SSR request.
@@ -748,21 +737,6 @@ class EngagementCrawler:
         if self.wechat_channels_bridge_client is None:
             return None
         return await self.wechat_channels_bridge_client.fetch_interactions(url)
-
-    async def _wechat_channels_midu_interactions(
-        self,
-        *,
-        url: str,
-    ) -> dict[str, Any] | None:
-        if self.wechat_channels_midu_client is None:
-            return None
-        return await self.wechat_channels_midu_client.fetch_interactions(url)
-
-    async def _prefetch_wechat_channels_midu(self, urls: list[str]) -> None:
-        if self.wechat_channels_midu_client is None:
-            return
-        await self.wechat_channels_midu_client.fetch_many(urls)
-
 
 async def fetch_engagement(
     url: str,

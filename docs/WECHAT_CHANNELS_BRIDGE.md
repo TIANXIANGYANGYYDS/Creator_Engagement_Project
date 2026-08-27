@@ -4,7 +4,6 @@
 
 ```text
 sph/eid 公开分享页 -> 主服务器匿名 POST get_feed_info -> 公开展示互动量
-commonFinderJsApi/feedID -> 已配置蜜度服务 -> 已收录互动量（无微信账号）
 commonFinderJsApi/feedID -> Windows 微信客户端 -> finderGetCommentDetail -> 精确互动量
 全部评论正文 -> Windows 微信客户端 -> finderGetCommentList
 ```
@@ -13,8 +12,8 @@ commonFinderJsApi/feedID -> Windows 微信客户端 -> finderGetCommentDetail ->
 `WeixinJSBridge.invoke("openFinderView")`，不下发视频元数据。其 `feedID=export/...` 也不能直接
 用于公开 `get_feed_info`，也不能直接转换成 `sph/eid`。读取评论正文时必须作为客户端
 `finderGetCommentDetail` 的 `encrypted_objectid`（scene 141），换回真实
-`objectId/objectNonceId` 后再读取评论。若只需要互动总量，可配置
-`WECHAT_CHANNELS_MIDU_URL` 按原始 URL 查询供应端近 30 天已收录数据，不需要微信账号。
+`objectId/objectNonceId` 后再读取评论；互动量也来自同一授权客户端详情响应。没有授权客户端时，
+该类 URL 的互动量和评论正文都会明确返回不可用。
 
 主服务器不接收微信密码、扫码结果或原始 Cookie；它只把公开分享 URL、页码和每页上限发给
 调用方自建的侧车。侧车在已授权微信页面中解析 `objectId/objectNonceId`，调用评论列表并以
@@ -57,8 +56,8 @@ go build -o wx_channel.exe .
    ```
 
 这一步不会要求把账号或 Cookie 发给采集服务器。没有可用微信页面时，侧车会返回不可用；
-`sph/eid` 链接可降级为公开互动量，客户端 `feedID` 在配置蜜度服务后可降级为已收录互动总量，
-但两类 URL 都不能在无微信客户端时得到评论正文。
+`sph/eid` 链接可降级为公开互动量，但客户端 `feedID` 的互动量不可用，两类 URL 都不能在无微信
+客户端时得到评论正文。
 
 ## 主服务器配置
 
@@ -80,8 +79,8 @@ GET /api/v1/comments?url=<视频号分享 URL>&media_name=wechat_channels&page=1
 ```
 
 评论成功路径直接调用侧车，不会先多请求一次公开预览。`sph/eid` 链接在侧车失败时会匿名请求
-`get_feed_info`，保留公开评论总数和失败原因；`commonFinderJsApi/feedID` 的互动量可从蜜度降级，
-评论正文会明确返回不可用。主服务器不会为侧车或蜜度路径租用 51 代理 IP。
+`get_feed_info`，保留公开评论总数和失败原因；`commonFinderJsApi/feedID` 的互动量和评论正文会
+明确返回不可用。主服务器不会为侧车路径租用 51 代理 IP。
 
 ## 返回范围与运维边界
 
@@ -90,9 +89,9 @@ GET /api/v1/comments?url=<视频号分享 URL>&media_name=wechat_channels&page=1
 - 平台删除、折叠、可见性和账号权限会影响结果，因此有下一页时 `coverage=partial`。
 - 单个 Windows 微信页面先按 0.5–1 秒请求间隔运行；扩容应增加独立授权终端，不能用主服务
   并发直接压同一客户端。
-- 没有微信客户端会话时，`sph/eid` 可读取公开互动量，配置蜜度后业务文件中的
-  `commonFinderJsApi/feedID` 可读取近 30 天已收录互动量；所有评论正文仍不可用。IP 池、蜜度
-  计数字段和网页 Cookie 都不能生成 `finderGetCommentList` 的客户端权限。
+- 没有微信客户端会话时，`sph/eid` 可读取公开互动量，业务文件中的
+  `commonFinderJsApi/feedID` 互动量不可用，所有评论正文也不可用。IP 池和网页 Cookie 都不能
+  生成 `finderGetCommentList` 的客户端权限。
 
 上游实现与协议证据：
 

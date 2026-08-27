@@ -45,7 +45,6 @@ async def fetch(
 ) -> EngagementResult:
     try:
         bridge_issue = ""
-        midu_issue = ""
         mobile_feed_id = extract_wechat_channels_mobile_feed_id(url)
         if include_comments:
             try:
@@ -110,34 +109,6 @@ async def fetch(
                     )
                 bridge_issue = "视频号会话桥详情响应没有返回互动量"
 
-            try:
-                midu_payload = await crawler._wechat_channels_midu_interactions(
-                    url=url
-                )
-            except (PlatformBlockedError, PlatformCrawlerError) as exc:
-                midu_payload = None
-                midu_issue = str(exc)
-            if midu_payload is not None:
-                raw_stats = midu_payload.get("stats") or {}
-                stats = EngagementStats.model_validate(raw_stats)
-                if any(value is not None for value in stats.model_dump().values()):
-                    return EngagementResult(
-                        platform="wechat_channels",
-                        canonical_url=url,
-                        work_id=work_id,
-                        coverage="partial",
-                        reason=(
-                            "无微信账号模式通过蜜度已收录数据返回视频号互动量；"
-                            "平台或供应端未提供的字段为空"
-                        ),
-                        source=str(
-                            midu_payload.get("source")
-                            or "midu/history_data+idata/md/engagement/query"
-                        ),
-                        stats=stats,
-                    )
-                midu_issue = "蜜度视频号数据源没有返回互动量"
-
         if mobile_feed_id:
             operation = "评论正文" if include_comments else "互动量"
             return result_error(
@@ -147,10 +118,8 @@ async def fetch(
                 "unsupported",
                 (
                     "该视频号客户端跳转链接无法通过公开预览接口读取"
-                    f"{operation}；互动量可配置 WECHAT_CHANNELS_MIDU_URL，"
-                    "评论正文仍需要支持 encrypted_object_id 的授权微信客户端侧车"
+                    f"{operation}；需要支持 encrypted_object_id 的授权微信客户端侧车"
                     + (f"；会话桥: {bridge_issue}" if bridge_issue else "")
-                    + (f"；蜜度: {midu_issue}" if midu_issue else "")
                 ),
             )
 

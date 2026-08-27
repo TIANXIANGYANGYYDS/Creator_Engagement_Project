@@ -1,6 +1,6 @@
 # Creator Engagement Project
 
-根据公开内容 URL 获取互动量和一级评论的独立项目，与 `Stock_Project` 无代码依赖。当前部署
+根据公开内容 URL 获取互动量和一级评论的独立项目。当前部署
 运行于 `MyAgent`（Python 3.13.12），采用协议优先、浏览器兜底、代理池复用和企业级重试。
 
 项目当前支持九个渠道：抖音、今日头条、微信（微信公众号）、微信视频号、小红书、好看视频、
@@ -11,7 +11,7 @@
 默认配置为 `STRICT_ANONYMOUS_MODE=true`，生产流程遵守以下约束：
 
 - 服务本身不执行人工登录、扫码或验证码；小红书评论例外地需要部署方提供已有账号 Cookie。
-- 默认不依赖付费数据供应商；视频号客户端 URL 可显式复用部署方已有的蜜度服务。
+- 不依赖其他项目或缓存型数据服务；无法从平台实时协议取得的数据会明确返回失败。
 - 历史账号 Cookie、公众号凭据、微信侧车和账号 Profile 均被忽略；只有显式启用的
   `XIAOHONGSHU_SESSION_MODE=cookie` 可以注入小红书专用 Cookie。
 - 只获取一级评论正文，不获取评论下的回复正文。
@@ -26,7 +26,7 @@
 | 抖音 | 匿名协议可用 | 可用 | 可翻到公开末游标 |
 | 今日头条 | 可用，部分文章受 SSR 挑战影响 | 可用 | 可按 offset 翻到公开末页 |
 | 微信（微信公众号） | 严格匿名模式不可稳定获取 | 不可用 | 不适用 |
-| 微信视频号 | `sph/eid` 匿名可用；客户端 `feedID` 可用蜜度已收录数据 | 无账号不可用；授权侧车可用 | 授权侧车按 `lastBuffer` 翻页 |
+| 微信视频号 | `sph/eid` 匿名可用；客户端 `feedID` 需要授权侧车 | 无账号不可用；授权侧车可用 | 授权侧车按 `lastBuffer` 翻页 |
 | 小红书 | 带有效 `xsec_token` 的 URL 可匿名获取 | 默认不可用；Cookie 模式可用 | Cookie 模式按 cursor 翻到会话可见末页 |
 | 好看视频 | 可用，未公开字段保持 `null` | 可用 | 可按页翻到公开末页 |
 | 快手 | 自动游客状态可用 | 可用 | 可按游标翻到公开末页 |
@@ -75,9 +75,9 @@ B站和微博等中文名称。
 把对应项标为 `failed` 并继续处理其他项。
 
 视频号同时接受公开 `weixin.qq.com/sph/...`、`finder-preview/pages/sph|feed`，以及业务文件中的
-`mobile/commonFinderJsApi.html?...extInfo.feedID=export/...`。最后一种链接不公开视频数据；配置
-`WECHAT_CHANNELS_MIDU_URL` 后可按 URL 读取供应端已收录的点赞、转发和评论总数，评论正文仍需按
-[视频号授权侧车文档](docs/WECHAT_CHANNELS_BRIDGE.md) 部署 Windows 微信客户端。
+`mobile/commonFinderJsApi.html?...extInfo.feedID=export/...`。最后一种链接不公开视频数据，互动量和
+评论正文都需要按 [视频号授权侧车文档](docs/WECHAT_CHANNELS_BRIDGE.md) 部署 Windows 微信客户端；
+未配置侧车时接口会明确失败，不会使用外部缓存补数。
 
 批量接口接收包含 `url`、中文 `media_name`、`type` 和可选 `page` 的 `items` 数组，不设置
 业务条数上限。评论项不传 `page` 时获取全部当前可见一级评论，传数字时只获取对应页。响应
@@ -204,9 +204,8 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' 哔哩哔哩 --p
 | `XIAOHONGSHU_COOKIE` | 空 | 小红书 Cookie Secret，必须包含非空 `a1` 和 `web_session` |
 | `WECHAT_CHANNELS_BRIDGE_URL` | 空 | 授权视频号侧车地址；客户端 `feedID` 评论正文需要配置 |
 | `WECHAT_CHANNELS_BRIDGE_TOKEN` | 空 | 视频号侧车鉴权令牌 |
-| `WECHAT_CHANNELS_MIDU_URL` | 空 | 无微信账号时，按客户端 `feedID` URL 查询蜜度近 30 天已收录互动量 |
 | `PROXY_MODE` | `prefer` | 有代理配置时优先代理，无代理时允许直连 |
-| `PROXY_51_API_URL` | 空 | Stock 项目同源的 51 代理供应接口 |
+| `PROXY_51_API_URL` | 空 | 51 代理供应接口 |
 | `PROXY_POOL_SIZE` | `8` | 代理池目标数量 |
 | `PROXY_MAX_CONCURRENCY` | `1` | 单个代理的最大并发 |
 | `RELIABILITY_MODE` | `enterprise` | 启用协议重试、语义失败换 IP 和平台保护 |
@@ -240,10 +239,10 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' 哔哩哔哩 --p
 `edith.xiaohongshu.com` 评论接口，且不会出现在日志、错误原因或 API 响应中。抖音签名、
 哔哩哔哩 WBI 密钥以及快手短期游客状态均在运行时生成，不应硬编码到源码或日志。
 
-视频号客户端 `feedID` 链接有两条边界明确的路径：严格匿名模式可配置
-`WECHAT_CHANNELS_MIDU_URL` 获取供应端已收录的互动总量，不需要微信账号；评论正文必须把
-`STRICT_ANONYMOUS_MODE` 设为 `false` 并配置授权侧车。主服务仍不接收微信密码、扫码结果或
-Cookie。具体客户端路径见 [视频号授权侧车文档](docs/WECHAT_CHANNELS_BRIDGE.md)。
+视频号客户端 `feedID` 链接的互动量和评论正文都需要把 `STRICT_ANONYMOUS_MODE` 设为 `false`
+并配置授权侧车。没有授权客户端时，主服务返回明确失败；主服务不接收微信密码、扫码结果或
+Cookie，也不查询其他项目的数据服务。具体客户端路径见
+[视频号授权侧车文档](docs/WECHAT_CHANNELS_BRIDGE.md)。
 
 启用小红书评论：
 

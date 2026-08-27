@@ -1,7 +1,7 @@
 # 九个平台 18 项协议能力矩阵
 
 最后验证：2026-08-28，环境：`MyAgent` / Python 3.13.12。当前生产不执行人工操作、扫码或
-浏览器登录；视频号客户端 URL 可显式接入现有蜜度服务。快手企业协议链路最新全量为互动/评论均
+浏览器登录，也不查询其他项目或缓存型数据服务。快手企业协议链路最新全量为互动/评论均
 398/398 有数据；小红书互动已修正为匿名 SSR 100/100；视频号公开互动量为 100/100、评论
 总数为 100/100。小红书评论允许部署方显式提供专用 Cookie；公众号和视频号评论正文仍因
 账号会话要求在严格部署中关闭。不硬编码浏览器 Cookie 或签名。
@@ -23,8 +23,8 @@
 | 头条 | 评论 | 可用（部分覆盖） | `/article/v4/tab_comments/`，参数 `aid/app_name/offset/count/group_id/item_id` | 只能说明指定公开页，不保证评论全集 |
 | 公众号 | 互动量 | Cookie-only 纯协议已实现；待用户 Cookie 实测 | 文章 `cgiDataNew` + Cookie/URL 恢复参数；缺计数时 POST `/mp/getappmsgext`；同一业务调用复用一个 IP 租约 | Cookie 通常需 `uin/key/pass_ticket/appmsg_token/wap_sid2`；当前服务器无有效文章 Cookie，匿名 5/5 明确返回 `unsupported` |
 | 公众号 | 评论 | 零账号模式不可用 | 历史 `/mp/appmsg_comment` 路径需要文章会话；匿名实测 `ret=-3` | 不允许人工/真实账号后，没有稳定正文来源 |
-| 微信视频号 | 互动量 | 公开分享页匿名可用；客户端 feedID 可用蜜度已收录数据 | `sph/eid` 使用 `get_feed_info`；`commonFinderJsApi/feedID` 先按 URL 恢复蜜度 `skId`，再查询完整互动字段 | 蜜度仅覆盖近 30 天已收录链接，未提供字段保持 `null`；不是微信公开协议数据 |
-| 微信视频号 | 评论 | 零账号仅有评论总数；授权侧车可取正文 | 蜜度返回 `skCommentsCount`；正文仍需 `objectId/objectNonceId` + `finderGetCommentList`，按 `lastBuffer` 分页 | 4 条评论数大于 0 的真实 URL 通过蜜度正文接口仍为 0 条；授权终端正文成功率待实测 |
+| 微信视频号 | 互动量 | 公开分享页匿名可用；客户端 feedID 需要授权侧车 | `sph/eid` 使用 `get_feed_info`；`commonFinderJsApi/feedID` 作为 `encrypted_object_id` 发送给授权侧车 | feedID 不能转换为公开 ID；没有授权侧车时返回 `unsupported` |
+| 微信视频号 | 评论 | 公开页零账号只有总数；授权侧车可取正文 | `objectId/objectNonceId` + `finderGetCommentList`，按 `lastBuffer` 分页 | 客户端 feedID 无授权会话时无法读取正文；授权终端成功率待实测 |
 | 小红书 | 互动量 | 匿名纯协议可用（100/100） | 当前有效 `xsec_token` + `xsec_source=pc_feed` 直访笔记 SSR；自动补来源参数，不带评论 Cookie | 100 条新鲜 URL 各 1 GET，94 条返回赞/藏/评/分享四项、6 条返回页面公开的三项；过期或缺 token 不能恢复任意旧 URL |
 | 小红书 | 评论 | Cookie-only 纯协议已接入 | `XIAOHONGSHU_SESSION_MODE=cookie` + `a1/web_session`；`xhshow` 动态签名 `/api/sns/web/v2/comment/page` 并按 cursor 分页 | 默认关闭；历史低频 20/20 已验证协议，当前部署 Cookie 待注入后复测 |
 | 好看 | 互动量 | 纯协议可用（字段不完整） | 首页匿名 Cookie → 目标页 SSR；精确播放、点赞、评论数 | 收藏、分享没有公开数字时保持 `null` |
@@ -43,7 +43,7 @@
 小红书互动量本轮新鲜 URL 100/100，评论低频 20/20；两者分别使用匿名 SSR 与显式 Cookie
 签名评论端点，不能合并为一次上游请求。公众号已区分 Cookie-only、自有公众号
 官方降级、接口明确关闭评论、匿名隐藏评论区与原生会话 `no session`。视频号与公众号不是一个渠道：
-视频号公开互动端点已接入；客户端 URL 可选用蜜度已收录互动量，授权微信客户端侧车只用于正文。
+视频号公开互动端点已接入；客户端 URL 的互动量和正文都需要授权微信客户端侧车。
 
 ## 默认匿名与小红书显式 Cookie 的评论覆盖
 
@@ -59,7 +59,7 @@
 | B 站 | 支持 | 全公开页 | WBI 主评论接口按 `next_offset` 分页 |
 | 微博 | 支持 | 可翻多页，不保证到底 | 第 2 页已实测；更深页可能返回 `ok=-100` 登录跳转 |
 | 微信公众号 | 不支持 | 不适用 | 无文章会话时 `appmsg_comment` 返回 `ret=-3/no session` |
-| 微信视频号 | 严格匿名不支持正文；授权侧车支持 | 授权侧车按不透明游标分页 | `get_feed_info` 或蜜度只返回总数；正文来自 `finderGetCommentList` |
+| 微信视频号 | 严格匿名不支持正文；授权侧车支持 | 授权侧车按不透明游标分页 | 公开 `get_feed_info` 只返回总数；正文来自 `finderGetCommentList` |
 | 小红书 | 默认不支持；Cookie 模式支持 | Cookie 模式全会话可见页 | 必须显式配置非空 `a1/web_session` 和 URL `xsec_token`；纯协议 cursor 分页 |
 
 当前没有固定“仅第一页”的一级评论实现。评论对象里的 `replies` 只表示回复数量，服务不会
@@ -69,7 +69,7 @@
 临时 Cookie。小红书 Cookie 只从本地 Secret 配置读取；签名和其他游客状态在运行时生成。遇到
 验证码或空响应时，接口返回 `blocked/unsupported` 与原因。
 
-运行时使用 `--direct` 可排除代理池质量对协议验证的干扰；生产环境仍可使用 Stock 项目同源的 51 代理池，但应把代理失败和平台返回分开记录。
+运行时使用 `--direct` 可排除代理池质量对协议验证的干扰；生产环境可配置 51 代理池，但应把代理失败和平台返回分开记录。
 
 历史登录/Profile 工具仅保留兼容，当前严格匿名生产不得调用。账号会话能力必须由部署方显式
 启用：小红书使用专用 Cookie，视频号使用隔离的授权 Windows 微信侧车。
@@ -103,8 +103,7 @@
   `nobiyou/wx_channel` v5.7.7 已公开 `feed/profile`、`feed/search` 和
   `feed/comment/list`：注入脚本在微信页面调用 `finderGetCommentList`，本地 WebSocket/HTTP
   返回 `commentInfo/countInfo/lastBuffer`。客户端 `feedID` 需要本项目的最小 HTTP 透传补丁；
-  没有授权微信页面时仍不声称正文成功。对业务文件中的 36 条客户端 URL，现有蜜度服务可按
-  URL 恢复 36/36 个 `skId` 并返回评论总数；其中评论数大于 0 的 4 条正文查询均为空。
+  没有授权微信页面时，客户端 `feedID` 的互动量和评论正文都明确返回不可用。
 - 用户提供的 CSDN 视频号文章只展示第三方返回值：字段与
   `finderGetCommentList` 的 `objectId/objectNonceId/lastBuffer` 链路一致，但没有公布
   上游 URL、请求头、登录参数、签名或可运行代码，不能独立复现。另一篇所引

@@ -90,24 +90,6 @@ class MobileChannelsBridge:
         }
 
 
-class MobileChannelsMidu:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    async def fetch_interactions(self, url: str) -> dict[str, Any]:
-        self.calls.append(url)
-        return {
-            "stats": {
-                "views": None,
-                "likes": 12,
-                "comments": 2,
-                "shares": None,
-                "reposts": 3,
-            },
-            "source": "midu/history_data+idata/md/engagement/query",
-        }
-
-
 def test_wechat_channels_comments_use_authorized_sidecar() -> None:
     client = FakeClient(PUBLIC_PREVIEW)
     result = asyncio.run(EngagementCrawler(
@@ -187,26 +169,6 @@ def test_mobile_wechat_channels_without_sidecar_does_not_fake_public_support() -
         "recommendations": None,
     }
     assert "encrypted_object_id" in result.reason
-    assert client.calls == []
-
-
-def test_mobile_wechat_channels_interactions_use_no_account_midu_source() -> None:
-    client = FakeClient(FakeResponse(payload={}))
-    midu = MobileChannelsMidu()
-    result = asyncio.run(EngagementCrawler(
-        client=client,
-        wechat_channels_midu_client=midu,
-    ).fetch_interactions(
-        MOBILE_FEED_URL,
-        "微信视频号",
-    ))
-
-    assert result.coverage == "partial"
-    assert result.stats.likes == 12
-    assert result.stats.comments == 2
-    assert result.stats.reposts == 3
-    assert result.source == "midu/history_data+idata/md/engagement/query"
-    assert midu.calls == [MOBILE_FEED_URL]
     assert client.calls == []
 
 

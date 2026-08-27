@@ -3,7 +3,7 @@ from __future__ import annotations
 from app.core.config import Settings
 
 
-def test_settings_support_stock_cookie_name_as_fallback(monkeypatch) -> None:
+def test_settings_support_compatibility_cookie_alias(monkeypatch) -> None:
     monkeypatch.delenv("CREATOR_ENGAGEMENT_COOKIE", raising=False)
     monkeypatch.setenv("DOUYIN_SESSION_COOKIE", "caller-owned-cookie")
 
@@ -69,14 +69,6 @@ def test_wechat_channels_bridge_credentials_are_optional_secrets(monkeypatch) ->
         settings.wechat_channels_bridge_token.get_secret_value()
         == "channels-local-secret"
     )
-
-
-def test_wechat_channels_midu_source_is_optional(monkeypatch) -> None:
-    monkeypatch.setenv("WECHAT_CHANNELS_MIDU_URL", "https://127.0.0.1:8095")
-
-    settings = Settings(_env_file=None)
-
-    assert settings.wechat_channels_midu_url == "https://127.0.0.1:8095"
 
 
 def test_wechat_article_cookie_is_an_independent_secret(monkeypatch) -> None:

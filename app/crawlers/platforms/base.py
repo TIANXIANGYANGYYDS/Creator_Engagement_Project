@@ -82,13 +82,6 @@ class PlatformCrawlerContext(Protocol):
         url: str,
     ) -> dict[str, Any] | None: ...
 
-    async def _wechat_channels_midu_interactions(
-        self,
-        *,
-        url: str,
-    ) -> dict[str, Any] | None: ...
-
-
 class PlatformFetchHandler(Protocol):
     def __call__(
         self,

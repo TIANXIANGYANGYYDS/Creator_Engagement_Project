@@ -144,6 +144,26 @@ def test_wechat_protocol_result_never_uses_accounted_browser_fallback() -> None:
     assert browser.calls == []
 
 
+def test_wechat_channels_mobile_feed_never_uses_browser_fallback() -> None:
+    browser = FakeBrowserFallback()
+    url = (
+        "https://channels.weixin.qq.com/mobile/commonFinderJsApi.html?"
+        "api=openFinderView&extInfo=%7B%22action%22%3A%22openFinderFeed%22%2C"
+        "%22feedID%22%3A%22export%2FUzFfBgAAxN6jAAkGAmPvk8zT4DCJorvgXiwL15tbF2yqxVCjFw%22%7D"
+    )
+
+    result = asyncio.run(
+        EngagementCrawler(client=FakeClient(), browser_fallback=browser).fetch_interactions(
+            url,
+            "wechat_channels",
+        )
+    )
+
+    assert result.coverage == "unsupported"
+    assert "encrypted_object_id" in result.reason
+    assert browser.calls == []
+
+
 def test_caller_cookie_is_only_seeded_into_douyin_profile() -> None:
     browser = BrowserFallback(cookies="sessionid=caller-owned")
     kuaishou = FakeBrowserContext()
