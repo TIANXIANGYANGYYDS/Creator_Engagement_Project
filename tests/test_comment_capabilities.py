@@ -10,22 +10,11 @@ def test_root_comment_pagination_capabilities_are_truthful() -> None:
     assert comment_capabilities("weibo").root_comments == "paged_until_blocked"
     assert all(
         comment_capabilities(platform).root_comments == "unavailable"
-        for platform in ("wechat", "wechat_channels", "xiaohongshu")
+        for platform in ("wechat", "wechat_channels")
     )
-    assert all(
-        comment_capabilities(platform).root_comments != "first_public_page"
-        for platform in (
-            "douyin",
-            "toutiao",
-            "wechat",
-            "wechat_channels",
-            "xiaohongshu",
-            "haokan",
-            "kuaishou",
-            "bilibili",
-            "weibo",
-        )
-    )
+    xiaohongshu = comment_capabilities("xiaohongshu")
+    assert xiaohongshu.root_comments == "first_public_page"
+    assert xiaohongshu.anonymous is True
 
 
 def test_xiaohongshu_cookie_mode_reports_authenticated_pagination() -> None:

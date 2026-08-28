@@ -107,7 +107,7 @@ class BrowserFallback:
         proxy_mapping = None
         lease_ok = False
         try:
-            if self.proxy_provider is not None:
+            if self.proxy_provider is not None and _browser_uses_proxy(platform):
                 proxy_mapping = await self.proxy_provider.get_requests_proxies()
             proxy = _playwright_proxy(proxy_mapping)
             profile_dir = self.settings.profile_dir / platform
@@ -591,6 +591,13 @@ def _playwright_proxy(proxies: dict[str, str] | None) -> dict[str, str] | None:
         return None
     server = proxies.get("https") or proxies.get("http")
     return {"server": server} if server else None
+
+
+def _browser_uses_proxy(platform: EngagementPlatform) -> bool:
+    # XHS guest comment signatures are tied to the browser-generated session
+    # and egress. Rotating purchased proxies returned counters but no bodies in
+    # production, while the same anonymous profile succeeded over direct egress.
+    return platform != "xiaohongshu"
 
 
 def _should_reload_page(

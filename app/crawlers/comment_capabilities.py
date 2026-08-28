@@ -27,9 +27,9 @@ COMMENT_CAPABILITIES: dict[EngagementPlatform, CommentCapabilities] = {
         note="公开视频页只公开评论总数，不公开评论正文。",
     ),
     "xiaohongshu": CommentCapabilities(
-        root_comments="unavailable",
-        anonymous=False,
-        note="当前签名评论协议仍要求账号会话；零账号部署不启用。",
+        root_comments="first_public_page",
+        anonymous=True,
+        note="游客浏览器可读取页面公开的首批一级评论；继续分页通常要求登录。",
     ),
     "haokan": CommentCapabilities(
         root_comments="all_public_pages",

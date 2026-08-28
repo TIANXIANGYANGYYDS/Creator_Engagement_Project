@@ -5,6 +5,7 @@ import asyncio
 from app.crawlers.browser_fallback import (
     BrowserFallback,
     BrowserFallbackSettings,
+    _browser_uses_proxy,
     _browser_target_url,
     _number,
     _parse_douyin,
@@ -14,7 +15,7 @@ from app.crawlers.browser_fallback import (
     _should_reload_page,
 )
 from app.crawlers.engagement import EngagementCrawler
-from app.models.engagement import EngagementResult, EngagementStats
+from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
 
 
 class FakeClient:
@@ -164,6 +165,63 @@ def test_wechat_channels_mobile_feed_never_uses_browser_fallback() -> None:
     assert browser.calls == []
 
 
+def test_strict_anonymous_xhs_comments_use_guest_browser_fallback() -> None:
+    class XiaohongshuGuestBrowser:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def fetch(self, url, platform, work_id, **kwargs):
+            self.calls.append((url, platform, work_id, kwargs))
+            return EngagementResult(
+                platform=platform,
+                canonical_url=url,
+                work_id=work_id,
+                coverage="partial",
+                reason="游客首批公开评论",
+                source="browser:comment/page",
+                stats=EngagementStats(comments=1),
+                comments=[EngagementComment(comment_id="xhs-1", text="公开评论")],
+            )
+
+    browser = XiaohongshuGuestBrowser()
+    crawler = EngagementCrawler(
+        client=FakeClient(),
+        browser_fallback=browser,
+        strict_anonymous_mode=True,
+    )
+
+    result = asyncio.run(crawler.fetch_comments(
+        "https://www.xiaohongshu.com/explore/6a3b9a90000000000603149f?xsec_token=token",
+        "小红书",
+        1,
+    ))
+
+    assert [comment.comment_id for comment in result.comments] == ["xhs-1"]
+    assert result.capabilities.root_comments == "first_public_page"
+    assert len(browser.calls) == 1
+
+
+def test_strict_anonymous_still_blocks_wechat_comment_browser_fallback() -> None:
+    crawler = EngagementCrawler(
+        client=FakeClient(),
+        browser_fallback=FakeBrowserFallback(),
+        strict_anonymous_mode=True,
+    )
+
+    for platform in ("wechat", "wechat_channels"):
+        result = EngagementResult(
+            platform=platform,
+            canonical_url="https://example.com/content",
+            work_id="content",
+            coverage="unsupported",
+        )
+        assert crawler._should_use_browser_fallback(
+            result,
+            include_stats=False,
+            include_comments=True,
+        ) is False
+
+
 def test_caller_cookie_is_only_seeded_into_douyin_profile() -> None:
     browser = BrowserFallback(cookies="sessionid=caller-owned")
     kuaishou = FakeBrowserContext()
@@ -186,6 +244,11 @@ def test_caller_cookie_is_only_seeded_into_douyin_profile() -> None:
         "value": "caller-owned",
         "url": "https://www.douyin.com",
     }]
+
+
+def test_xhs_guest_browser_uses_stable_direct_egress() -> None:
+    assert _browser_uses_proxy("xiaohongshu") is False
+    assert _browser_uses_proxy("douyin") is True
 
 
 def test_browser_fallback_persists_session_without_exposing_state() -> None:

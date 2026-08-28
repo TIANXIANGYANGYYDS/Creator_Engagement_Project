@@ -7,8 +7,8 @@
 
 ## 运行时行为
 
-- `EngagementService.from_settings()` 创建一个 `BrowserFallback`，与协议客户端共用
-  同一个 51 代理池。
+- `EngagementService.from_settings()` 创建一个 `BrowserFallback`，通常与协议客户端共用
+  同一个 51 代理池。小红书游客评论使用稳定直连出口，避免代理轮换破坏浏览器会话与评论签名。
 - 浏览器全局并发由 `BROWSER_MAX_CONCURRENCY` 限制。每个并发槽使用独立持久化 Profile；
   `slot 0` 保留原平台 Profile，其他槽写入 `<platform>-worker-N`，避免并行浏览器争用同一目录。
   当前 16 核、29 GiB 服务器默认使用 3 个浏览器槽。
@@ -33,8 +33,9 @@
 - 对支持懒加载的平台先尝试打开“评论/重试/刷新”入口，再同时滚动页面与弹层内部的可滚动
   容器，触发真实翻页请求；验证码、登录和安全验证不会伪造通过，结果会带 `blocked` 和
   诊断原因。
-- `creator-engagement-login` 只保留历史兼容，不属于严格匿名生产链路。小红书评论使用部署方
-  显式提供的 `XIAOHONGSHU_COOKIE`，不会通过该命令启动浏览器登录取 Cookie。
+- `creator-engagement-login` 只保留历史兼容，不属于严格匿名生产链路。小红书浏览器自动建立
+  游客状态读取首批公开评论；深分页使用部署方显式提供的 `XIAOHONGSHU_COOKIE`，不会通过
+  该命令启动浏览器登录取 Cookie。
 
 ## 配置
 
@@ -64,8 +65,9 @@ Xvfb 的运行环境单独配置，不要把人工验证码结果提交到仓库
 快手游客页会自动生成 `kwssectoken/kwscode` 等设备状态；项目在同一页面上下文请求目标
 `visionVideoDetail` 和一级评论 REST 接口，无需用户登录。全量旧 URL 实测表明成功响应
 数据可信，但游客态覆盖率仍低，不能写成稳定全覆盖。小红书互动已改为单次匿名 SSR，
-不会因协议失败再启动浏览器。评论只在 `XIAOHONGSHU_SESSION_MODE=cookie` 时使用调用方
-提供的有效会话走纯协议 cursor 分页，绝不把首屏重复标成后续页。公众号生产路径
+不会因协议失败再启动浏览器。匿名评论失败时由游客浏览器捕获公开 `comment/page` 响应，
+只返回登录门槛前已加载的首批；`XIAOHONGSHU_SESSION_MODE=cookie` 使用调用方有效会话走
+纯协议 cursor 深分页，绝不把首批重复标成后续页。公众号生产路径
 明确禁用浏览器兜底，只使用调用方 Cookie + 纯 HTTP；匿名页 `show_comment=0` 不能证明
 作者关闭评论，只有评论接口明确返回 `enabled=0` 才能确认。缺会话返回 `unsupported`，
 验证页或频控返回 `blocked`。

@@ -408,7 +408,7 @@ class EngagementCrawler:
         if (
             self.strict_anonymous_mode
             and include_comments
-            and result.platform in {"wechat", "wechat_channels", "xiaohongshu"}
+            and result.platform in {"wechat", "wechat_channels"}
         ):
             return False
         if result.platform == "wechat":
