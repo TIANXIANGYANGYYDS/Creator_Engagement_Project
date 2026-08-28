@@ -1,6 +1,7 @@
 from app.models.engagement import (
     CommentDataResponse,
     CommentPageResult,
+    CreateJobRequest,
     CollectItemRequest,
     CollectItemResponse,
     CollectRequest,
@@ -11,6 +12,12 @@ from app.models.engagement import (
     EngagementPlatform,
     EngagementResult,
     EngagementStats,
+    JobItemRequest,
+    JobItemResponse,
+    JobProgress,
+    JobResultsResponse,
+    JobStatusResponse,
+    JobSubmitResponse,
     InteractionDataResponse,
     InteractionResult,
 )
@@ -18,6 +25,7 @@ from app.models.engagement import (
 __all__ = [
     "CommentDataResponse",
     "CommentPageResult",
+    "CreateJobRequest",
     "CollectItemRequest",
     "CollectItemResponse",
     "CollectRequest",
@@ -28,6 +36,12 @@ __all__ = [
     "EngagementPlatform",
     "EngagementResult",
     "EngagementStats",
+    "JobItemRequest",
+    "JobItemResponse",
+    "JobProgress",
+    "JobResultsResponse",
+    "JobStatusResponse",
+    "JobSubmitResponse",
     "InteractionDataResponse",
     "InteractionResult",
 ]

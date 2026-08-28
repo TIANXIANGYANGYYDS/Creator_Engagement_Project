@@ -42,13 +42,16 @@
 
 ## 对外接口
 
-服务提供一个批量接口和两个兼容的单项接口：
+服务提供异步批量任务、同步兼容批量和两个单项接口：
 
 ```text
+POST /api/v1/jobs
+GET  /api/v1/jobs/{job_id}
+GET  /api/v1/jobs/{job_id}/results
 POST /api/v1/collect
-GET /api/v1/interactions?url=<URL>&media_name=<MEDIA>
-GET /api/v1/comments?url=<URL>&media_name=<MEDIA>
-GET /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1
+GET  /api/v1/interactions?url=<URL>&media_name=<MEDIA>
+GET  /api/v1/comments?url=<URL>&media_name=<MEDIA>
+GET  /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1
 ```
 
 另有健康检查：
@@ -63,7 +66,7 @@ GET /api/v1/health
 互动量与评论是两个独立业务请求，分别执行并分别缓存。一个代理 IP 可以在有效期内承载多个
 HTTP 请求；复用同一个 IP 不等于把互动量和评论合并成一次上游请求。
 
-`media_name` 的规范值为：
+内部平台标识为：
 
 ```text
 douyin / toutiao / wechat / wechat_channels / xiaohongshu /
@@ -71,7 +74,8 @@ haokan / kuaishou / bilibili / weibo
 ```
 
 接口也接受抖音、头条、微信、微信公众号、微信视频号、小红书、好看、快手、哔哩哔哩、
-B站和微博等中文名称。
+B站和微博等中文名称。所有业务响应中的 `media_name` 统一为规范中文值：抖音、今日头条、
+微信公众号、微信视频号、小红书、好看视频、快手、哔哩哔哩、微博。
 服务会同时校验 URL 平台和 `media_name`；两者不一致时，单项接口返回 HTTP 422，批量接口
 把对应项标为 `failed` 并继续处理其他项。
 
@@ -80,13 +84,48 @@ B站和微博等中文名称。
 评论正文都需要按 [视频号授权侧车文档](docs/WECHAT_CHANNELS_BRIDGE.md) 部署 Windows 微信客户端；
 未配置侧车时接口会明确失败，不会使用外部缓存补数。
 
-批量接口接收包含 `url`、中文 `media_name`、`type` 和可选 `page` 的 `items` 数组，不设置
-业务条数上限。评论项不传 `page` 时获取全部当前可见一级评论，传数字时只获取对应页。响应
-使用规范名“微信”和“哔哩哔哩”，同时继续接受“微信公众号”和“B站”。返回项使用固定字段
-结构，平台没有公开的字段为 `null`，并在批次顶层返回总耗时 `duration_ms` 和本批次触发新增
-代理 IP 的采购成本 `cost_yuan`。完整示例见接口文档。
+新接入的外部服务推荐调用 `POST /api/v1/jobs`。异步请求的每一项包含调用方唯一 `item_id`、
+`url`、`media_name`、`type` 和可选 `page`；提交后立即返回 `job_id`，调用方查询任务进度并按
+cursor 分页读取已完成结果。任务和结果使用 SQLite 持久化，默认保留 24 小时。可选
+`Idempotency-Key` 防止提交重试造成重复任务，也可配置 HTTPS Webhook 接收结束通知。
+
+`POST /api/v1/collect` 继续同步返回，保留给已有调用和耗时可控的小批次。两种批量接口都不设置
+业务条数上限，也不使用流式 JSON；实际容量仍受请求体大小、采集并发、平台限速和结果保留时间
+约束。
+
+所有批量结果统一使用规范中文媒体名，评论字段为 `comments`。项目 `status` 只使用 `success`
+或 `failed`，`complete` 单独表示是否覆盖了调用方请求的完整范围。平台没有公开的字段为
+`null`；任务结束后返回总耗时 `duration_ms` 和本任务触发新增代理 IP 的采购成本
+`cost_yuan`。
 
 ### 调用示例
+
+提交异步批量任务：
+
+```bash
+curl -X POST 'http://39.106.202.228:8200/api/v1/jobs' \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: business-batch-001' \
+  -d '{
+    "items": [{
+      "item_id": "row-001-comments",
+      "url": "<内容 URL>",
+      "media_name": "抖音",
+      "type": "comments"
+    }]
+  }'
+```
+
+使用响应中的 `job_id` 查询进度和结果：
+
+```bash
+curl 'http://39.106.202.228:8200/api/v1/jobs/<job_id>'
+curl 'http://39.106.202.228:8200/api/v1/jobs/<job_id>/results?limit=100'
+```
+
+结果按完成顺序返回，调用方用 `item_id` 关联原始记录，并将 `next_cursor` 原样传给下一次结果
+请求。任务结束且结果读完后，`next_cursor` 为 `null`。完整流程和响应示例见
+[API 接口文档](docs/API.md)。
 
 互动量：
 
@@ -120,10 +159,11 @@ curl --get 'http://39.106.202.228:8200/api/v1/comments' \
 
 ### 响应语义
 
-两个业务接口统一使用最小 `data` 外壳。互动量响应：
+两个单项接口都返回规范中文 `media_name`。互动量响应：
 
 ```json
 {
+  "media_name": "抖音",
   "data": {
     "views": 100,
     "likes": 20,
@@ -142,7 +182,8 @@ curl --get 'http://39.106.202.228:8200/api/v1/comments' \
 
 ```json
 {
-  "data": [
+  "media_name": "抖音",
+  "comments": [
     {
       "comment_id": "123",
       "author": "用户昵称",
@@ -209,6 +250,12 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' 哔哩哔哩 --p
 | `PROXY_51_API_URL` | 空 | 51 代理供应接口 |
 | `PROXY_POOL_SIZE` | `8` | 代理池目标数量 |
 | `PROXY_MAX_CONCURRENCY` | `1` | 单个代理的最大并发 |
+| `JOB_MAX_CONCURRENCY` | `2` | 同时运行的异步批量任务数 |
+| `JOB_RESULT_TTL_SECONDS` | `86400` | 已结束异步任务和结果的保留秒数 |
+| `JOB_DB_PATH` | `.local/jobs/jobs.sqlite3` | 异步任务 SQLite 持久化路径 |
+| `JOB_WEBHOOK_ALLOWED_HOSTS` | 空 | 允许接收任务通知的 HTTPS 域名，多个值用逗号分隔 |
+| `JOB_WEBHOOK_TIMEOUT_SECONDS` | `10` | 单次 Webhook 请求超时 |
+| `JOB_WEBHOOK_MAX_ATTEMPTS` | `3` | Webhook 最大尝试次数 |
 | `RELIABILITY_MODE` | `enterprise` | 启用协议重试、语义失败换 IP 和平台保护 |
 | `PROTOCOL_MAX_ATTEMPTS` | `3` | 企业模式最大协议尝试次数 |
 | `TOUTIAO_PROTOCOL_MAX_ATTEMPTS` | `1` | 头条 SSR 能力探测次数；避免确定性空结果重复换 IP |
@@ -263,6 +310,7 @@ app/core/                        配置与日志
 app/models/engagement.py         统一响应模型
 app/services/engagement_service.py
                                  缓存、并发、代理和业务服务
+app/services/job_service.py       异步任务调度、持久化、分页和 Webhook
 app/crawlers/engagement.py       URL 校验、平台路由和浏览器兜底
 app/crawlers/comment_capabilities.py
                                  九个平台一级评论能力定义
@@ -285,7 +333,7 @@ xiaohongshu.py / haokan.py / kuaishou.py / bilibili.py / weibo.py
 当前全量自动化结果：
 
 ```text
-203 passed
+209 passed
 ruff check app tests: All checks passed
 ```
 

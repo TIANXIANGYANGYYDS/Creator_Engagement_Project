@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 MEDIA_NAMES_ZH = {
     "douyin": "抖音",
     "toutiao": "今日头条",
-    "wechat": "微信",
+    "wechat": "微信公众号",
     "wechat_channels": "微信视频号",
     "xiaohongshu": "小红书",
     "haokan": "好看视频",
@@ -47,13 +47,20 @@ async def get_interactions(
     service: EngagementService = Depends(get_engagement_service),
 ) -> InteractionDataResponse:
     try:
-        result = await service.fetch_interactions(url, media_name)
+        platform = normalize_media_name(media_name)
+        result = await service.fetch_interactions(
+            url,
+            MEDIA_NAMES_ZH[platform],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _require_usable_result(result)
     if not any(value is not None for value in result.stats.model_dump().values()):
         raise HTTPException(status_code=502, detail=result.reason or "互动数据不可用")
-    return InteractionDataResponse(data=result.stats)
+    return InteractionDataResponse(
+        media_name=MEDIA_NAMES_ZH[result.platform],
+        data=result.stats,
+    )
 
 
 @router.get("/comments", response_model=CommentDataResponse)
@@ -64,12 +71,27 @@ async def get_comments(
     service: EngagementService = Depends(get_engagement_service),
 ) -> CommentDataResponse:
     try:
+        platform = normalize_media_name(media_name)
+        canonical_media_name = MEDIA_NAMES_ZH[platform]
         if page is not None:
-            result = await service.fetch_comments(url, media_name, page)
+            result = await service.fetch_comments(
+                url,
+                canonical_media_name,
+                page,
+            )
             _require_usable_result(result)
-            return CommentDataResponse(data=result.comments)
+            return CommentDataResponse(
+                media_name=MEDIA_NAMES_ZH[result.platform],
+                comments=result.comments,
+            )
+        comments, _, _ = await _fetch_all_comments_with_status(
+            service,
+            url,
+            canonical_media_name,
+        )
         return CommentDataResponse(
-            data=await _fetch_all_comments(service, url, media_name)
+            media_name=canonical_media_name,
+            comments=comments,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -104,7 +126,7 @@ async def _collect_item(
         platform = normalize_media_name(item.media_name)
         media_name = MEDIA_NAMES_ZH[platform]
         if item.type == "interactions":
-            result = await service.fetch_interactions(item.url, item.media_name)
+            result = await service.fetch_interactions(item.url, media_name)
             if result.coverage not in {"complete", "partial"} or not any(
                 value is not None for value in result.stats.model_dump().values()
             ):
@@ -114,7 +136,8 @@ async def _collect_item(
                 url=item.url,
                 media_name=MEDIA_NAMES_ZH[result.platform],
                 type=item.type,
-                status="success" if result.coverage == "complete" else "partial",
+                status="success",
+                complete=True,
                 result=CollectResultData(
                     views=result.stats.views,
                     likes=result.stats.likes,
@@ -133,33 +156,35 @@ async def _collect_item(
             )
 
         if item.page is None:
-            comments, total_comments, is_partial = await _fetch_all_comments_with_status(
+            comments, total_comments, is_complete = await _fetch_all_comments_with_status(
                 service,
                 item.url,
-                item.media_name,
+                media_name,
             )
             return CollectItemResponse(
                 url=item.url,
                 media_name=media_name,
                 type=item.type,
-                status="partial" if is_partial else "success",
+                status="success",
+                complete=is_complete,
                 result=CollectResultData(
                     total_comments=total_comments,
-                    comment_list=comments,
+                    comments=comments,
                 ),
             )
 
-        result = await service.fetch_comments(item.url, item.media_name, item.page)
+        result = await service.fetch_comments(item.url, media_name, item.page)
         if result.coverage not in {"complete", "partial"}:
             return _failed_collect_item(item, media_name, result.reason)
         return CollectItemResponse(
             url=item.url,
             media_name=MEDIA_NAMES_ZH[result.platform],
             type=item.type,
-            status="success" if result.coverage == "complete" else "partial",
+            status="success",
+            complete=True,
             result=CollectResultData(
                 total_comments=result.total_comments,
-                comment_list=result.comments,
+                comments=result.comments,
             ),
         )
     except ValueError as exc:
@@ -186,6 +211,7 @@ def _failed_collect_item(
         media_name=media_name,
         type=item.type,
         status="failed",
+        complete=False,
         result=CollectResultData(),
         error=error or "数据不可用",
     )
@@ -199,15 +225,6 @@ def _require_usable_result(result: InteractionResult | CommentPageResult) -> Non
         )
 
 
-async def _fetch_all_comments(
-    service: EngagementService,
-    url: str,
-    media_name: str,
-) -> list[EngagementComment]:
-    comments, _, _ = await _fetch_all_comments_with_status(service, url, media_name)
-    return comments
-
-
 async def _fetch_all_comments_with_status(
     service: EngagementService,
     url: str,
@@ -219,8 +236,6 @@ async def _fetch_all_comments_with_status(
     page = 1
     cursor: str | None = None
     total_comments: int | None = None
-    is_partial = False
-
     while True:
         if page in requested_pages or len(requested_pages) >= 10_000:
             raise HTTPException(status_code=502, detail="评论分页游标异常，已停止采集")
@@ -237,10 +252,8 @@ async def _fetch_all_comments_with_status(
             )
         if result.coverage not in {"complete", "partial"}:
             if comments:
-                return comments, total_comments, True
+                return comments, total_comments, False
             _require_usable_result(result)
-        if result.coverage == "partial":
-            is_partial = True
         if result.total_comments is not None:
             total_comments = result.total_comments
         for comment in result.comments:
@@ -249,7 +262,11 @@ async def _fetch_all_comments_with_status(
                 comments.append(comment)
 
         if result.next_page is None:
-            return comments, total_comments, is_partial
+            return (
+                comments,
+                total_comments,
+                result.capabilities.root_comments == "all_public_pages",
+            )
         if result.next_page <= page:
             raise HTTPException(status_code=502, detail="评论分页游标没有向后推进")
         page = result.next_page

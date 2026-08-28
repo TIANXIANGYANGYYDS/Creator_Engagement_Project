@@ -31,7 +31,9 @@ CommentPaginationMode = Literal[
     "unavailable",
 ]
 CollectOperation = Literal["interactions", "comments"]
-CollectStatus = Literal["success", "partial", "failed"]
+CollectStatus = Literal["success", "failed"]
+JobStatus = Literal["queued", "running", "completed", "failed"]
+WebhookStatus = Literal["pending", "sent", "failed"]
 
 
 class EngagementStats(BaseModel):
@@ -107,11 +109,13 @@ class CommentPageResult(CollectionResult):
 
 
 class InteractionDataResponse(BaseModel):
+    media_name: str
     data: EngagementStats
 
 
 class CommentDataResponse(BaseModel):
-    data: list[EngagementComment] = Field(default_factory=list)
+    media_name: str
+    comments: list[EngagementComment] = Field(default_factory=list)
 
 
 class CollectItemRequest(BaseModel):
@@ -135,7 +139,7 @@ class CollectResultData(BaseModel):
     danmaku: int | None = Field(default=None, ge=0)
     reposts: int | None = Field(default=None, ge=0)
     recommendations: int | None = Field(default=None, ge=0)
-    comment_list: list[EngagementComment] | None = None
+    comments: list[EngagementComment] | None = None
 
 
 class CollectItemResponse(BaseModel):
@@ -143,12 +147,61 @@ class CollectItemResponse(BaseModel):
     media_name: str
     type: CollectOperation
     status: CollectStatus
+    complete: bool
     result: CollectResultData
     error: str | None = None
 
 
 class CollectResponse(BaseModel):
     data: list[CollectItemResponse]
+    duration_ms: int = Field(ge=0)
+    cost_yuan: float = Field(ge=0)
+
+
+class JobItemRequest(CollectItemRequest):
+    item_id: str = Field(min_length=1)
+
+
+class CreateJobRequest(BaseModel):
+    items: list[JobItemRequest] = Field(min_length=1)
+    webhook_url: str | None = Field(default=None, min_length=1)
+
+
+class JobProgress(BaseModel):
+    total: int = Field(ge=0)
+    completed: int = Field(ge=0)
+    success: int = Field(ge=0)
+    failed: int = Field(ge=0)
+
+
+class JobSubmitResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    progress: JobProgress
+    duration_ms: int = Field(ge=0)
+    cost_yuan: float = Field(ge=0)
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    webhook_status: WebhookStatus | None = None
+
+
+class JobItemResponse(CollectItemResponse):
+    item_id: str
+
+
+class JobResultsResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    data: list[JobItemResponse] = Field(default_factory=list)
+    next_cursor: str | None = None
+    available_count: int = Field(ge=0)
+    total: int = Field(ge=0)
     duration_ms: int = Field(ge=0)
     cost_yuan: float = Field(ge=0)
 

@@ -100,6 +100,37 @@ class Settings(BaseSettings):
         alias="COLLECTION_MAX_CONCURRENCY",
         ge=1,
     )
+    job_max_concurrency: int = Field(
+        default=2,
+        alias="JOB_MAX_CONCURRENCY",
+        ge=1,
+        le=32,
+    )
+    job_result_ttl_seconds: int = Field(
+        default=86_400,
+        alias="JOB_RESULT_TTL_SECONDS",
+        ge=60,
+    )
+    job_db_path: str = Field(
+        default=".local/jobs/jobs.sqlite3",
+        alias="JOB_DB_PATH",
+    )
+    job_webhook_allowed_hosts: str = Field(
+        default="",
+        alias="JOB_WEBHOOK_ALLOWED_HOSTS",
+    )
+    job_webhook_timeout_seconds: float = Field(
+        default=10,
+        alias="JOB_WEBHOOK_TIMEOUT_SECONDS",
+        gt=0,
+        le=60,
+    )
+    job_webhook_max_attempts: int = Field(
+        default=3,
+        alias="JOB_WEBHOOK_MAX_ATTEMPTS",
+        ge=1,
+        le=10,
+    )
     reliability_mode: Literal["economy", "enterprise"] = Field(
         default="enterprise",
         alias="RELIABILITY_MODE",

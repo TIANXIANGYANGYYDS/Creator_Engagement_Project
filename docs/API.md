@@ -1,6 +1,6 @@
 # Creator Engagement API 接口文档
 
-最后更新：2026-08-27
+最后更新：2026-08-28
 接口版本：`v1`
 
 ## 1. 接口概览
@@ -23,7 +23,10 @@ http://39.106.202.228:8200
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `POST` | `/api/v1/collect` | 批量获取多个平台的互动量或评论 |
+| `POST` | `/api/v1/jobs` | 提交异步批量采集任务，返回 `job_id` |
+| `GET` | `/api/v1/jobs/{job_id}` | 查询异步任务状态、进度、总耗时和总成本 |
+| `GET` | `/api/v1/jobs/{job_id}/results` | 分页读取已完成的异步任务结果 |
+| `POST` | `/api/v1/collect` | 同步批量采集，保留给兼容调用和小批次 |
 | `GET` | `/api/v1/interactions` | 获取内容的互动统计 |
 | `GET` | `/api/v1/comments` | 获取内容的一级评论正文 |
 | `GET` | `/api/v1/health` | 获取服务和代理池运行状态 |
@@ -57,12 +60,13 @@ OpenAPI:     http://39.106.202.228:8200/openapi.json
 
 服务会同时识别 URL 所属平台并校验 `media_name`。二者不一致时，单项 GET 接口返回 HTTP
 422，批量接口将对应项标记为 `failed` 并继续处理其他项。微信公众号和微信视频号是两个
-独立平台；批量响应中的“微信”指微信公众号，公众号使用 `wechat`，视频号使用
+独立平台；响应中的“微信公众号”使用 `wechat`，视频号使用
 `wechat_channels`。
 
-批量接口的请求建议使用规范中文名，响应一律返回规范中文名：`抖音`、`今日头条`、`微信`、
+请求可以继续使用英文名或兼容别名，所有业务响应中的 `media_name` 一律返回规范中文名：
+`抖音`、`今日头条`、`微信公众号`、
 `微信视频号`、`小红书`、`好看视频`、`快手`、`哔哩哔哩`、`微博`。输入仍接受
-`微信公众号` 和 `B站` 等兼容别名。
+`微信`、`微信公众号` 和 `B站` 等兼容别名。
 
 微信视频号支持以下 URL：
 
@@ -77,12 +81,184 @@ OpenAPI:     http://39.106.202.228:8200/openapi.json
 
 ## 3. 批量采集
 
-### 3.1 请求
+新接入的外部服务推荐使用异步任务接口。调用方先提交任务获得 `job_id`，再轮询状态并使用
+cursor 分页读取已完成结果；不需要让一个 HTTP 请求一直等待整批采集结束。原
+`POST /api/v1/collect` 继续保留，适合小批次和已有调用方。
+
+异步与同步接口共用同一套平台适配器、代理池、缓存和统一返回结构。接口不使用流式 JSON。
+
+### 3.1 提交异步任务
+
+```http
+POST /api/v1/jobs
+Content-Type: application/json
+Idempotency-Key: hhm-20260828-001
+```
+
+```json
+{
+  "items": [
+    {
+      "item_id": "source-row-001-interactions",
+      "url": "https://www.douyin.com/video/1234567890",
+      "media_name": "抖音",
+      "type": "interactions"
+    },
+    {
+      "item_id": "source-row-001-comments",
+      "url": "https://www.douyin.com/video/1234567890",
+      "media_name": "抖音",
+      "type": "comments"
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `items` | array | 是 | 采集项列表，至少一项，不设置业务条数上限 |
+| `items[].item_id` | string | 是 | 调用方生成的批次内唯一标识，用于将异步结果关联回原始记录 |
+| `items[].url` | string | 是 | 受支持的内容 URL |
+| `items[].media_name` | string | 是 | 支持中文、英文规范值和兼容别名；响应统一为中文规范值 |
+| `items[].type` | string | 是 | `interactions` 或 `comments` |
+| `items[].page` | integer/null | 否 | 评论项不传时获取全部当前可见一级评论；传数字时只获取对应页，必须大于等于 1 |
+| `webhook_url` | string/null | 否 | 任务结束通知地址，必须为 HTTPS 且域名已加入服务端白名单 |
+
+同一任务内的 `item_id` 不能重复。`page` 必须是 JSON 数字，字符串形式的 `"1"` 不接受。
+互动量和评论是两个独立采集项；同一 URL 同时需要两类数据时，应像示例一样提交两项并使用不同
+`item_id`。
+
+`Idempotency-Key` 是可选请求头，长度为 1 到 128。生产调用建议每个业务批次都传入：相同 Key
+和相同请求体重复提交会返回原 `job_id`，不会重复执行；相同 Key 对应不同请求体时返回 HTTP
+409。重试时请求体和 Key 都必须保持不变。
+
+提交成功返回 HTTP 202：
+
+```json
+{
+  "job_id": "job_1d8d5e1726464a6492bb79246fa6e6fd",
+  "status": "queued"
+}
+```
+
+`queued` 表示服务已经接收并持久化任务，不表示采集已经完成。
+
+### 3.2 查询任务状态
+
+```http
+GET /api/v1/jobs/job_1d8d5e1726464a6492bb79246fa6e6fd
+```
+
+```json
+{
+  "job_id": "job_1d8d5e1726464a6492bb79246fa6e6fd",
+  "status": "completed",
+  "progress": {
+    "total": 2,
+    "completed": 2,
+    "success": 2,
+    "failed": 0
+  },
+  "duration_ms": 4218,
+  "cost_yuan": 0.00168,
+  "created_at": "2026-08-28T08:10:00Z",
+  "started_at": "2026-08-28T08:10:01Z",
+  "finished_at": "2026-08-28T08:10:05Z",
+  "webhook_status": null
+}
+```
+
+任务 `status`：
+
+| 值 | 含义 |
+|---|---|
+| `queued` | 已接收，等待任务执行槽位 |
+| `running` | 正在采集，已完成结果可以开始分页读取 |
+| `completed` | 任务调度完成；具体项目仍可能有 `status=failed` |
+| `failed` | 任务级执行中断；已经完成的项目仍可从结果接口读取 |
+
+`progress.success` 和 `progress.failed` 是项目级计数。任务为 `completed` 只表示所有项目都已得到
+明确结果，不代表每个项目都成功。任务运行期间 `duration_ms` 和 `cost_yuan` 暂为 `0`，结束后
+返回最终总耗时和本任务触发的新增代理采购成本。
+
+### 3.3 分页读取异步结果
+
+首次读取：
+
+```http
+GET /api/v1/jobs/job_1d8d5e1726464a6492bb79246fa6e6fd/results?limit=100
+```
+
+后续读取时原样传回上一页的 `next_cursor`：
+
+```http
+GET /api/v1/jobs/job_1d8d5e1726464a6492bb79246fa6e6fd/results?limit=100&cursor=<next_cursor>
+```
+
+`limit` 默认为 100，范围为 1 到 500。结果按完成顺序返回，不保证与提交顺序一致，调用方必须
+使用 `item_id` 关联原始记录。
+
+```json
+{
+  "job_id": "job_1d8d5e1726464a6492bb79246fa6e6fd",
+  "status": "running",
+  "data": [
+    {
+      "item_id": "source-row-001-interactions",
+      "url": "https://www.douyin.com/video/1234567890",
+      "media_name": "抖音",
+      "type": "interactions",
+      "status": "success",
+      "complete": true,
+      "result": {
+        "views": 1000,
+        "likes": 80,
+        "total_comments": 12,
+        "shares": 5,
+        "favorites": 3,
+        "coins": null,
+        "danmaku": null,
+        "reposts": null,
+        "recommendations": null,
+        "comments": null
+      },
+      "error": null
+    }
+  ],
+  "next_cursor": "MQ==",
+  "available_count": 1,
+  "total": 2,
+  "duration_ms": 0,
+  "cost_yuan": 0
+}
+```
+
+当任务仍为 `queued/running` 时，即使当前可用结果已经读完，接口仍返回一个非空
+`next_cursor`，调用方应保存它并在稍后继续读取，不能自行解析或生成 cursor。任务进入
+`completed/failed` 且已读完全部结果后，`next_cursor` 才为 `null`。此时异步消费完成。
+
+`available_count` 是当前已经完成并可读取的结果总数，`total` 是提交的项目总数。调用方可以在
+任务运行期间持续消费新结果，也可以等待任务结束后再分页读取。
+
+### 3.4 Webhook、持久化和过期
+
+请求体传入 `webhook_url` 后，任务结束时服务会 POST 一次任务状态对象，失败时按配置重试。
+Webhook 只通知状态和进度，不直接推送全部结果；接收方仍使用结果接口分页读取。出于 SSRF
+防护，URL 必须使用 HTTPS，且目标域名必须配置在 `JOB_WEBHOOK_ALLOWED_HOSTS` 白名单中。
+
+任务和结果默认写入 `.local/jobs/jobs.sqlite3`，完成后保留 24 小时。服务正常重启后，已完成
+任务及其结果仍可查询；进程中断时尚处于 `queued/running` 的任务不会自动重复执行，重启后会
+标记为 `failed`，调用方应使用新的 `Idempotency-Key` 重新提交。任务过期后状态和结果接口返回
+HTTP 404。
+
+### 3.5 同步批量接口（兼容）
 
 ```http
 POST /api/v1/collect
 Content-Type: application/json
 ```
+
+同步请求项不需要 `item_id`：
 
 ```json
 {
@@ -101,20 +277,7 @@ Content-Type: application/json
 }
 ```
 
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---:|---|
-| `items` | array | 是 | 采集项列表，至少一项，不设置业务条数上限 |
-| `items[].url` | string | 是 | 受支持的内容 URL |
-| `items[].media_name` | string | 是 | 中文媒体名称；服务同时校验 URL 平台 |
-| `items[].type` | string | 是 | `interactions` 或 `comments` |
-| `items[].page` | integer/null | 否 | 不传或传 `null` 时获取全部当前可见一级评论；传数字时只获取对应页，必须大于等于 1 |
-
-`page` 必须是 JSON 数字，字符串形式的 `"1"` 不作为页码接受。
-
-批量接口没有固定条数上限，但服务仍按全局并发、平台并发和平台请求间隔排队执行。批次越大，
-响应时间越长，并仍受调用方、网关和服务器的请求体大小及 HTTP 超时约束。
-
-### 3.2 响应
+服务并发执行批次内项目，全部结束后一次返回完整 JSON：
 
 ```json
 {
@@ -123,7 +286,8 @@ Content-Type: application/json
       "url": "https://www.douyin.com/video/1234567890",
       "media_name": "抖音",
       "type": "interactions",
-      "status": "partial",
+      "status": "success",
+      "complete": true,
       "result": {
         "views": 1000,
         "likes": 80,
@@ -134,7 +298,7 @@ Content-Type: application/json
         "danmaku": null,
         "reposts": null,
         "recommendations": null,
-        "comment_list": null
+        "comments": null
       },
       "error": null
     }
@@ -144,20 +308,30 @@ Content-Type: application/json
 }
 ```
 
+同步接口没有固定业务条数上限，但会一直占用调用方 HTTP 连接，并受调用方、网关和服务器超时
+限制。因此只建议用于耗时可控的小批次；大批次使用异步任务接口。
+
 每一项始终包含相同的 `result` 字段。平台未公开的互动字段返回 `null`；未请求评论时
-`comment_list` 为 `null`；评论请求成功且没有可见评论时为 `[]`。`status` 的取值为：
+`comments` 为 `null`；评论请求成功且没有可见评论时为 `[]`。
 
-- `success`：平台明确返回完整的当前请求结果；
-- `partial`：返回了可验证数据，但平台公开能力不足以证明完整覆盖；
-- `failed`：该项没有可用数据，固定结果字段均为 `null`，原因写入 `error`。
+- `status=success`：该项拿到了可验证的业务数据；
+- `status=failed`：该项没有可用数据，固定结果字段均为 `null`，原因写入 `error`；
+- `complete=true`：已经完成调用方指定的请求范围；
+- `complete=false`：请求成功并返回了真实数据，但平台登录门槛或风控阻止了全量覆盖。
 
-`duration_ms` 是整个批次的端到端耗时。`cost_yuan` 当前仅统计本批次触发代理池新增 IP 的
+`status` 只表示请求成功或失败，不再使用容易被误解为失败的 `partial`。`complete` 只描述覆盖
+范围。互动请求中平台本身不公开或不适用的字段为 `null`，不影响 `complete=true`；指定数字页
+成功返回该页也属于 `complete=true`。默认全量评论只有确认到达公开末页才为 `true`，小红书
+匿名游客首批、微博深页阻断等情况为 `false`。
+
+同步响应和异步任务结果使用相同的项目字段。`duration_ms` 是整个批次的端到端耗时。
+`cost_yuan` 当前仅统计本批次触发代理池新增 IP 的
 采购成本，公式为 `新增 IP 数 × 0.00084 元`；复用已有代理、直连和缓存命中不会产生新增
 代理成本。它不是对客户的商业收费金额。
 
 统一互动字段的当前平台覆盖如下；实际页面没有公开某个值时仍返回 `null`：
 
-| 平台 | views | likes | total_comments | shares | favorites | coins | danmaku | reposts | recommendations | comment_list |
+| 平台 | views | likes | total_comments | shares | favorites | coins | danmaku | reposts | recommendations | comments |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 抖音 | 支持 | 支持 | 支持 | 支持 | 支持 | 不支持 | 不支持 | 不支持 | 部分作品 | 支持 |
 | 今日头条 | 支持 | 支持 | 支持 | 支持 | 不支持 | 不支持 | 不支持 | 不支持 | 不支持 | 支持 |
@@ -196,6 +370,7 @@ HTTP 200：
 
 ```json
 {
+  "media_name": "哔哩哔哩",
   "data": {
     "views": 100000,
     "likes": 5200,
@@ -303,7 +478,8 @@ HTTP 200：
 
 ```json
 {
-  "data": [
+  "media_name": "哔哩哔哩",
+  "comments": [
     {
       "comment_id": "739000000000001",
       "author": "用户昵称",
@@ -320,7 +496,8 @@ HTTP 200：
 
 ```json
 {
-  "data": []
+  "media_name": "哔哩哔哩",
+  "comments": []
 }
 ```
 
@@ -375,7 +552,9 @@ GET /api/v1/health
 
 | HTTP 状态 | 场景 |
 |---:|---|
-| `422` | 缺少参数、`page < 1`、不支持的 URL、媒体名称不支持或媒体与 URL 不匹配 |
+| `404` | 异步任务不存在或已超过结果保留时间 |
+| `409` | 相同 `Idempotency-Key` 已用于不同的任务请求 |
+| `422` | 缺少参数、异步项缺少或重复 `item_id`、无效 cursor、Webhook 不合规、`page < 1` 或媒体参数不合法 |
 | `502` | 平台拦截、验证码、协议失败、互动字段全部不可用或评论第一页不可用 |
 | `500` | 未预期的服务端错误 |
 
@@ -411,10 +590,84 @@ FastAPI 参数格式校验的 `detail` 是错误数组，例如 `page=0`：
 }
 ```
 
-下游应先判断 HTTP 状态码，只有 HTTP 200 时读取 `data`。`data: []` 表示成功确认当前请求
+下游应先判断 HTTP 状态码。评论接口的 `comments: []` 表示成功确认当前请求
 没有返回一级评论；它与 HTTP 502 的“无法获取评论”含义不同。
 
 ## 8. Python 调用示例
+
+异步批量调用：
+
+```python
+import time
+from uuid import uuid4
+
+import requests
+
+
+base_url = "http://39.106.202.228:8200"
+batch_key = f"engagement-{uuid4()}"
+items = [
+    {
+        "item_id": "source-row-001-interactions",
+        "url": "https://www.bilibili.com/video/BVxxxxxxxxxx",
+        "media_name": "B站",
+        "type": "interactions",
+    },
+    {
+        "item_id": "source-row-001-comments",
+        "url": "https://www.bilibili.com/video/BVxxxxxxxxxx",
+        "media_name": "B站",
+        "type": "comments",
+    },
+]
+
+submitted = requests.post(
+    f"{base_url}/api/v1/jobs",
+    json={"items": items},
+    headers={"Idempotency-Key": batch_key},
+    timeout=30,
+)
+submitted.raise_for_status()
+job_id = submitted.json()["job_id"]
+
+while True:
+    status_response = requests.get(
+        f"{base_url}/api/v1/jobs/{job_id}",
+        timeout=30,
+    )
+    status_response.raise_for_status()
+    job = status_response.json()
+    if job["status"] in {"completed", "failed"}:
+        break
+    time.sleep(2)
+
+results = []
+cursor = None
+while True:
+    params = {"limit": 100}
+    if cursor is not None:
+        params["cursor"] = cursor
+    result_response = requests.get(
+        f"{base_url}/api/v1/jobs/{job_id}/results",
+        params=params,
+        timeout=30,
+    )
+    result_response.raise_for_status()
+    page = result_response.json()
+    results.extend(page["data"])
+    cursor = page["next_cursor"]
+    if cursor is None:
+        break
+
+result_by_item_id = {item["item_id"]: item for item in results}
+duration_ms = job["duration_ms"]
+cost_yuan = job["cost_yuan"]
+```
+
+提交请求超时或网络中断时，使用相同 `Idempotency-Key` 和完全相同的请求体重试。只有在确认原
+任务为 `failed` 且需要重新执行时，才生成新的 Key。
+
+单项同步调用：
 
 ```python
 import requests
@@ -429,7 +682,9 @@ interaction_response = requests.get(
     timeout=60,
 )
 interaction_response.raise_for_status()
-stats = interaction_response.json()["data"]
+interaction_payload = interaction_response.json()
+media_name = interaction_payload["media_name"]
+stats = interaction_payload["data"]
 
 comment_response = requests.get(
     f"{base_url}/api/v1/comments",
@@ -437,7 +692,9 @@ comment_response = requests.get(
     timeout=300,
 )
 comment_response.raise_for_status()
-comments = comment_response.json()["data"]
+comment_payload = comment_response.json()
+media_name = comment_payload["media_name"]
+comments = comment_payload["comments"]
 ```
 
 互动量和评论是两个独立业务请求，分别执行并缓存。默认全量评论可能需要多次平台上游请求，

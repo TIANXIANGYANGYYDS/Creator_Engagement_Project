@@ -22,6 +22,12 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.xiaohongshu_session_mode == "disabled"
     assert settings.xiaohongshu_cookie.get_secret_value() == ""
     assert settings.collection_max_concurrency == 8
+    assert settings.job_max_concurrency == 2
+    assert settings.job_result_ttl_seconds == 86400
+    assert settings.job_db_path == ".local/jobs/jobs.sqlite3"
+    assert settings.job_webhook_allowed_hosts == ""
+    assert settings.job_webhook_timeout_seconds == 10
+    assert settings.job_webhook_max_attempts == 3
     assert settings.reliability_mode == "enterprise"
     assert settings.protocol_max_attempts == 3
     assert settings.protocol_retry_base_seconds == 1
