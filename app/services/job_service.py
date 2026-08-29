@@ -52,6 +52,8 @@ class _JobRecord:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     webhook_status: str | None = None
+    error: str | None = None
+    cancel_requested: bool = False
 
 
 class BatchJobManager:
@@ -60,13 +62,25 @@ class BatchJobManager:
         *,
         retention_seconds: int = 86_400,
         max_concurrency: int = 2,
+        item_max_concurrency: int = 16,
+        item_timeout_seconds: float = 45,
+        job_timeout_seconds: float = 1800,
         webhook_allowed_hosts: set[str] | None = None,
         webhook_timeout_seconds: float = 10,
         webhook_max_attempts: int = 3,
         webhook_client: httpx.AsyncClient | None = None,
         db_path: Path | None = None,
     ) -> None:
+        if item_max_concurrency <= 0:
+            raise ValueError("item_max_concurrency must be greater than zero")
+        if item_timeout_seconds <= 0:
+            raise ValueError("item_timeout_seconds must be greater than zero")
+        if job_timeout_seconds <= 0:
+            raise ValueError("job_timeout_seconds must be greater than zero")
         self.retention_seconds = retention_seconds
+        self.item_max_concurrency = item_max_concurrency
+        self.item_timeout_seconds = item_timeout_seconds
+        self.job_timeout_seconds = job_timeout_seconds
         self.webhook_allowed_hosts = {
             host.casefold() for host in (webhook_allowed_hosts or set()) if host
         }
@@ -168,12 +182,34 @@ class BatchJobManager:
                 cost_yuan=record.cost_yuan,
             )
 
+    async def cancel(self, job_id: str) -> JobStatusResponse | None:
+        async with self._lock:
+            self._cleanup_expired_locked()
+            record = self._jobs.get(job_id)
+            if record is None:
+                return None
+            if record.status in {"completed", "failed", "cancelled"}:
+                return self._status_response(record)
+            record.cancel_requested = True
+            record.status = "cancelled"
+            record.error = "任务已由调用方取消"
+            record.finished_at = datetime.now(timezone.utc)
+            self._persist_job(record)
+            task = self._tasks.get(job_id)
+
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._tasks.pop(job_id, None)
+        return self._status_response(record)
+
     async def aclose(self) -> None:
         tasks = list(self._tasks.values())
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
         if self._owns_webhook_client:
             await self._webhook_client.aclose()
 
@@ -185,14 +221,25 @@ class BatchJobManager:
     ) -> None:
         try:
             async with self._semaphore:
-                await self._execute_job(record, collector, proxy_usage_scope)
+                async with asyncio.timeout(self.job_timeout_seconds):
+                    await self._execute_job(record, collector, proxy_usage_scope)
+            if record.request.webhook_url:
+                await self._send_webhook(record)
+        except TimeoutError:
+            record.status = "failed"
+            record.error = f"任务超过最大执行时间 {self.job_timeout_seconds:g} 秒"
+            record.finished_at = datetime.now(timezone.utc)
+            self._persist_job(record)
             if record.request.webhook_url:
                 await self._send_webhook(record)
         except asyncio.CancelledError:
             if record.status in {"queued", "running"}:
                 record.status = "failed"
+                record.error = "服务关闭，任务未完成"
                 record.finished_at = datetime.now(timezone.utc)
-            if record.webhook_status == "pending":
+            if record.cancel_requested and record.request.webhook_url:
+                await asyncio.shield(self._send_webhook(record))
+            elif record.webhook_status == "pending":
                 record.webhook_status = "failed"
             self._persist_job(record)
             raise
@@ -207,20 +254,25 @@ class BatchJobManager:
     ) -> None:
         started = monotonic()
         record.status = "running"
+        record.error = None
         record.started_at = datetime.now(timezone.utc)
         self._persist_job(record)
-        tasks: list[asyncio.Task[JobItemResponse]] = []
+        tasks: list[asyncio.Task[None]] = []
         proxy_usage: Any = None
         try:
             async with proxy_usage_scope() as active_proxy_usage:
                 proxy_usage = active_proxy_usage
-                tasks = [
-                    asyncio.create_task(self._collect_one(item, collector))
-                    for item in record.request.items
-                ]
-                try:
-                    for future in asyncio.as_completed(tasks):
-                        result = await future
+                queue: asyncio.Queue[JobItemRequest] = asyncio.Queue()
+                for item in record.request.items:
+                    queue.put_nowait(item)
+
+                async def worker() -> None:
+                    while True:
+                        try:
+                            item = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return
+                        result = await self._collect_one(item, collector)
                         record.results.append(result)
                         self._persist_result(record, result)
                         record.completed += 1
@@ -228,11 +280,23 @@ class BatchJobManager:
                             record.success += 1
                         else:
                             record.failed += 1
+                        record.duration_ms = round((monotonic() - started) * 1000)
+                        self._persist_job(record)
+
+                tasks = [
+                    asyncio.create_task(worker())
+                    for _ in range(
+                        min(self.item_max_concurrency, len(record.request.items))
+                    )
+                ]
+                try:
+                    await asyncio.gather(*tasks)
                 finally:
                     for task in tasks:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
-            record.status = "completed"
+            if not record.cancel_requested:
+                record.status = "completed"
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -254,11 +318,24 @@ class BatchJobManager:
         item: JobItemRequest,
         collector: CollectJobItem,
     ) -> JobItemResponse:
+        started = monotonic()
         try:
-            return await collector(item)
+            async with asyncio.timeout(self.item_timeout_seconds):
+                result = await collector(item)
+        except TimeoutError:
+            result = JobItemResponse(
+                item_id=item.item_id,
+                url=item.url,
+                media_name=item.media_name,
+                type=item.type,
+                status="failed",
+                complete=False,
+                result={},
+                error=f"单条采集超过 {self.item_timeout_seconds:g} 秒",
+            )
         except Exception:
             logger.exception("batch job item failed item_id=%s", item.item_id)
-            return JobItemResponse(
+            result = JobItemResponse(
                 item_id=item.item_id,
                 url=item.url,
                 media_name=item.media_name,
@@ -268,6 +345,8 @@ class BatchJobManager:
                 result={},
                 error="服务器内部错误",
             )
+        result.duration_ms = round((monotonic() - started) * 1000)
+        return result
 
     async def _send_webhook(self, record: _JobRecord) -> None:
         payload = self._status_response(record).model_dump(mode="json")
@@ -334,7 +413,8 @@ class BatchJobManager:
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
-                    webhook_status TEXT
+                    webhook_status TEXT,
+                    error TEXT
                 );
                 CREATE TABLE IF NOT EXISTS batch_job_results (
                     job_id TEXT NOT NULL,
@@ -345,6 +425,12 @@ class BatchJobManager:
                 );
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(batch_jobs)")
+            }
+            if "error" not in columns:
+                connection.execute("ALTER TABLE batch_jobs ADD COLUMN error TEXT")
 
     def _load_store(self) -> None:
         now = datetime.now(timezone.utc)
@@ -369,6 +455,7 @@ class BatchJobManager:
                     started_at=_parse_datetime(row["started_at"]),
                     finished_at=_parse_datetime(row["finished_at"]),
                     webhook_status=row["webhook_status"],
+                    error=row["error"],
                 )
                 result_rows = connection.execute(
                     "SELECT result_json FROM batch_job_results "
@@ -386,6 +473,7 @@ class BatchJobManager:
                 record.failed = record.completed - record.success
                 if record.status in {"queued", "running"}:
                     record.status = "failed"
+                    record.error = "服务重启，任务未完成"
                     record.finished_at = now
                     if record.webhook_status == "pending":
                         record.webhook_status = "failed"
@@ -410,7 +498,8 @@ class BatchJobManager:
                     job_id, request_json, fingerprint, idempotency_key, status,
                     completed, success, failed, duration_ms, cost_yuan,
                     created_at, started_at, finished_at, webhook_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     status=excluded.status,
                     completed=excluded.completed,
@@ -420,7 +509,8 @@ class BatchJobManager:
                     cost_yuan=excluded.cost_yuan,
                     started_at=excluded.started_at,
                     finished_at=excluded.finished_at,
-                    webhook_status=excluded.webhook_status
+                    webhook_status=excluded.webhook_status,
+                    error=excluded.error
                 """,
                 (
                     record.job_id,
@@ -437,6 +527,7 @@ class BatchJobManager:
                     _format_datetime(record.started_at),
                     _format_datetime(record.finished_at),
                     record.webhook_status,
+                    record.error,
                 ),
             )
 
@@ -501,6 +592,7 @@ class BatchJobManager:
             started_at=record.started_at,
             finished_at=record.finished_at,
             webhook_status=record.webhook_status,
+            error=record.error,
         )
 
 

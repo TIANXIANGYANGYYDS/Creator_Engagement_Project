@@ -70,6 +70,17 @@ async def get_job(
     return result
 
 
+@router.post("/{job_id}/cancel", response_model=JobStatusResponse)
+async def cancel_job(
+    job_id: str,
+    manager: BatchJobManager = Depends(get_job_manager),
+) -> JobStatusResponse:
+    result = await manager.cancel(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="任务不存在或结果已过期")
+    return result
+
+
 @router.get("/{job_id}/results", response_model=JobResultsResponse)
 async def get_job_results(
     job_id: str,

@@ -237,6 +237,93 @@ def test_platform_protocol_attempt_override_can_exceed_global_default(monkeypatc
     assert calls == 5
 
 
+def test_douyin_preferred_proxy_uses_stable_direct_egress(monkeypatch) -> None:
+    class DirectRecoveryClient(LeaseAwareClient):
+        proxy_mode = "prefer"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.in_direct_scope = False
+            self.direct_count = 0
+
+        @asynccontextmanager
+        async def direct_scope(self):
+            self.direct_count += 1
+            self.in_direct_scope = True
+            try:
+                yield
+            finally:
+                self.in_direct_scope = False
+
+    client = DirectRecoveryClient()
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        assert client.in_direct_scope
+        return EngagementResult(
+            platform="douyin",
+            canonical_url="https://www.douyin.com/video/7665718789363309172",
+            work_id="7665718789363309172",
+            coverage="partial",
+            stats=EngagementStats(likes=12),
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "douyin", handler)
+    crawler = EngagementCrawler(
+        client=client,
+        platform_protocol_max_attempts={"douyin": 2},
+        protocol_retry_base_seconds=10,
+    )
+
+    result = asyncio.run(crawler.fetch_interactions(
+        "https://www.douyin.com/video/7665718789363309172",
+        "douyin",
+    ))
+
+    assert result.stats.likes == 12
+    assert result.protocol_attempts == 1
+    assert client.lease_count == 1
+    assert client.direct_count == 1
+    assert client.invalidations == []
+
+
+def test_douyin_circuit_breaker_fails_fast_after_systemic_failures(monkeypatch) -> None:
+    calls = 0
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        nonlocal calls
+        calls += 1
+        work_id = str(args[2])
+        return EngagementResult(
+            platform="douyin",
+            canonical_url=f"https://www.douyin.com/video/{work_id}",
+            work_id=work_id,
+            coverage="blocked",
+            reason="temporary upstream block",
+        )
+
+    monkeypatch.setitem(PLATFORM_HANDLERS, "douyin", handler)
+    crawler = EngagementCrawler(
+        client=LeaseAwareClient(),
+        max_protocol_attempts=1,
+        circuit_failure_threshold=2,
+        circuit_cooldown_seconds=30,
+    )
+
+    first = asyncio.run(crawler.fetch_interactions(
+        "https://www.douyin.com/video/7665718789363309171", "douyin"
+    ))
+    second = asyncio.run(crawler.fetch_interactions(
+        "https://www.douyin.com/video/7665718789363309172", "douyin"
+    ))
+    third = asyncio.run(crawler.fetch_interactions(
+        "https://www.douyin.com/video/7665718789363309173", "douyin"
+    ))
+
+    assert first.coverage == second.coverage == third.coverage == "blocked"
+    assert calls == 2
+    assert "熔断" in third.reason
+
+
 def test_toutiao_ssr_probe_bypasses_preferred_proxy() -> None:
     class DirectAwareClient(FakeClient):
         def __init__(self) -> None:
@@ -285,14 +372,14 @@ def test_browser_fallback_retries_unusable_result(monkeypatch) -> None:
 
     async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
         return EngagementResult(
-            platform="weibo",
-            canonical_url="https://m.weibo.cn/detail/12345678",
+            platform="toutiao",
+            canonical_url="https://www.toutiao.com/article/12345678/",
             work_id="12345678",
             coverage="blocked",
             reason="protocol blocked",
         )
 
-    monkeypatch.setitem(PLATFORM_HANDLERS, "weibo", handler)
+    monkeypatch.setitem(PLATFORM_HANDLERS, "toutiao", handler)
     browser = RetryBrowserFallback()
     crawler = EngagementCrawler(
         client=LeaseAwareClient(),
@@ -301,8 +388,8 @@ def test_browser_fallback_retries_unusable_result(monkeypatch) -> None:
     )
 
     result = asyncio.run(crawler.fetch_interactions(
-        "https://m.weibo.cn/detail/12345678",
-        "weibo",
+        "https://www.toutiao.com/article/12345678/",
+        "toutiao",
     ))
 
     assert result.stats.likes == 9
@@ -399,6 +486,14 @@ def test_xiaohongshu_interaction_wall_retries_with_required_proxy(
         ("https://www.bilibili.com/opus/907932915033178114", ("bilibili", "opus:907932915033178114")),
         ("https://live.bilibili.com/22595201#pub=1787011298", ("bilibili", "")),
         ("https://m.weibo.cn/detail/5301066679190033", ("weibo", "5301066679190033")),
+        (
+            "https://video.weibo.com/show?fid=1034:5301066679190033",
+            ("weibo", "5301066679190033"),
+        ),
+        (
+            "https://weibo.com/tv/show/1034:5301066679190033",
+            ("weibo", "5301066679190033"),
+        ),
         ("http://weibo.com/6539142196/RdVPmEYKD", ("weibo", "5333205569766651")),
         ("https://www.xiaohongshu.com/explore/6a5585c000000000080326ac", ("xiaohongshu", "6a5585c000000000080326ac")),
         ("https://haokan.baidu.com/v?vid=327646248367276281", ("haokan", "327646248367276281")),
@@ -1010,6 +1105,42 @@ def test_douyin_stats_are_partial_when_visitor_comment_endpoint_returns_empty() 
     assert "空包" in result.reason
 
 
+def test_douyin_permanent_unavailable_result_is_not_retried_or_sent_to_browser() -> None:
+    class BrowserShouldNotRun:
+        calls = 0
+
+        async def fetch(self, *args: Any, **kwargs: Any) -> EngagementResult:
+            self.calls += 1
+            raise AssertionError("browser fallback must not run for Douyin")
+
+    browser = BrowserShouldNotRun()
+    client = FakeClient(FakeResponse(
+        payload={
+            "status_code": 0,
+            "filter_detail": {
+                "filter_reason": "status_deleted",
+                "detail_msg": "因作品权限或已被删除，无法观看",
+            },
+        },
+        text='{"status_code":0,"filter_detail":{}}',
+    ))
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        cookies="ttwid=caller-session",
+        browser_fallback=browser,  # type: ignore[arg-type]
+        platform_protocol_max_attempts={"douyin": 2},
+    ).fetch_interactions(
+        "https://www.douyin.com/video/7665718789363309172",
+        "抖音",
+    ))
+
+    assert result.coverage == "unsupported"
+    assert result.protocol_attempts == 1
+    assert "status_deleted" in result.reason
+    assert len(client.calls) == 1
+    assert browser.calls == 0
+
+
 def test_douyin_hidden_play_count_is_not_reported_as_real_zero() -> None:
     client = FakeClient(FakeResponse(payload={
         "status_code": 0,
@@ -1054,6 +1185,141 @@ def test_weibo_fetches_stats_and_hot_comments() -> None:
     assert result.comments[0].author == "bob"
     assert result.comments[0].text == "观点"
     assert result.next_cursor == "99"
+
+
+def test_weibo_desktop_uses_bid_with_anonymous_visitor_session() -> None:
+    visitor_page = FakeResponse(
+        text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
+        url="https://passport.weibo.com/visitor/visitor?entry=miniblog",
+    )
+    generated = FakeResponse(text=(
+        'window.visitor_gray_callback && visitor_gray_callback('
+        '{"retcode":20000000,"msg":"succ","data":'
+        '{"sub":"guest-sub","subp":"guest-subp"}});'
+    ))
+    detail = FakeResponse(payload={
+        "idstr": "5336588076712748",
+        "mblogid": "RflP1sai8",
+        "attitudes_count": 11,
+        "comments_count": 12,
+        "reposts_count": 13,
+    })
+    client = FakeClient(visitor_page, generated, detail)
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        "http://weibo.com/6660086860/RflP1sai8",
+        "微博",
+    ))
+
+    assert result.coverage == "partial"
+    assert result.work_id == "5336588076712748"
+    assert result.stats.likes == 11
+    assert result.stats.comments == 12
+    assert result.stats.reposts == 13
+    assert client.calls[1][0].endswith("/visitor/genvisitor2")
+    assert client.calls[2][1]["params"]["id"] == "RflP1sai8"
+    assert result.source == "weibo.com/ajax/statuses/show"
+
+
+def test_weibo_video_maps_fid_to_mid_with_component_api() -> None:
+    visitor_page = FakeResponse(
+        text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
+        url="https://passport.weibo.com/visitor/visitor?entry=krvideo",
+    )
+    generated = FakeResponse(text=(
+        'visitor_gray_callback({"retcode":20000000,"data":'
+        '{"sub":"guest-sub","subp":"guest-subp"}});'
+    ))
+    detail = FakeResponse(payload={
+        "code": "100000",
+        "msg": "succ",
+        "data": {
+            "Component_Play_Playinfo": {
+                "mid": 5336419992338781,
+                "attitudes_count": 3,
+                "comments_count": 4,
+                "reposts_count": 5,
+            },
+        },
+    })
+    client = FakeClient(visitor_page, generated, detail)
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        "https://video.weibo.com/show?fid=1034:5336419900784646",
+        "微博",
+    ))
+
+    assert result.work_id == "5336419992338781"
+    assert result.stats.model_dump(exclude_none=True) == {
+        "likes": 3,
+        "comments": 4,
+        "reposts": 5,
+    }
+    assert client.calls[2][0].endswith("/tv/api/component")
+    assert "1034:5336419900784646" in client.calls[2][1]["data"]["data"]
+    assert result.source == "weibo.com/tv/api/component"
+
+
+def test_weibo_missing_video_is_permanent() -> None:
+    client = FakeClient(
+        FakeResponse(
+            text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
+            url="https://passport.weibo.com/visitor/visitor?entry=krvideo",
+        ),
+        FakeResponse(text=(
+            'visitor_gray_callback({"retcode":20000000,"data":'
+            '{"sub":"guest-sub"}});'
+        )),
+        FakeResponse(payload={
+            "code": "100000",
+            "msg": "succ",
+            "data": {"Component_Play_Playinfo": []},
+        }),
+    )
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        max_protocol_attempts=3,
+    ).fetch_interactions(
+        "https://video.weibo.com/show?fid=1034:1000000000000000",
+        "微博",
+    ))
+
+    assert result.coverage == "unsupported"
+    assert result.protocol_attempts == 1
+    assert "不存在或无查看权限" in result.reason
+    assert len(client.calls) == 3
+
+
+def test_weibo_unavailable_desktop_status_is_permanent() -> None:
+    client = FakeClient(
+        FakeResponse(
+            text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
+            url="https://passport.weibo.com/visitor/visitor?entry=miniblog",
+        ),
+        FakeResponse(text=(
+            'visitor_gray_callback({"retcode":20000000,"data":'
+            '{"sub":"guest-sub"}});'
+        )),
+        FakeResponse(payload={
+            "ok": 0,
+            "message": "该微博不存在",
+            "error_code": 20101,
+        }),
+    )
+
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        max_protocol_attempts=3,
+    ).fetch_interactions(
+        "http://weibo.com/3772043430/RfwH1lUkh",
+        "微博",
+    ))
+
+    assert result.coverage == "unsupported"
+    assert result.protocol_attempts == 1
+    assert "不存在" in result.reason
+    assert len(client.calls) == 3
 
 
 def test_weibo_session_cookie_and_cursor_type_support_deep_pages() -> None:

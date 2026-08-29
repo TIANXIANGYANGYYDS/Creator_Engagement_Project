@@ -26,6 +26,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     job_manager = BatchJobManager(
         retention_seconds=settings.job_result_ttl_seconds,
         max_concurrency=settings.job_max_concurrency,
+        item_max_concurrency=settings.job_item_max_concurrency,
+        item_timeout_seconds=settings.job_item_timeout_seconds,
+        job_timeout_seconds=settings.job_timeout_seconds,
         db_path=Path(settings.job_db_path),
         webhook_allowed_hosts={
             host.strip()

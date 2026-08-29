@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -62,7 +63,7 @@ class FakeJobService:
 def _wait_for_job(client: TestClient, job_id: str) -> dict:
     for _ in range(100):
         payload = client.get(f"/api/v1/jobs/{job_id}").json()
-        if payload["status"] in {"completed", "failed"}:
+        if payload["status"] in {"completed", "failed", "cancelled"}:
             return payload
         time.sleep(0.01)
     raise AssertionError("job did not finish")
@@ -113,6 +114,7 @@ def test_async_job_submit_poll_and_paginate_results() -> None:
             f"/api/v1/jobs/{job_id}/results",
             params={"cursor": first_page.json()["next_cursor"], "limit": 1},
         )
+        terminal_cancel = client.post(f"/api/v1/jobs/{job_id}/cancel")
 
     assert submitted.status_code == 202
     assert repeated.status_code == 202
@@ -129,6 +131,8 @@ def test_async_job_submit_poll_and_paginate_results() -> None:
     assert first_page.json()["available_count"] == 2
     assert first_page.json()["next_cursor"] is not None
     assert second_page.json()["next_cursor"] is None
+    assert terminal_cancel.status_code == 200
+    assert terminal_cancel.json()["status"] == "completed"
     results = first_page.json()["data"] + second_page.json()["data"]
     assert {item["item_id"] for item in results} == {"business-1", "business-2"}
     assert all(item["media_name"] == "今日头条" for item in results)
@@ -478,6 +482,216 @@ def test_running_job_returns_cursor_for_later_results() -> None:
         assert second_page is not None
         assert [item.item_id for item in second_page.data] == ["second"]
         assert second_page.next_cursor is None
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_running_job_can_be_cancelled_without_marking_it_failed() -> None:
+    async def scenario() -> None:
+        service = FakeJobService()
+        manager = BatchJobManager(retention_seconds=60, item_max_concurrency=1)
+        started = asyncio.Event()
+        never = asyncio.Event()
+        request = CreateJobRequest.model_validate({
+            "items": [{
+                "item_id": "cancel-me",
+                "url": "https://www.toutiao.com/article/1/",
+                "media_name": "今日头条",
+                "type": "interactions",
+            }]
+        })
+
+        async def collector(item) -> JobItemResponse:
+            started.set()
+            await never.wait()
+            raise AssertionError("unreachable")
+
+        submitted = await manager.submit(
+            request,
+            collector=collector,
+            proxy_usage_scope=service.proxy_usage_scope,
+        )
+        await started.wait()
+        cancelled = await manager.cancel(submitted.job_id)
+        results = await manager.get_results(
+            submitted.job_id,
+            cursor=None,
+            limit=100,
+        )
+
+        assert cancelled is not None
+        assert cancelled.status == "cancelled"
+        assert cancelled.error == "任务已由调用方取消"
+        assert cancelled.finished_at is not None
+        assert results is not None
+        assert results.status == "cancelled"
+        assert results.available_count == 0
+        assert results.next_cursor is None
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_job_item_timeout_isolated_as_a_failed_result() -> None:
+    async def scenario() -> None:
+        service = FakeJobService()
+        manager = BatchJobManager(
+            retention_seconds=60,
+            item_timeout_seconds=0.01,
+        )
+        request = CreateJobRequest.model_validate({
+            "items": [{
+                "item_id": "slow",
+                "url": "https://www.toutiao.com/article/1/",
+                "media_name": "今日头条",
+                "type": "interactions",
+            }]
+        })
+
+        async def collector(item) -> JobItemResponse:
+            await asyncio.sleep(1)
+            raise AssertionError("unreachable")
+
+        submitted = await manager.submit(
+            request,
+            collector=collector,
+            proxy_usage_scope=service.proxy_usage_scope,
+        )
+        for _ in range(100):
+            status = await manager.get_status(submitted.job_id)
+            if status is not None and status.status == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("job did not finish")
+        results = await manager.get_results(submitted.job_id, cursor=None, limit=100)
+
+        assert status.progress.failed == 1
+        assert results is not None
+        assert results.data[0].status == "failed"
+        assert "超过 0.01 秒" in (results.data[0].error or "")
+        assert results.data[0].duration_ms >= 0
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_job_timeout_cancels_remaining_workers() -> None:
+    async def scenario() -> None:
+        service = FakeJobService()
+        manager = BatchJobManager(
+            retention_seconds=60,
+            item_timeout_seconds=1,
+            job_timeout_seconds=0.02,
+        )
+        request = CreateJobRequest.model_validate({
+            "items": [{
+                "item_id": "slow",
+                "url": "https://www.toutiao.com/article/1/",
+                "media_name": "今日头条",
+                "type": "interactions",
+            }]
+        })
+
+        async def collector(item) -> JobItemResponse:
+            await asyncio.sleep(1)
+            raise AssertionError("unreachable")
+
+        submitted = await manager.submit(
+            request,
+            collector=collector,
+            proxy_usage_scope=service.proxy_usage_scope,
+        )
+        for _ in range(100):
+            status = await manager.get_status(submitted.job_id)
+            if status is not None and status.status == "failed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("job did not time out")
+
+        assert status.error == "任务超过最大执行时间 0.02 秒"
+        assert status.progress.completed == 0
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_running_progress_is_persisted_and_worker_count_is_bounded(tmp_path) -> None:
+    async def scenario() -> None:
+        db_path = tmp_path / "jobs.sqlite3"
+        service = FakeJobService()
+        manager = BatchJobManager(
+            retention_seconds=60,
+            item_max_concurrency=2,
+            db_path=db_path,
+        )
+        first_done = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        max_active = 0
+        request = CreateJobRequest.model_validate({
+            "items": [
+                {
+                    "item_id": f"item-{index}",
+                    "url": f"https://www.toutiao.com/article/{index}/",
+                    "media_name": "今日头条",
+                    "type": "interactions",
+                }
+                for index in range(3)
+            ]
+        })
+
+        async def collector(item) -> JobItemResponse:
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                if item.item_id != "item-0":
+                    await release.wait()
+                return JobItemResponse(
+                    item_id=item.item_id,
+                    url=item.url,
+                    media_name="今日头条",
+                    type=item.type,
+                    status="success",
+                    complete=True,
+                    result={"likes": 1},
+                )
+            finally:
+                active -= 1
+                if item.item_id == "item-0":
+                    first_done.set()
+
+        submitted = await manager.submit(
+            request,
+            collector=collector,
+            proxy_usage_scope=service.proxy_usage_scope,
+        )
+        await first_done.wait()
+        for _ in range(100):
+            with sqlite3.connect(db_path) as connection:
+                completed = connection.execute(
+                    "SELECT completed FROM batch_jobs WHERE job_id = ?",
+                    (submitted.job_id,),
+                ).fetchone()[0]
+            if completed == 1:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("running progress was not persisted")
+
+        assert max_active == 2
+        release.set()
+        for _ in range(100):
+            status = await manager.get_status(submitted.job_id)
+            if status is not None and status.status == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("job did not finish")
+        assert status.progress.completed == 3
         await manager.aclose()
 
     asyncio.run(scenario())

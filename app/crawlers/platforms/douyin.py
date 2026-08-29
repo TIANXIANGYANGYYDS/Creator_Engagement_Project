@@ -23,7 +23,7 @@ from app.models.engagement import EngagementComment, EngagementResult, Engagemen
 DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
 COMMENT_URL = "https://www.douyin.com/aweme/v1/web/comment/list/"
 TTWID_REGISTER_URL = "https://ttwid.bytedance.com/ttwid/union/register/"
-MSTOKEN_ALPHABET = "ABCDEFGHIGKLMNOPQRSTUVWXYZabcdefghigklmnopqrstuvwxyz0123456789="
+MSTOKEN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789="
 DOUYIN_PROTOCOL_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -90,6 +90,23 @@ async def fetch(
             except Exception as exc:
                 raise PlatformCrawlerError("抖音详情接口返回非 JSON") from exc
             detail = detail_payload.get("aweme_detail") or {}
+            filter_detail = detail_payload.get("filter_detail") or {}
+            if not detail and filter_detail:
+                filter_reason = str(filter_detail.get("filter_reason") or "unavailable")
+                detail_message = str(
+                    filter_detail.get("detail_msg")
+                    or filter_detail.get("notice")
+                    or "作品不可用"
+                )
+                result = result_error(
+                    "douyin",
+                    url,
+                    work_id,
+                    "unsupported",
+                    f"抖音作品不可用（{filter_reason}）：{detail_message}",
+                )
+                result.retryable = False
+                return result
             if detail_payload.get("status_code") != 0 or not detail:
                 raise PlatformCrawlerError("抖音详情接口没有有效作品数据")
             statistics = detail.get("statistics") or {}

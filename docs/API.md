@@ -1,6 +1,6 @@
 # Creator Engagement API 接口文档
 
-最后更新：2026-08-28
+最后更新：2026-08-29
 接口版本：`v1`
 
 ## 1. 接口概览
@@ -25,6 +25,7 @@ http://39.106.202.228:8200
 |---|---|---|
 | `POST` | `/api/v1/jobs` | 提交异步批量采集任务，返回 `job_id` |
 | `GET` | `/api/v1/jobs/{job_id}` | 查询异步任务状态、进度、总耗时和总成本 |
+| `POST` | `/api/v1/jobs/{job_id}/cancel` | 取消排队中或运行中的异步任务 |
 | `GET` | `/api/v1/jobs/{job_id}/results` | 分页读取已完成的异步任务结果 |
 | `POST` | `/api/v1/collect` | 同步批量采集，保留给兼容调用和小批次 |
 | `GET` | `/api/v1/interactions` | 获取内容的互动统计 |
@@ -78,6 +79,11 @@ OpenAPI:     http://39.106.202.228:8200/openapi.json
 前三类公开分享 URL 可匿名读取页面公开互动量。最后一类客户端跳转 URL 不公开视频数据，互动量
 和评论正文都必须使用授权 Windows 微信侧车。未配置或无法连接侧车时，单项接口返回 HTTP 502，
 批量项为 `failed`；服务不会查询其他项目或缓存型数据源，也不会把空值伪装为成功。
+
+微博正文支持 `weibo.com/{uid}/{bid}` 和 `m.weibo.cn/detail/{mid}`；视频支持
+`video.weibo.com/show?fid=1034:{id}` 与 `weibo.com/tv/show/1034:{id}`。视频 `fid` 不是微博
+MID，服务会先通过微博公开组件接口完成映射。已删除或无查看权限的正文会快速返回明确失败，
+不会继续进行无效浏览器重试。
 
 ## 3. 批量采集
 
@@ -164,7 +170,8 @@ GET /api/v1/jobs/job_1d8d5e1726464a6492bb79246fa6e6fd
   "created_at": "2026-08-28T08:10:00Z",
   "started_at": "2026-08-28T08:10:01Z",
   "finished_at": "2026-08-28T08:10:05Z",
-  "webhook_status": null
+  "webhook_status": null,
+  "error": null
 }
 ```
 
@@ -176,12 +183,47 @@ GET /api/v1/jobs/job_1d8d5e1726464a6492bb79246fa6e6fd
 | `running` | 正在采集，已完成结果可以开始分页读取 |
 | `completed` | 任务调度完成；具体项目仍可能有 `status=failed` |
 | `failed` | 任务级执行中断；已经完成的项目仍可从结果接口读取 |
+| `cancelled` | 调用方已取消任务；已经完成的项目仍可从结果接口读取 |
 
 `progress.success` 和 `progress.failed` 是项目级计数。任务为 `completed` 只表示所有项目都已得到
-明确结果，不代表每个项目都成功。任务运行期间 `duration_ms` 和 `cost_yuan` 暂为 `0`，结束后
-返回最终总耗时和本任务触发的新增代理采购成本。
+明确结果，不代表每个项目都成功。任务运行期间 `duration_ms` 会随结果逐条更新，`cost_yuan`
+在任务结束后返回本任务触发的新增代理采购成本。`error` 仅描述任务级失败或取消原因；项目级
+原因仍读取结果中的 `error`。
 
-### 3.3 分页读取异步结果
+轮询建议使用 2～5 秒间隔，并在网络错误时指数退避。不要为同一个任务并发启动多个状态轮询器；
+状态查询不会加快采集，只会增加 API 和调用方自身的连接负担。
+
+### 3.3 取消异步任务
+
+```http
+POST /api/v1/jobs/job_1d8d5e1726464a6492bb79246fa6e6fd/cancel
+```
+
+取消接口是幂等的：任务已是 `completed`、`failed` 或 `cancelled` 时，返回当前状态而不重复改变
+结果。运行中的采集会被取消，已完成并落库的结果保留可读；尚未完成的项目不会被伪造为失败
+结果。任务不存在或已过期时返回 HTTP 404。
+
+```json
+{
+  "job_id": "job_1d8d5e1726464a6492bb79246fa6e6fd",
+  "status": "cancelled",
+  "progress": {
+    "total": 500,
+    "completed": 132,
+    "success": 110,
+    "failed": 22
+  },
+  "duration_ms": 182304,
+  "cost_yuan": 0.00672,
+  "created_at": "2026-08-29T08:10:00Z",
+  "started_at": "2026-08-29T08:10:01Z",
+  "finished_at": "2026-08-29T08:13:03Z",
+  "webhook_status": null,
+  "error": "任务已由调用方取消"
+}
+```
+
+### 3.4 分页读取异步结果
 
 首次读取：
 
@@ -222,25 +264,29 @@ GET /api/v1/jobs/job_1d8d5e1726464a6492bb79246fa6e6fd/results?limit=100&cursor=<
         "recommendations": null,
         "comments": null
       },
-      "error": null
+      "error": null,
+      "duration_ms": 816
     }
   ],
   "next_cursor": "MQ==",
   "available_count": 1,
   "total": 2,
-  "duration_ms": 0,
+  "duration_ms": 816,
   "cost_yuan": 0
 }
 ```
 
 当任务仍为 `queued/running` 时，即使当前可用结果已经读完，接口仍返回一个非空
 `next_cursor`，调用方应保存它并在稍后继续读取，不能自行解析或生成 cursor。任务进入
-`completed/failed` 且已读完全部结果后，`next_cursor` 才为 `null`。此时异步消费完成。
+`completed/failed/cancelled` 且已读完全部结果后，`next_cursor` 才为 `null`。此时异步消费完成。
 
 `available_count` 是当前已经完成并可读取的结果总数，`total` 是提交的项目总数。调用方可以在
 任务运行期间持续消费新结果，也可以等待任务结束后再分页读取。
 
-### 3.4 Webhook、持久化和过期
+每个项目有独立的最大执行时间，超时后该项目返回 `status=failed`，`error` 会明确写出超时秒数，
+其他项目继续执行。整批任务也有最大执行时间；触发后任务变为 `failed`，已完成结果仍然保留。
+
+### 3.5 Webhook、持久化和过期
 
 请求体传入 `webhook_url` 后，任务结束时服务会 POST 一次任务状态对象，失败时按配置重试。
 Webhook 只通知状态和进度，不直接推送全部结果；接收方仍使用结果接口分页读取。出于 SSRF
@@ -251,7 +297,10 @@ Webhook 只通知状态和进度，不直接推送全部结果；接收方仍使
 标记为 `failed`，调用方应使用新的 `Idempotency-Key` 重新提交。任务过期后状态和结果接口返回
 HTTP 404。
 
-### 3.5 同步批量接口（兼容）
+任务进度与项目结果会逐条提交到 SQLite，而不是只在整批结束时写入。因此进程异常退出后，重启
+恢复出的 `failed` 任务仍可读取中断前已完成的项目。
+
+### 3.6 同步批量接口（兼容）
 
 ```http
 POST /api/v1/collect
@@ -536,7 +585,7 @@ GET /api/v1/health
   "proxy_max_concurrency": 1,
   "collection_max_concurrency": 8,
   "toutiao_protocol_max_attempts": 1,
-  "douyin_protocol_max_attempts": 5,
+  "douyin_protocol_max_attempts": 2,
   "browser_max_concurrency": 3,
   "browser_max_attempts": 3,
   "browser_geoip_enabled": false
@@ -637,7 +686,7 @@ while True:
     )
     status_response.raise_for_status()
     job = status_response.json()
-    if job["status"] in {"completed", "failed"}:
+    if job["status"] in {"completed", "failed", "cancelled"}:
         break
     time.sleep(2)
 

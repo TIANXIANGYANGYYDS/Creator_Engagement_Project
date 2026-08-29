@@ -136,6 +136,13 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
         work_id = match.group(1) if match else query.get("bvid", [""])[0]
         return "bilibili", work_id[2:] if work_id.startswith("av") else work_id
     if "weibo.com" in host or host == "m.weibo.cn":
+        fid = query.get("fid", [""])[0]
+        video_fid_match = re.fullmatch(r"(?:\d+:)?(\d{8,})", fid)
+        if host == "video.weibo.com" and video_fid_match:
+            return "weibo", video_fid_match.group(1)
+        tv_match = re.search(r"/tv/show/(?:\d+:)?(\d{8,})(?:/|$)", path)
+        if tv_match:
+            return "weibo", tv_match.group(1)
         numeric_match = re.search(r"/(?:detail|status)/(\d{8,})(?:/|$)", path)
         if numeric_match:
             return "weibo", numeric_match.group(1)

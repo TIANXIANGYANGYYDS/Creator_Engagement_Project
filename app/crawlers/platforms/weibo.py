@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import json
 import re
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -18,6 +19,12 @@ from app.models.engagement import (
     EngagementResult,
     EngagementStats,
 )
+
+
+DESKTOP_STATUS_URL = "https://weibo.com/ajax/statuses/show"
+VIDEO_COMPONENT_URL = "https://weibo.com/tv/api/component"
+VIDEO_FID_RE = re.compile(r"(?:^|[?&])fid=((?:\d+:)?\d{8,})(?:&|$)", re.I)
+DESKTOP_BID_RE = re.compile(r"^/\d+/([0-9A-Za-z]+)(?:/|$)")
 
 async def fetch(
     crawler: PlatformCrawlerContext,
@@ -31,6 +38,8 @@ async def fetch(
     include_comments: bool,
 ) -> EngagementResult:
     cookie = crawler._platform_cookie("weibo")
+    public_target = public_protocol_target(url, work_id)
+    resolved_work_id = work_id
     headers = {
         "Referer": f"https://m.weibo.cn/detail/{work_id}",
         "X-Requested-With": "XMLHttpRequest",
@@ -47,18 +56,28 @@ async def fetch(
         cursor: str | None = None
         sources: list[str] = []
         if include_stats:
-            payload = await crawler._get_json(
-                "https://m.weibo.cn/statuses/show",
-                params={"id": work_id},
-                headers=headers,
-            )
-            data = payload.get("data") or {}
+            data: dict[str, Any]
+            if public_target is not None:
+                data, resolved_work_id, source = await fetch_public_stats(
+                    crawler,
+                    url,
+                    work_id,
+                    public_target,
+                )
+                sources.append(source)
+            else:
+                payload = await crawler._get_json(
+                    "https://m.weibo.cn/statuses/show",
+                    params={"id": work_id},
+                    headers=headers,
+                )
+                data = payload.get("data") or {}
+                sources.append("m.weibo.cn/statuses/show")
             stats = EngagementStats(
                 likes=to_int(data.get("attitudes_count")),
                 comments=to_int(data.get("comments_count")),
                 reposts=to_int(data.get("reposts_count")),
             )
-            sources.append("m.weibo.cn/statuses/show")
         if include_comments:
             # Weibo's cursor also depends on max_id_type. Keep replaying from
             # page 1 until both values are carried by the internal contract.
@@ -67,8 +86,8 @@ async def fetch(
             used_numbered_fallback = False
             for current_page in range(1, page + 1):
                 params: dict[str, Any] = {
-                    "id": work_id,
-                    "mid": work_id,
+                    "id": resolved_work_id,
+                    "mid": resolved_work_id,
                     "max_id_type": request_cursor_type,
                 }
                 if request_cursor is not None:
@@ -81,7 +100,7 @@ async def fetch(
                 if not response_ok(comments_payload):
                     comments_payload = await crawler._get_json(
                         "https://m.weibo.cn/api/comments/show",
-                        params={"id": work_id, "page": page},
+                        params={"id": resolved_work_id, "page": page},
                         headers=headers,
                     )
                     if not response_ok(comments_payload):
@@ -119,8 +138,8 @@ async def fetch(
             )
         return EngagementResult(
             platform="weibo",
-            canonical_url=f"https://m.weibo.cn/detail/{work_id}",
-            work_id=work_id,
+            canonical_url=f"https://m.weibo.cn/detail/{resolved_work_id}",
+            work_id=resolved_work_id,
             coverage="partial",
             reason=(
                 (
@@ -135,10 +154,119 @@ async def fetch(
             comments=comments[:limit],
             next_cursor=cursor,
         )
+    except WeiboUnavailableError as exc:
+        result = result_error("weibo", url, work_id, "unsupported", str(exc))
+        result.retryable = False
+        return result
     except PlatformBlockedError as exc:
+        if public_target is not None:
+            crawler._invalidate_weibo_visitor_session()
         return result_error("weibo", url, work_id, "blocked", str(exc))
     except Exception as exc:
+        if public_target is not None:
+            crawler._invalidate_weibo_visitor_session()
         return result_error("weibo", url, work_id, "failed", str(exc))
+
+
+def public_protocol_target(url: str, work_id: str) -> tuple[str, str] | None:
+    """Return the desktop URL kind and its original public identifier."""
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    fid_match = VIDEO_FID_RE.search(f"?{parsed.query}")
+    if host == "video.weibo.com" and fid_match:
+        return "video", fid_match.group(1)
+    tv_match = re.search(r"/tv/show/((?:\d+:)?\d{8,})(?:/|$)", parsed.path)
+    if host.endswith("weibo.com") and tv_match:
+        return "video", tv_match.group(1)
+    bid_match = DESKTOP_BID_RE.match(parsed.path)
+    if host.endswith("weibo.com") and bid_match:
+        return "desktop", bid_match.group(1)
+    return None
+
+
+async def fetch_public_stats(
+    crawler: PlatformCrawlerContext,
+    original_url: str,
+    work_id: str,
+    target: tuple[str, str],
+) -> tuple[dict[str, Any], str, str]:
+    kind, public_id = target
+    if kind == "video":
+        return await fetch_video_stats(crawler, public_id)
+    return await fetch_desktop_stats(crawler, original_url, public_id, work_id)
+
+
+async def fetch_desktop_stats(
+    crawler: PlatformCrawlerContext,
+    original_url: str,
+    bid: str,
+    work_id: str,
+) -> tuple[dict[str, Any], str, str]:
+    target_url = original_url.replace("http://", "https://", 1)
+    await crawler._ensure_weibo_visitor_session(target_url, entry="miniblog")
+    payload = await crawler._get_json(
+        DESKTOP_STATUS_URL,
+        params={"id": bid, "locale": "zh-CN", "isGetLongText": "true"},
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Referer": target_url,
+        },
+    )
+    if payload.get("ok") == 0:
+        error_code = to_int(payload.get("error_code"))
+        message = str(payload.get("message") or "微博不可用")
+        if error_code in {20101, 20112}:
+            raise WeiboUnavailableError(message)
+        crawler._invalidate_weibo_visitor_session()
+        raise PlatformBlockedError(message)
+    resolved_work_id = str(payload.get("idstr") or payload.get("mid") or work_id)
+    return payload, resolved_work_id, "weibo.com/ajax/statuses/show"
+
+
+async def fetch_video_stats(
+    crawler: PlatformCrawlerContext,
+    fid: str,
+) -> tuple[dict[str, Any], str, str]:
+    oid = fid if ":" in fid else f"1034:{fid}"
+    target_url = f"https://weibo.com/tv/show/{oid}"
+    await crawler._ensure_weibo_visitor_session(target_url, entry="krvideo")
+    page = f"/tv/show/{oid}"
+    payload = await crawler._post_json(
+        VIDEO_COMPONENT_URL,
+        params={"page": page},
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://weibo.com",
+            "Page-Referer": page,
+            "Referer": target_url,
+        },
+        data={
+            "data": json.dumps(
+                {"Component_Play_Playinfo": {"oid": oid}},
+                separators=(",", ":"),
+            )
+        },
+    )
+    data = (payload.get("data") or {}).get("Component_Play_Playinfo") or {}
+    code = str(payload.get("code") or "")
+    if code == "100000" and not data:
+        raise WeiboUnavailableError("微博视频不存在或无查看权限")
+    if code != "100000":
+        message = str(payload.get("msg") or "微博视频不可用")
+        if code in {"100006", "100009"}:
+            raise WeiboUnavailableError(message)
+        crawler._invalidate_weibo_visitor_session()
+        raise PlatformBlockedError(message)
+    resolved_work_id = str(data.get("mid") or "")
+    if not resolved_work_id:
+        raise PlatformBlockedError("微博视频详情未返回 MID")
+    return data, resolved_work_id, "weibo.com/tv/api/component"
+
+
+class WeiboUnavailableError(RuntimeError):
+    """The public status is deleted, private, or otherwise unavailable."""
 
 
 def parse_comments(payload: dict[str, Any]) -> tuple[list[EngagementComment], str | None]:

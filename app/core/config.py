@@ -106,6 +106,24 @@ class Settings(BaseSettings):
         ge=1,
         le=32,
     )
+    job_item_max_concurrency: int = Field(
+        default=16,
+        alias="JOB_ITEM_MAX_CONCURRENCY",
+        ge=1,
+        le=200,
+    )
+    job_item_timeout_seconds: float = Field(
+        default=45,
+        alias="JOB_ITEM_TIMEOUT_SECONDS",
+        gt=0,
+        le=600,
+    )
+    job_timeout_seconds: float = Field(
+        default=1800,
+        alias="JOB_TIMEOUT_SECONDS",
+        gt=0,
+        le=86_400,
+    )
     job_result_ttl_seconds: int = Field(
         default=86_400,
         alias="JOB_RESULT_TTL_SECONDS",
@@ -154,7 +172,7 @@ class Settings(BaseSettings):
         le=10,
     )
     douyin_protocol_max_attempts: int = Field(
-        default=5,
+        default=2,
         alias="DOUYIN_PROTOCOL_MAX_ATTEMPTS",
         ge=1,
         le=10,
@@ -164,10 +182,27 @@ class Settings(BaseSettings):
         alias="ENGAGEMENT_CACHE_TTL_SECONDS",
         ge=0,
     )
+    engagement_failure_cache_ttl_seconds: float = Field(
+        default=120,
+        alias="ENGAGEMENT_FAILURE_CACHE_TTL_SECONDS",
+        ge=0,
+    )
     engagement_cache_max_entries: int = Field(
         default=1000,
         alias="ENGAGEMENT_CACHE_MAX_ENTRIES",
         ge=1,
+    )
+    circuit_failure_threshold: int = Field(
+        default=8,
+        alias="CIRCUIT_FAILURE_THRESHOLD",
+        ge=1,
+        le=100,
+    )
+    circuit_cooldown_seconds: float = Field(
+        default=20,
+        alias="CIRCUIT_COOLDOWN_SECONDS",
+        ge=1,
+        le=600,
     )
     browser_fallback_enabled: bool = Field(default=True, alias="BROWSER_FALLBACK_ENABLED")
     browser_timeout_seconds: float = Field(default=35, alias="BROWSER_TIMEOUT_SECONDS", gt=0)

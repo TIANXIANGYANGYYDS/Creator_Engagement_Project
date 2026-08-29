@@ -67,6 +67,7 @@ class EngagementService:
         proxy_provider: AsyncProxyProvider | None = None,
         collection_max_concurrency: int = 4,
         cache_ttl_seconds: float = 120,
+        failure_cache_ttl_seconds: float = 120,
         cache_max_entries: int = 1000,
         platform_policies: dict[EngagementPlatform, PlatformTrafficPolicy] | None = None,
     ) -> None:
@@ -74,17 +75,21 @@ class EngagementService:
             raise ValueError("collection_max_concurrency must be greater than zero")
         if cache_ttl_seconds < 0:
             raise ValueError("cache_ttl_seconds must not be negative")
+        if failure_cache_ttl_seconds < 0:
+            raise ValueError("failure_cache_ttl_seconds must not be negative")
         if cache_max_entries <= 0:
             raise ValueError("cache_max_entries must be greater than zero")
         self.crawler = crawler
         self.proxy_provider = proxy_provider
         self._collection_semaphore = asyncio.Semaphore(collection_max_concurrency)
         self._cache_ttl_seconds = cache_ttl_seconds
+        self._failure_cache_ttl_seconds = failure_cache_ttl_seconds
         self._cache_max_entries = cache_max_entries
         self._result_cache: OrderedDict[
             CacheKey, tuple[float, CachedResult]
         ] = OrderedDict()
         self._result_tasks: dict[CacheKey, asyncio.Task[CachedResult]] = {}
+        self._result_waiters: dict[CacheKey, int] = {}
         self._cache_lock = asyncio.Lock()
         policies = platform_policies or {}
         for policy in policies.values():
@@ -234,6 +239,8 @@ class EngagementService:
                 else 1
             ),
             protocol_retry_base_seconds=settings.protocol_retry_base_seconds,
+            circuit_failure_threshold=settings.circuit_failure_threshold,
+            circuit_cooldown_seconds=settings.circuit_cooldown_seconds,
             strict_anonymous_mode=strict_anonymous,
             xiaohongshu_cookie_enabled=bool(xiaohongshu_cookie),
             wechat_mp_app_id=("" if strict_anonymous else settings.wechat_mp_app_id),
@@ -269,6 +276,9 @@ class EngagementService:
             proxy_provider=provider,
             collection_max_concurrency=settings.collection_max_concurrency,
             cache_ttl_seconds=settings.engagement_cache_ttl_seconds,
+            failure_cache_ttl_seconds=(
+                settings.engagement_failure_cache_ttl_seconds
+            ),
             cache_max_entries=settings.engagement_cache_max_entries,
             platform_policies=(
                 ENTERPRISE_PLATFORM_POLICIES
@@ -349,19 +359,50 @@ class EngagementService:
                     self._collect_cached(key[0], key[1], collect)
                 )
                 self._result_tasks[key] = task
+            self._result_waiters[key] = self._result_waiters.get(key, 0) + 1
         try:
             result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancel_task = False
+            async with self._cache_lock:
+                remaining = self._result_waiters.get(key, 1) - 1
+                if remaining <= 0:
+                    self._result_waiters.pop(key, None)
+                    if self._result_tasks.get(key) is task:
+                        self._result_tasks.pop(key, None)
+                        cancel_task = not task.done()
+                else:
+                    self._result_waiters[key] = remaining
+            if cancel_task:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
         except Exception:
             async with self._cache_lock:
+                remaining = self._result_waiters.get(key, 1) - 1
+                if remaining <= 0:
+                    self._result_waiters.pop(key, None)
+                else:
+                    self._result_waiters[key] = remaining
                 if self._result_tasks.get(key) is task:
                     self._result_tasks.pop(key, None)
             raise
         async with self._cache_lock:
+            remaining = self._result_waiters.get(key, 1) - 1
+            if remaining <= 0:
+                self._result_waiters.pop(key, None)
+            else:
+                self._result_waiters[key] = remaining
             if self._result_tasks.get(key) is task:
                 self._result_tasks.pop(key, None)
-            if self._cache_ttl_seconds > 0 and self._is_cacheable_result(result):
+            cache_ttl = (
+                self._cache_ttl_seconds
+                if self._is_cacheable_result(result)
+                else self._failure_cache_ttl_seconds
+            )
+            if cache_ttl > 0:
                 self._result_cache[key] = (
-                    monotonic() + self._cache_ttl_seconds,
+                    monotonic() + cache_ttl,
                     result.model_copy(deep=True),
                 )
                 self._result_cache.move_to_end(key)
@@ -418,6 +459,7 @@ class EngagementService:
     async def aclose(self) -> None:
         tasks = list(self._result_tasks.values())
         self._result_tasks.clear()
+        self._result_waiters.clear()
         for task in tasks:
             task.cancel()
         if tasks:

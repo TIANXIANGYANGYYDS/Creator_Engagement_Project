@@ -118,6 +118,81 @@ def test_concurrent_identical_interaction_requests_are_coalesced() -> None:
     assert crawler.calls == [("头条:same-url", 0)]
 
 
+def test_cancelling_last_waiter_cancels_the_real_collection() -> None:
+    class BlockingCrawler(FakeCrawler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+    async def run() -> None:
+        crawler = BlockingCrawler()
+        service = EngagementService(crawler)  # type: ignore[arg-type]
+        caller = asyncio.create_task(
+            service.fetch_interactions("same-url", "toutiao")
+        )
+        await crawler.started.wait()
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
+
+        assert crawler.cancelled.is_set()
+        assert service._result_tasks == {}
+        assert service._result_waiters == {}
+        await service.aclose()
+
+    asyncio.run(run())
+
+
+def test_cancelling_one_waiter_keeps_shared_collection_for_the_other() -> None:
+    class SharedCrawler(FakeCrawler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+            self.calls.append((f"{media_name}:{url}", 0))
+            self.started.set()
+            await self.release.wait()
+            return InteractionResult(
+                platform="toutiao",
+                canonical_url=url,
+                work_id="123",
+                coverage="partial",
+                stats={"likes": 7},
+            )
+
+    async def run() -> None:
+        crawler = SharedCrawler()
+        service = EngagementService(crawler)  # type: ignore[arg-type]
+        first = asyncio.create_task(
+            service.fetch_interactions("same-url", "toutiao")
+        )
+        second = asyncio.create_task(
+            service.fetch_interactions("same-url", "toutiao")
+        )
+        await crawler.started.wait()
+        await asyncio.sleep(0)
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        crawler.release.set()
+        result = await second
+
+        assert result.stats.likes == 7
+        assert crawler.calls == [("toutiao:same-url", 0)]
+        await service.aclose()
+
+    asyncio.run(run())
+
+
 def test_collection_concurrency_is_bounded() -> None:
     class CountingCrawler(FakeCrawler):
         def __init__(self) -> None:
@@ -250,7 +325,7 @@ def test_xiaohongshu_cookie_mode_rejects_incomplete_cookie() -> None:
             assert cookie not in str(exc_info.value)
 
 
-def test_retryable_failure_is_not_cached() -> None:
+def test_terminal_failure_is_temporarily_cached_to_prevent_retry_storm() -> None:
     class BlockedCrawler(FakeCrawler):
         async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
             self.calls.append((f"{media_name}:{url}", 0))
@@ -264,6 +339,29 @@ def test_retryable_failure_is_not_cached() -> None:
 
     crawler = BlockedCrawler()
     service = EngagementService(crawler)  # type: ignore[arg-type]
+
+    asyncio.run(service.fetch_interactions("same-url", "toutiao"))
+    asyncio.run(service.fetch_interactions("same-url", "toutiao"))
+
+    assert len(crawler.calls) == 1
+
+
+def test_failure_cache_can_be_disabled() -> None:
+    class BlockedCrawler(FakeCrawler):
+        async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+            self.calls.append((f"{media_name}:{url}", 0))
+            return InteractionResult(
+                platform="toutiao",
+                canonical_url=url,
+                work_id="123",
+                coverage="blocked",
+            )
+
+    crawler = BlockedCrawler()
+    service = EngagementService(  # type: ignore[arg-type]
+        crawler,
+        failure_cache_ttl_seconds=0,
+    )
 
     asyncio.run(service.fetch_interactions("same-url", "toutiao"))
     asyncio.run(service.fetch_interactions("same-url", "toutiao"))

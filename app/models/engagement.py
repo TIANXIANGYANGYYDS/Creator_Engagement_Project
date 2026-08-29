@@ -32,7 +32,7 @@ CommentPaginationMode = Literal[
 ]
 CollectOperation = Literal["interactions", "comments"]
 CollectStatus = Literal["success", "failed"]
-JobStatus = Literal["queued", "running", "completed", "failed"]
+JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 WebhookStatus = Literal["pending", "sent", "failed"]
 
 
@@ -189,10 +189,12 @@ class JobStatusResponse(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     webhook_status: WebhookStatus | None = None
+    error: str | None = None
 
 
 class JobItemResponse(CollectItemResponse):
     item_id: str
+    duration_ms: int = Field(default=0, ge=0)
 
 
 class JobResultsResponse(BaseModel):

@@ -24,6 +24,9 @@ async def health() -> dict[str, object]:
         "proxy_pool_size": settings.proxy_pool_size,
         "proxy_max_concurrency": settings.proxy_max_concurrency,
         "collection_max_concurrency": settings.collection_max_concurrency,
+        "job_item_max_concurrency": settings.job_item_max_concurrency,
+        "job_item_timeout_seconds": settings.job_item_timeout_seconds,
+        "job_timeout_seconds": settings.job_timeout_seconds,
         "toutiao_protocol_max_attempts": (
             settings.toutiao_protocol_max_attempts
             if settings.reliability_mode == "enterprise"
@@ -41,4 +44,6 @@ async def health() -> dict[str, object]:
             else 1
         ),
         "browser_geoip_enabled": settings.browser_geoip_enabled,
+        "circuit_failure_threshold": settings.circuit_failure_threshold,
+        "circuit_cooldown_seconds": settings.circuit_cooldown_seconds,
     }

@@ -23,6 +23,9 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.xiaohongshu_cookie.get_secret_value() == ""
     assert settings.collection_max_concurrency == 8
     assert settings.job_max_concurrency == 2
+    assert settings.job_item_max_concurrency == 16
+    assert settings.job_item_timeout_seconds == 45
+    assert settings.job_timeout_seconds == 1800
     assert settings.job_result_ttl_seconds == 86400
     assert settings.job_db_path == ".local/jobs/jobs.sqlite3"
     assert settings.job_webhook_allowed_hosts == ""
@@ -32,9 +35,12 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.protocol_max_attempts == 3
     assert settings.protocol_retry_base_seconds == 1
     assert settings.toutiao_protocol_max_attempts == 1
-    assert settings.douyin_protocol_max_attempts == 5
+    assert settings.douyin_protocol_max_attempts == 2
     assert settings.engagement_cache_ttl_seconds == 120
+    assert settings.engagement_failure_cache_ttl_seconds == 120
     assert settings.engagement_cache_max_entries == 1000
+    assert settings.circuit_failure_threshold == 8
+    assert settings.circuit_cooldown_seconds == 20
     assert settings.browser_max_concurrency == 3
     assert settings.browser_max_attempts == 3
     assert settings.browser_geoip_enabled is False
