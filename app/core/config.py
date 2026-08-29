@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     proxy_51_api_url: str = Field(default="", alias="PROXY_51_API_URL")
     proxy_mode: Literal["direct", "prefer", "required"] = Field(
-        default="prefer",
+        default="required",
         alias="PROXY_MODE",
     )
     proxy_pool_size: int = Field(default=8, alias="PROXY_POOL_SIZE", ge=1, le=200)
@@ -100,6 +100,12 @@ class Settings(BaseSettings):
         alias="COLLECTION_MAX_CONCURRENCY",
         ge=1,
     )
+    douyin_max_concurrency: int = Field(
+        default=4,
+        alias="DOUYIN_MAX_CONCURRENCY",
+        ge=1,
+        le=32,
+    )
     job_max_concurrency: int = Field(
         default=2,
         alias="JOB_MAX_CONCURRENCY",
@@ -113,15 +119,15 @@ class Settings(BaseSettings):
         le=200,
     )
     job_item_timeout_seconds: float = Field(
-        default=45,
+        default=90,
         alias="JOB_ITEM_TIMEOUT_SECONDS",
-        gt=0,
+        ge=0,
         le=600,
     )
     job_timeout_seconds: float = Field(
         default=1800,
         alias="JOB_TIMEOUT_SECONDS",
-        gt=0,
+        ge=0,
         le=86_400,
     )
     job_result_ttl_seconds: int = Field(
@@ -172,7 +178,7 @@ class Settings(BaseSettings):
         le=10,
     )
     douyin_protocol_max_attempts: int = Field(
-        default=2,
+        default=3,
         alias="DOUYIN_PROTOCOL_MAX_ATTEMPTS",
         ge=1,
         le=10,
@@ -183,7 +189,7 @@ class Settings(BaseSettings):
         ge=0,
     )
     engagement_failure_cache_ttl_seconds: float = Field(
-        default=120,
+        default=15,
         alias="ENGAGEMENT_FAILURE_CACHE_TTL_SECONDS",
         ge=0,
     )
@@ -193,9 +199,9 @@ class Settings(BaseSettings):
         ge=1,
     )
     circuit_failure_threshold: int = Field(
-        default=8,
+        default=24,
         alias="CIRCUIT_FAILURE_THRESHOLD",
-        ge=1,
+        ge=0,
         le=100,
     )
     circuit_cooldown_seconds: float = Field(

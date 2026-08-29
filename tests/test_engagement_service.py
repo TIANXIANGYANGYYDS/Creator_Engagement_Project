@@ -231,14 +231,54 @@ def test_required_proxy_mode_requires_api_url() -> None:
         EngagementService.from_settings(settings)
 
 
+def test_service_rejects_non_required_proxy_mode() -> None:
+    settings = Settings(
+        _env_file=None,
+        proxy_mode="prefer",
+        proxy_51_api_url="https://proxy-provider.example/api",
+    )
+
+    with pytest.raises(ValueError, match="仅允许 PROXY_MODE=required"):
+        EngagementService.from_settings(settings)
+
+
+def test_required_proxy_mode_covers_protocol_and_browser_paths() -> None:
+    settings = Settings(
+        _env_file=None,
+        proxy_mode="required",
+        proxy_51_api_url="https://proxy-provider.example/api",
+    )
+
+    service = EngagementService.from_settings(settings)
+
+    assert service.crawler.client.proxy_mode == "required"
+    assert service.crawler.browser_fallback.proxy_required is True
+    asyncio.run(service.aclose())
+
+
+def test_douyin_concurrency_setting_controls_platform_limit() -> None:
+    settings = Settings(
+        _env_file=None,
+        browser_fallback_enabled=False,
+        proxy_51_api_url="https://proxy-provider.example/api",
+        douyin_max_concurrency=5,
+    )
+
+    service = EngagementService.from_settings(settings)
+
+    assert service._platform_semaphores["douyin"]._value == 5
+    asyncio.run(service.aclose())
+
+
 def test_economy_mode_disables_platform_and_browser_retry_overrides() -> None:
     settings = Settings(
         _env_file=None,
         reliability_mode="economy",
         browser_fallback_enabled=False,
+        proxy_51_api_url="https://proxy-provider.example/api",
     )
 
-    service = EngagementService.from_settings(settings, proxy_mode="direct")
+    service = EngagementService.from_settings(settings)
 
     assert service.crawler.max_protocol_attempts == 1
     assert service.crawler.platform_protocol_max_attempts == {}
@@ -255,9 +295,10 @@ def test_service_injects_dedicated_wechat_cookie(monkeypatch) -> None:
         browser_fallback_enabled=False,
         creator_engagement_cookie="",
         wechat_article_cookie="wap_sid2=wechat-only",
+        proxy_51_api_url="https://proxy-provider.example/api",
     )
 
-    service = EngagementService.from_settings(settings, proxy_mode="direct")
+    service = EngagementService.from_settings(settings)
 
     assert service.crawler._platform_cookie("wechat") == "wap_sid2=wechat-only"
     assert service.crawler.platform_cookies == {"wechat": "wap_sid2=wechat-only"}
@@ -275,9 +316,10 @@ def test_strict_anonymous_mode_ignores_account_credentials_and_profiles(tmp_path
         wechat_mp_app_secret="secret",
         wechat_channels_bridge_url="http://127.0.0.1:2026",
         platform_session_dir=str(tmp_path / "sessions"),
+        proxy_51_api_url="https://proxy-provider.example/api",
     )
 
-    service = EngagementService.from_settings(settings, proxy_mode="direct")
+    service = EngagementService.from_settings(settings)
 
     assert service.crawler.strict_anonymous_mode is True
     assert service.crawler.cookies == ""
@@ -285,6 +327,12 @@ def test_strict_anonymous_mode_ignores_account_credentials_and_profiles(tmp_path
     assert service.crawler.wechat_mp_app_id == ""
     assert service.crawler.wechat_channels_bridge_client is None
     assert service.crawler.session_store.root == tmp_path / "sessions" / "anonymous"
+    service.crawler.session_store.root.mkdir(parents=True)
+    service.crawler.session_store.state_path("douyin").write_text(
+        '{"cookies":[{"name":"ttwid","value":"stale-browser-guest"}]}',
+        encoding="utf-8",
+    )
+    assert service.crawler._platform_cookie("douyin") == ""
     asyncio.run(service.aclose())
 
 
@@ -298,9 +346,10 @@ def test_strict_mode_allows_only_explicit_xiaohongshu_cookie(tmp_path) -> None:
         browser_fallback_enabled=False,
         wechat_article_cookie="wap_sid2=wechat-account",
         platform_session_dir=str(tmp_path / "sessions"),
+        proxy_51_api_url="https://proxy-provider.example/api",
     )
 
-    service = EngagementService.from_settings(settings, proxy_mode="direct")
+    service = EngagementService.from_settings(settings)
 
     assert service.crawler._platform_cookie("xiaohongshu") == cookie
     assert service.crawler._platform_cookie("wechat") == ""
@@ -316,10 +365,11 @@ def test_xiaohongshu_cookie_mode_rejects_incomplete_cookie() -> None:
             xiaohongshu_session_mode="cookie",
             xiaohongshu_cookie=cookie,
             browser_fallback_enabled=False,
+            proxy_51_api_url="https://proxy-provider.example/api",
         )
 
         with pytest.raises(ValueError, match="Cookie 字段") as exc_info:
-            EngagementService.from_settings(settings, proxy_mode="direct")
+            EngagementService.from_settings(settings)
 
         if cookie:
             assert cookie not in str(exc_info.value)
@@ -367,6 +417,31 @@ def test_failure_cache_can_be_disabled() -> None:
     asyncio.run(service.fetch_interactions("same-url", "toutiao"))
 
     assert len(crawler.calls) == 2
+
+
+def test_permanent_unavailable_result_uses_normal_cache_ttl() -> None:
+    class UnavailableCrawler(FakeCrawler):
+        async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
+            self.calls.append((f"{media_name}:{url}", 0))
+            return InteractionResult(
+                platform="douyin",
+                canonical_url=url,
+                work_id="123",
+                coverage="unsupported",
+                reason="作品已删除",
+            )
+
+    crawler = UnavailableCrawler()
+    service = EngagementService(  # type: ignore[arg-type]
+        crawler,
+        cache_ttl_seconds=120,
+        failure_cache_ttl_seconds=0,
+    )
+
+    asyncio.run(service.fetch_interactions("same-url", "douyin"))
+    asyncio.run(service.fetch_interactions("same-url", "douyin"))
+
+    assert len(crawler.calls) == 1
 
 
 def test_meaningful_result_is_cached() -> None:

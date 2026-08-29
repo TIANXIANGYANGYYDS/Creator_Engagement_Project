@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from app.crawlers.proxy_provider import ProxyUnavailableError
 from app.models.engagement import (
     EngagementComment,
     EngagementPlatform,
@@ -45,6 +46,7 @@ class BrowserFallback:
         *,
         settings: BrowserFallbackSettings | None = None,
         proxy_provider: Any | None = None,
+        proxy_required: bool = False,
         session_store: Any | None = None,
         cookies: str = "",
     ) -> None:
@@ -52,6 +54,7 @@ class BrowserFallback:
         if self.settings.max_concurrency <= 0:
             raise ValueError("browser max_concurrency must be greater than zero")
         self.proxy_provider = proxy_provider
+        self.proxy_required = proxy_required
         self.session_store = session_store
         self.cookies = cookies
         self._profile_slots: dict[EngagementPlatform, asyncio.Queue[int]] = {}
@@ -107,9 +110,19 @@ class BrowserFallback:
         proxy_mapping = None
         lease_ok = False
         try:
-            if self.proxy_provider is not None and _browser_uses_proxy(platform):
+            if self.proxy_required and self.proxy_provider is None:
+                raise ProxyUnavailableError(
+                    "浏览器代理为 required，但没有配置代理提供器"
+                )
+            if self.proxy_provider is not None:
                 proxy_mapping = await self.proxy_provider.get_requests_proxies()
+            if self.proxy_required and not proxy_mapping:
+                raise ProxyUnavailableError("未获取到浏览器代理，禁止本机直连请求")
             proxy = _playwright_proxy(proxy_mapping)
+            if self.proxy_required and not proxy:
+                raise ProxyUnavailableError(
+                    "浏览器代理映射缺少 http/https 地址，禁止本机直连请求"
+                )
             profile_dir = self.settings.profile_dir / platform
             if profile_slot:
                 profile_dir = self.settings.profile_dir / f"{platform}-worker-{profile_slot}"
@@ -591,13 +604,6 @@ def _playwright_proxy(proxies: dict[str, str] | None) -> dict[str, str] | None:
         return None
     server = proxies.get("https") or proxies.get("http")
     return {"server": server} if server else None
-
-
-def _browser_uses_proxy(platform: EngagementPlatform) -> bool:
-    # XHS guest comment signatures are tied to the browser-generated session
-    # and egress. Rotating purchased proxies returned counters but no bodies in
-    # production, while the same anonymous profile succeeded over direct egress.
-    return platform != "xiaohongshu"
 
 
 def _should_reload_page(

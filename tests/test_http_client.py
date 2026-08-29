@@ -219,6 +219,35 @@ def test_collection_scope_reuses_one_proxy_for_multiple_requests() -> None:
     assert provider.successes == [proxies]
 
 
+def test_isolated_session_scope_uses_private_cookie_and_connection_state() -> None:
+    proxies = {"https": "http://127.0.0.1:8080"}
+    provider = CountingProxyProvider(proxies)
+    shared_session = FakeSession()
+    isolated_session = FakeSession()
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=provider,
+        proxy_mode="required",
+        session=shared_session,
+        session_factory=lambda: isolated_session,
+    )
+
+    async def run() -> None:
+        async with client.lease_scope():
+            async with client.isolated_session_scope():
+                await client.get("https://example.com/detail")
+                await client.post("https://example.com/comments")
+
+    asyncio.run(run())
+
+    assert shared_session.calls == []
+    assert len(isolated_session.calls) == 2
+    assert isolated_session.closed is True
+    assert provider.acquisitions == 1
+    assert provider.successes == [proxies]
+
+
 def test_semantic_failure_discards_active_proxy_lease() -> None:
     proxies = {"https": "http://127.0.0.1:8080"}
     provider = CountingProxyProvider(proxies)
@@ -269,6 +298,19 @@ def test_required_mode_never_falls_back_to_direct() -> None:
     )
 
     with pytest.raises(ProxyUnavailableError, match="没有配置代理提供器"):
+        asyncio.run(client.get("https://example.com"))
+
+
+def test_required_mode_rejects_malformed_proxy_mapping() -> None:
+    client = CurlAsyncHttpClient(
+        timeout_seconds=10,
+        headers={},
+        proxy_provider=FakeProxyProvider({"unexpected": "value"}),
+        proxy_mode="required",
+        session=FakeSession(),
+    )
+
+    with pytest.raises(ProxyUnavailableError, match="禁止本机直连请求"):
         asyncio.run(client.get("https://example.com"))
 
 

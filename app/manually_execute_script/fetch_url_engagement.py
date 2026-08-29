@@ -20,17 +20,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("media_name", help="媒体规范名或中文名，例如 bilibili/B站")
     parser.add_argument("--page", type=int, default=1, help="一级评论页码，仅 comments 模式使用")
-    parser.add_argument("--direct", action="store_true", help="本次强制直连，忽略代理配置")
     return parser
 
 
 async def _run(args: argparse.Namespace) -> None:
     settings = get_settings()
     configure_logging(settings)
-    service = EngagementService.from_settings(
-        settings,
-        proxy_mode="direct" if args.direct else None,
-    )
+    service = EngagementService.from_settings(settings)
     try:
         if args.resource == "comments":
             result = await service.fetch_comments(args.url, args.media_name, args.page)

@@ -1,6 +1,6 @@
 # Creator Engagement API 接口文档
 
-最后更新：2026-08-29
+最后更新：2026-08-30
 接口版本：`v1`
 
 ## 1. 接口概览
@@ -82,8 +82,8 @@ OpenAPI:     http://39.106.202.228:8200/openapi.json
 
 微博正文支持 `weibo.com/{uid}/{bid}` 和 `m.weibo.cn/detail/{mid}`；视频支持
 `video.weibo.com/show?fid=1034:{id}` 与 `weibo.com/tv/show/1034:{id}`。视频 `fid` 不是微博
-MID，服务会先通过微博公开组件接口完成映射。已删除或无查看权限的正文会快速返回明确失败，
-不会继续进行无效浏览器重试。
+MID，服务会在同一代理租约中建立匿名访客会话，再通过微博公开组件接口完成映射。已删除或无
+查看权限的正文会快速返回明确失败，不会继续进行无效浏览器重试。
 
 ## 3. 批量采集
 
@@ -285,6 +285,10 @@ GET /api/v1/jobs/job_1d8d5e1726464a6492bb79246fa6e6fd/results?limit=100&cursor=<
 
 每个项目有独立的最大执行时间，超时后该项目返回 `status=failed`，`error` 会明确写出超时秒数，
 其他项目继续执行。整批任务也有最大执行时间；触发后任务变为 `failed`，已完成结果仍然保留。
+当前单项目默认上限为 90 秒。平台连续临时失败触发熔断时，排队项目会等待 20 秒冷却后再做真实
+请求，冷却等待不占用单项目的 90 秒协议执行预算，也不会因为熔断处于打开状态而直接批量标记
+失败。默认触发阈值为连续 24 次临时失败；对抖音正式并发 4 而言相当于连续六轮全部失败，
+避免单轮代理波动误触发平台级熔断。
 
 ### 3.5 Webhook、持久化和过期
 
@@ -375,7 +379,7 @@ Content-Type: application/json
 
 同步响应和异步任务结果使用相同的项目字段。`duration_ms` 是整个批次的端到端耗时。
 `cost_yuan` 当前仅统计本批次触发代理池新增 IP 的
-采购成本，公式为 `新增 IP 数 × 0.00084 元`；复用已有代理、直连和缓存命中不会产生新增
+采购成本，公式为 `新增 IP 数 × 0.00084 元`；复用已有代理和缓存命中不会产生新增
 代理成本。它不是对客户的商业收费金额。
 
 统一互动字段的当前平台覆盖如下；实际页面没有公开某个值时仍返回 `null`：
@@ -577,15 +581,16 @@ GET /api/v1/health
 ```json
 {
   "status": "ok",
-  "proxy_mode": "prefer",
+  "proxy_mode": "required",
   "proxy_configured": true,
   "reliability_mode": "enterprise",
   "protocol_max_attempts": 3,
   "proxy_pool_size": 8,
   "proxy_max_concurrency": 1,
   "collection_max_concurrency": 8,
+  "douyin_max_concurrency": 4,
   "toutiao_protocol_max_attempts": 1,
-  "douyin_protocol_max_attempts": 2,
+  "douyin_protocol_max_attempts": 3,
   "browser_max_concurrency": 3,
   "browser_max_attempts": 3,
   "browser_geoip_enabled": false
@@ -593,6 +598,9 @@ GET /api/v1/health
 ```
 
 健康检查不是业务数据接口，因此不使用 `data` 外壳。
+生产服务固定要求 `proxy_mode=required`：协议请求和浏览器兜底都必须先取得代理租约；代理池
+不可用时采集项明确失败，不允许回退服务器本机 IP。代理供应商 API、授权侧车和 Webhook 属于
+控制面或业务回调，不经过内容采集代理池。
 
 ## 7. 错误响应
 

@@ -46,11 +46,15 @@ async def create_job(
             **result.model_dump(),
         )
 
+    async def wait_for_platform(item: JobItemRequest) -> None:
+        await service.wait_for_platform_ready(item.media_name)
+
     try:
         return await manager.submit(
             request,
             collector=collect_item,
             proxy_usage_scope=service.proxy_usage_scope,
+            before_collect=wait_for_platform,
             idempotency_key=idempotency_key,
         )
     except IdempotencyConflictError as exc:

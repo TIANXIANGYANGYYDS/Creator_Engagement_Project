@@ -24,6 +24,7 @@ async def health() -> dict[str, object]:
         "proxy_pool_size": settings.proxy_pool_size,
         "proxy_max_concurrency": settings.proxy_max_concurrency,
         "collection_max_concurrency": settings.collection_max_concurrency,
+        "douyin_max_concurrency": settings.douyin_max_concurrency,
         "job_item_max_concurrency": settings.job_item_max_concurrency,
         "job_item_timeout_seconds": settings.job_item_timeout_seconds,
         "job_timeout_seconds": settings.job_timeout_seconds,

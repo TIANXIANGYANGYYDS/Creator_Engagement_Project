@@ -8,7 +8,8 @@
 ## 运行时行为
 
 - `EngagementService.from_settings()` 创建一个 `BrowserFallback`，通常与协议客户端共用
-  同一个 51 代理池。小红书游客评论使用稳定直连出口，避免代理轮换破坏浏览器会话与评论签名。
+  同一个 51 代理池。生产 `required` 模式下包括小红书在内的所有平台浏览器流量都必须取得
+  代理租约；代理池为空时直接失败，不会回退服务器本机 IP。
 - 浏览器全局并发由 `BROWSER_MAX_CONCURRENCY` 限制。每个并发槽使用独立持久化 Profile；
   `slot 0` 保留原平台 Profile，其他槽写入 `<platform>-worker-N`，避免并行浏览器争用同一目录。
   当前 16 核、29 GiB 服务器默认使用 3 个浏览器槽。

@@ -194,18 +194,15 @@ async def prepare_anonymous_session(
 ) -> str:
     """Create a fresh first-party visitor cookie without a user login."""
 
-    await crawler._get_response(
-        referer,
-        headers={
-            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "User-Agent": DOUYIN_PROTOCOL_USER_AGENT,
-        },
-    )
     response = await crawler._post_response(
         TTWID_REGISTER_URL,
         headers={
+            # The HTTP client is shared by concurrent platform requests.  Do
+            # not let cookies created on another proxy contaminate this new
+            # proxy-bound visitor identity.
+            "Cookie": "",
             "Content-Type": "application/json",
+            "Referer": referer,
             "User-Agent": DOUYIN_PROTOCOL_USER_AGENT,
         },
         json_body={

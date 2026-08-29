@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import inspect
-from typing import Any, AsyncIterator, Literal, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Callable, Literal, Protocol, runtime_checkable
 
 from curl_cffi import requests as curl_requests
 
@@ -64,15 +64,20 @@ class CurlAsyncHttpClient:
         proxy_provider: AsyncProxyProvider | None = None,
         proxy_mode: Literal["direct", "prefer", "required"] | str = "direct",
         session: Any | None = None,
+        session_factory: Callable[[], Any] | None = None,
     ) -> None:
         if proxy_mode not in {"direct", "prefer", "required"}:
             raise ValueError("proxy_mode must be direct, prefer or required")
-        self._session = session or curl_requests.AsyncSession(
+        default_session_factory = lambda: curl_requests.AsyncSession(
             impersonate="chrome124",
             timeout=timeout_seconds,
             allow_redirects=True,
             headers=headers,
         )
+        self._session_factory = session_factory or (
+            default_session_factory if session is None else None
+        )
+        self._session = session or default_session_factory()
         self.proxy_provider = proxy_provider
         self.proxy_mode = proxy_mode
         self._lease_state: ContextVar[_ProxyLeaseState | None] = ContextVar(
@@ -82,6 +87,10 @@ class CurlAsyncHttpClient:
         self._force_direct: ContextVar[bool] = ContextVar(
             "creator_engagement_force_direct",
             default=False,
+        )
+        self._isolated_session: ContextVar[Any | None] = ContextVar(
+            "creator_engagement_isolated_http_session",
+            default=None,
         )
 
     @asynccontextmanager
@@ -93,6 +102,21 @@ class CurlAsyncHttpClient:
             yield
         finally:
             self._force_direct.reset(token)
+
+    @asynccontextmanager
+    async def isolated_session_scope(self) -> AsyncIterator[None]:
+        """Use a private cookie jar and connection pool for one protocol flow."""
+
+        if self._isolated_session.get() is not None or self._session_factory is None:
+            yield
+            return
+        session = self._session_factory()
+        token = self._isolated_session.set(session)
+        try:
+            yield
+        finally:
+            self._isolated_session.reset(token)
+            await session.close()
 
     @asynccontextmanager
     async def lease_scope(self) -> AsyncIterator[None]:
@@ -191,8 +215,24 @@ class CurlAsyncHttpClient:
             else:
                 proxies = await self._acquire_proxy()
             proxy_url = (proxies or {}).get("https") or (proxies or {}).get("http")
+            if self.proxy_mode == "required" and not proxy_url:
+                error = ProxyUnavailableError(
+                    "代理映射缺少 http/https 地址，禁止本机直连请求"
+                )
+                if lease_state is not None:
+                    lease_state.failed = True
+                    lease_state.failure_reason = str(error)
+                else:
+                    await self._notify_proxy(
+                        "on_failure_for",
+                        "on_failure",
+                        proxies,
+                        error,
+                    )
+                raise error
             try:
-                request = getattr(self._session, "request", None)
+                session = self._isolated_session.get() or self._session
+                request = getattr(session, "request", None)
                 if request is not None:
                     response = await request(
                         method,
@@ -205,7 +245,7 @@ class CurlAsyncHttpClient:
                         discard_cookies=discard_cookies,
                     )
                 elif method == "GET":
-                    response = await self._session.get(
+                    response = await session.get(
                         url,
                         params=params,
                         headers=headers,
@@ -213,7 +253,7 @@ class CurlAsyncHttpClient:
                         discard_cookies=discard_cookies,
                     )
                 else:
-                    response = await self._session.post(
+                    response = await session.post(
                         url,
                         params=params,
                         headers=headers,

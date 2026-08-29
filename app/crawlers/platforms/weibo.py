@@ -55,6 +55,7 @@ async def fetch(
         comments: list[EngagementComment] = []
         cursor: str | None = None
         sources: list[str] = []
+        confirmed_empty_public_comments = False
         if include_stats:
             data: dict[str, Any]
             if public_target is not None:
@@ -64,6 +65,7 @@ async def fetch(
                     work_id,
                     public_target,
                 )
+                headers.update(crawler._weibo_visitor_headers())
                 sources.append(source)
             else:
                 payload = await crawler._get_json(
@@ -78,6 +80,15 @@ async def fetch(
                 comments=to_int(data.get("comments_count")),
                 reposts=to_int(data.get("reposts_count")),
             )
+        elif include_comments and public_target is not None:
+            _, resolved_work_id, source = await fetch_public_stats(
+                crawler,
+                url,
+                work_id,
+                public_target,
+            )
+            headers.update(crawler._weibo_visitor_headers())
+            sources.append(source)
         if include_comments:
             # Weibo's cursor also depends on max_id_type. Keep replaying from
             # page 1 until both values are carried by the internal contract.
@@ -98,12 +109,24 @@ async def fetch(
                     headers=headers,
                 )
                 if not response_ok(comments_payload):
+                    hotflow_confirms_empty = response_confirms_no_visible_comments(
+                        comments_payload
+                    )
                     comments_payload = await crawler._get_json(
                         "https://m.weibo.cn/api/comments/show",
                         params={"id": resolved_work_id, "page": page},
                         headers=headers,
                     )
                     if not response_ok(comments_payload):
+                        if (
+                            hotflow_confirms_empty
+                            and response_confirms_no_visible_comments(comments_payload)
+                        ):
+                            comments = []
+                            cursor = None
+                            used_numbered_fallback = True
+                            confirmed_empty_public_comments = True
+                            break
                         raise PlatformBlockedError(
                             "微博热门流和匿名页码接口均要求登录或触发访问限制"
                         )
@@ -136,7 +159,7 @@ async def fetch(
                 if used_numbered_fallback
                 else "m.weibo.cn/comments/hotflow"
             )
-        return EngagementResult(
+        result = EngagementResult(
             platform="weibo",
             canonical_url=f"https://m.weibo.cn/detail/{resolved_work_id}",
             work_id=resolved_work_id,
@@ -154,6 +177,9 @@ async def fetch(
             comments=comments[:limit],
             next_cursor=cursor,
         )
+        if confirmed_empty_public_comments:
+            result.retryable = False
+        return result
     except WeiboUnavailableError as exc:
         result = result_error("weibo", url, work_id, "unsupported", str(exc))
         result.retryable = False
@@ -211,6 +237,7 @@ async def fetch_desktop_stats(
         headers={
             "Accept": "application/json, text/plain, */*",
             "Referer": target_url,
+            **crawler._weibo_visitor_headers(),
         },
     )
     if payload.get("ok") == 0:
@@ -241,6 +268,7 @@ async def fetch_video_stats(
             "Origin": "https://weibo.com",
             "Page-Referer": page,
             "Referer": target_url,
+            **crawler._weibo_visitor_headers(),
         },
         data={
             "data": json.dumps(
@@ -273,6 +301,13 @@ def parse_comments(payload: dict[str, Any]) -> tuple[list[EngagementComment], st
     data = payload.get("data") or {}
     result = parse_comment_items(data.get("data") or [])
     return result, str(data.get("max_id")) if data.get("max_id") else None
+
+
+def response_confirms_no_visible_comments(payload: dict[str, Any]) -> bool:
+    """Return whether Weibo explicitly reports no comments visible to this session."""
+
+    message = str(payload.get("msg") or payload.get("message") or "").strip()
+    return message in {"已过滤部分评论", "暂无数据"}
 
 
 def parse_comment_items(items: list[Any]) -> list[EngagementComment]:

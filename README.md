@@ -233,7 +233,7 @@ conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 conda run -n MyAgent creator-engagement comments '<内容 URL>' 哔哩哔哩 --page 1
 ```
 
-增加 `--direct` 可以让单次 CLI 调用绕过代理配置。
+CLI 与 API 使用相同的强制代理配置；不提供绕过代理的直连参数。
 
 ## 配置、代理和稳定性
 
@@ -246,13 +246,13 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' 哔哩哔哩 --p
 | `XIAOHONGSHU_COOKIE` | 空 | 小红书 Cookie Secret，必须包含非空 `a1` 和 `web_session` |
 | `WECHAT_CHANNELS_BRIDGE_URL` | 空 | 授权视频号侧车地址；客户端 `feedID` 评论正文需要配置 |
 | `WECHAT_CHANNELS_BRIDGE_TOKEN` | 空 | 视频号侧车鉴权令牌 |
-| `PROXY_MODE` | `prefer` | 有代理配置时优先代理，无代理时允许直连 |
+| `PROXY_MODE` | `required` | 所有目标平台采集流量强制使用代理；无可用代理时明确失败，禁止本机直连 |
 | `PROXY_51_API_URL` | 空 | 51 代理供应接口 |
 | `PROXY_POOL_SIZE` | `8` | 代理池目标数量 |
 | `PROXY_MAX_CONCURRENCY` | `1` | 单个代理的最大并发 |
 | `JOB_MAX_CONCURRENCY` | `2` | 同时运行的异步批量任务数 |
 | `JOB_ITEM_MAX_CONCURRENCY` | `16` | 每个任务最多保持的活跃项目 worker 数 |
-| `JOB_ITEM_TIMEOUT_SECONDS` | `45` | 单个异步项目最大执行秒数 |
+| `JOB_ITEM_TIMEOUT_SECONDS` | `90` | 单个异步项目的协议排队和执行上限；熔断冷却发生在计时之外 |
 | `JOB_TIMEOUT_SECONDS` | `1800` | 单个异步任务最大执行秒数 |
 | `JOB_RESULT_TTL_SECONDS` | `86400` | 已结束异步任务和结果的保留秒数 |
 | `JOB_DB_PATH` | `.local/jobs/jobs.sqlite3` | 异步任务 SQLite 持久化路径 |
@@ -262,27 +262,35 @@ conda run -n MyAgent creator-engagement comments '<内容 URL>' 哔哩哔哩 --p
 | `RELIABILITY_MODE` | `enterprise` | 启用协议重试、语义失败换 IP 和平台保护 |
 | `PROTOCOL_MAX_ATTEMPTS` | `3` | 企业模式最大协议尝试次数 |
 | `TOUTIAO_PROTOCOL_MAX_ATTEMPTS` | `1` | 头条 SSR 能力探测次数；避免确定性空结果重复换 IP |
-| `DOUYIN_PROTOCOL_MAX_ATTEMPTS` | `2` | 抖音临时失败的协议上限；每次使用稳定直连访客会话 |
+| `DOUYIN_PROTOCOL_MAX_ATTEMPTS` | `3` | 抖音临时失败的协议上限；每次尝试使用独立代理租约和 HTTP 会话 |
 | `COLLECTION_MAX_CONCURRENCY` | `8` | 全局采集并发 |
+| `DOUYIN_MAX_CONCURRENCY` | `4` | 抖音平台并发；由 2/4/6 档真实请求对照确定 |
 | `BROWSER_FALLBACK_ENABLED` | `true` | 协议不可用时允许浏览器兜底 |
 | `BROWSER_MAX_CONCURRENCY` | `3` | 浏览器最大并发；每个并发槽使用独立持久化 Profile |
 | `BROWSER_MAX_ATTEMPTS` | `3` | 兜底空结果或阻断时换 IP 再试的次数 |
 | `BROWSER_GEOIP_ENABLED` | `false` | 是否额外查询代理 GeoIP；默认关闭以避免外部探测超时 |
 | `ENGAGEMENT_CACHE_TTL_SECONDS` | `120` | 成功结果缓存时间 |
-| `ENGAGEMENT_FAILURE_CACHE_TTL_SECONDS` | `120` | 终态失败短缓存时间，防止重复批次形成重试风暴 |
+| `ENGAGEMENT_FAILURE_CACHE_TTL_SECONDS` | `15` | 临时失败短缓存时间，抑制瞬时重试风暴且允许快速重新采集 |
 | `ENGAGEMENT_CACHE_MAX_ENTRIES` | `1000` | 最大缓存项数 |
-| `CIRCUIT_FAILURE_THRESHOLD` | `8` | 同一平台连续临时失败多少次后触发熔断 |
+| `CIRCUIT_FAILURE_THRESHOLD` | `24` | 同一平台连续临时失败多少次后触发熔断；相当于抖音并发 4 连续六轮失败 |
 | `CIRCUIT_COOLDOWN_SECONDS` | `20` | 上游熔断冷却秒数 |
 
 代理池支持批量补池、IP TTL、单 IP 并发限制、失败淘汰和供应商 API 限流。一次业务调用内部的
 预热和数据请求可以共用代理租约，但每个 HTTP 调用仍分别计入上游请求量。
 
-默认企业模式最多进行 3 次协议尝试，头条互动 SSR 探测根据实测单独限制为 1 次。抖音和微博
-使用稳定直连访客会话，避免代理握手和浏览器兜底放大尾延迟；删除、仅作者可见、无查看权限等
+默认企业模式最多进行 3 次协议尝试，头条互动 SSR 探测根据实测单独限制为 1 次。协议请求和
+浏览器兜底都使用代理池租约；无可用代理时直接失败，不会回退服务器本机 IP。删除、仅作者可见、
+无查看权限等
 永久状态立即停止。微博视频 `fid` 会先通过公开组件接口映射为真实 MID。HTTP 200 空包、验证码
-或缺少目标字段不会被当作成功；连续临时失败会触发
-短时平台熔断。相同接口、相同 URL、相同页码的并发请求会合并，成功或
-有效部分结果缓存 120 秒；最终仍失败的结果也会短缓存 120 秒，防止重复批次立即形成重试风暴。
+或缺少目标字段不会被当作成功；连续临时失败会触发短时平台熔断。熔断期间项目等待冷却后再做
+真实请求；异步任务的冷却等待不占用单项目协议执行超时，也不会把排队中的批量项目直接标记为
+失败。相同接口、相同 URL、相同页码的并发请求会合并，成功或
+有效部分结果和删除、无权限等确定性不可用状态缓存 120 秒；临时失败短缓存 15 秒，防止瞬时重试
+风暴又不会长时间固化可恢复故障。
+
+微博桌面正文和视频使用 `visitor.passport.weibo.cn` 建立匿名访客会话，再在同一代理租约中请求
+公开详情接口。访客 Cookie 只保存在当前进程内存中，不写入日志或磁盘；此链路避免代理供应商
+对 `passport.weibo.com` 的 HTTPS CONNECT 限制，同时仍禁止服务器本机 IP 访问目标平台。
 
 浏览器兜底默认限制为单并发。严格匿名模式下，浏览器和游客状态写入：
 

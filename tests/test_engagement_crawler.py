@@ -20,7 +20,7 @@ from app.crawlers.platforms.toutiao import parse_stats as parse_toutiao_stats
 from app.crawlers.platforms.haokan import parse_ssr_stats as parse_haokan_stats
 from app.crawlers.platforms.xiaohongshu import parse_stats as parse_xhs_stats
 from app.crawlers.platforms.wechat_channels import parse_formatted_count
-from app.models.engagement import EngagementResult, EngagementStats
+from app.models.engagement import EngagementResult, EngagementStats, InteractionResult
 
 
 class FakeResponse:
@@ -78,10 +78,16 @@ class LeaseAwareClient(FakeClient):
         super().__init__()
         self.invalidations: list[str] = []
         self.lease_count = 0
+        self.isolated_session_count = 0
 
     @asynccontextmanager
     async def lease_scope(self):
         self.lease_count += 1
+        yield
+
+    @asynccontextmanager
+    async def isolated_session_scope(self):
+        self.isolated_session_count += 1
         yield
 
     def invalidate_active_lease(self, reason: str) -> None:
@@ -235,6 +241,7 @@ def test_platform_protocol_attempt_override_can_exceed_global_default(monkeypatc
     assert result.stats.likes == 3
     assert result.protocol_attempts == 5
     assert calls == 5
+    assert crawler.client.isolated_session_count == 5
 
 
 def test_douyin_preferred_proxy_uses_stable_direct_egress(monkeypatch) -> None:
@@ -283,10 +290,74 @@ def test_douyin_preferred_proxy_uses_stable_direct_egress(monkeypatch) -> None:
     assert result.protocol_attempts == 1
     assert client.lease_count == 1
     assert client.direct_count == 1
+    assert client.isolated_session_count == 1
     assert client.invalidations == []
 
 
-def test_douyin_circuit_breaker_fails_fast_after_systemic_failures(monkeypatch) -> None:
+def test_douyin_circuit_breaker_waits_then_probes_after_systemic_failures(
+    monkeypatch,
+) -> None:
+    calls = 0
+    clock = 100.0
+    delays: list[float] = []
+
+    async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
+        nonlocal calls
+        calls += 1
+        work_id = str(args[2])
+        if calls >= 3:
+            return EngagementResult(
+                platform="douyin",
+                canonical_url=f"https://www.douyin.com/video/{work_id}",
+                work_id=work_id,
+                coverage="partial",
+                stats=EngagementStats(likes=12),
+            )
+        return EngagementResult(
+            platform="douyin",
+            canonical_url=f"https://www.douyin.com/video/{work_id}",
+            work_id=work_id,
+            coverage="blocked",
+            reason="temporary upstream block",
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        nonlocal clock
+        delays.append(delay)
+        clock += delay
+
+    monkeypatch.setattr("app.crawlers.engagement.monotonic", lambda: clock)
+    monkeypatch.setattr("app.crawlers.engagement.asyncio.sleep", fake_sleep)
+    monkeypatch.setitem(PLATFORM_HANDLERS, "douyin", handler)
+    crawler = EngagementCrawler(
+        client=LeaseAwareClient(),
+        max_protocol_attempts=1,
+        circuit_failure_threshold=2,
+        circuit_cooldown_seconds=30,
+    )
+
+    async def scenario() -> tuple[InteractionResult, InteractionResult, InteractionResult]:
+        first = await crawler.fetch_interactions(
+            "https://www.douyin.com/video/7665718789363309171", "douyin"
+        )
+        second = await crawler.fetch_interactions(
+            "https://www.douyin.com/video/7665718789363309172", "douyin"
+        )
+        third = await crawler.fetch_interactions(
+            "https://www.douyin.com/video/7665718789363309173", "douyin"
+        )
+        return first, second, third
+
+    first, second, third = asyncio.run(scenario())
+
+    assert first.coverage == second.coverage == "blocked"
+    assert third.coverage == "partial"
+    assert third.stats.likes == 12
+    assert calls == 3
+    assert delays == [30]
+
+
+def test_zero_circuit_threshold_disables_platform_circuit(monkeypatch) -> None:
     calls = 0
 
     async def handler(*args: Any, **kwargs: Any) -> EngagementResult:
@@ -304,24 +375,21 @@ def test_douyin_circuit_breaker_fails_fast_after_systemic_failures(monkeypatch) 
     monkeypatch.setitem(PLATFORM_HANDLERS, "douyin", handler)
     crawler = EngagementCrawler(
         client=LeaseAwareClient(),
-        max_protocol_attempts=1,
-        circuit_failure_threshold=2,
-        circuit_cooldown_seconds=30,
+        platform_protocol_max_attempts={"douyin": 1},
+        circuit_failure_threshold=0,
     )
 
-    first = asyncio.run(crawler.fetch_interactions(
-        "https://www.douyin.com/video/7665718789363309171", "douyin"
-    ))
-    second = asyncio.run(crawler.fetch_interactions(
-        "https://www.douyin.com/video/7665718789363309172", "douyin"
-    ))
-    third = asyncio.run(crawler.fetch_interactions(
-        "https://www.douyin.com/video/7665718789363309173", "douyin"
-    ))
+    async def scenario() -> None:
+        for index in range(3):
+            await crawler.fetch_interactions(
+                f"https://www.douyin.com/video/766571878936330917{index}",
+                "douyin",
+            )
 
-    assert first.coverage == second.coverage == third.coverage == "blocked"
-    assert calls == 2
-    assert "熔断" in third.reason
+    asyncio.run(scenario())
+
+    assert calls == 3
+    assert crawler._circuit_open_until == {}
 
 
 def test_toutiao_ssr_probe_bypasses_preferred_proxy() -> None:
@@ -1190,7 +1258,7 @@ def test_weibo_fetches_stats_and_hot_comments() -> None:
 def test_weibo_desktop_uses_bid_with_anonymous_visitor_session() -> None:
     visitor_page = FakeResponse(
         text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
-        url="https://passport.weibo.com/visitor/visitor?entry=miniblog",
+        url="https://visitor.passport.weibo.cn/visitor/visitor?entry=miniblog",
     )
     generated = FakeResponse(text=(
         'window.visitor_gray_callback && visitor_gray_callback('
@@ -1217,14 +1285,18 @@ def test_weibo_desktop_uses_bid_with_anonymous_visitor_session() -> None:
     assert result.stats.comments == 12
     assert result.stats.reposts == 13
     assert client.calls[1][0].endswith("/visitor/genvisitor2")
+    assert client.calls[0][0].startswith("https://visitor.passport.weibo.cn/")
     assert client.calls[2][1]["params"]["id"] == "RflP1sai8"
+    assert client.calls[2][1]["headers"]["Cookie"] == (
+        "SUB=guest-sub; SUBP=guest-subp"
+    )
     assert result.source == "weibo.com/ajax/statuses/show"
 
 
 def test_weibo_video_maps_fid_to_mid_with_component_api() -> None:
     visitor_page = FakeResponse(
         text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
-        url="https://passport.weibo.com/visitor/visitor?entry=krvideo",
+        url="https://visitor.passport.weibo.cn/visitor/visitor?entry=krvideo",
     )
     generated = FakeResponse(text=(
         'visitor_gray_callback({"retcode":20000000,"data":'
@@ -1256,15 +1328,97 @@ def test_weibo_video_maps_fid_to_mid_with_component_api() -> None:
         "reposts": 5,
     }
     assert client.calls[2][0].endswith("/tv/api/component")
+    assert client.calls[2][1]["headers"]["Cookie"] == (
+        "SUB=guest-sub; SUBP=guest-subp"
+    )
     assert "1034:5336419900784646" in client.calls[2][1]["data"]["data"]
     assert result.source == "weibo.com/tv/api/component"
+
+
+def test_weibo_desktop_comments_initialize_visitor_and_resolve_mid() -> None:
+    client = FakeClient(
+        FakeResponse(
+            text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
+            url="https://visitor.passport.weibo.cn/visitor/visitor?entry=miniblog",
+        ),
+        FakeResponse(text=(
+            'visitor_gray_callback({"retcode":20000000,"data":'
+            '{"sub":"guest-sub","subp":"guest-subp"}});'
+        )),
+        FakeResponse(payload={
+            "idstr": "5336588076712748",
+            "mblogid": "RflP1sai8",
+            "comments_count": 1,
+        }),
+        FakeResponse(payload={
+            "ok": 1,
+            "data": {
+                "max_id": 0,
+                "data": [{
+                    "id": 1,
+                    "text": "公开评论",
+                    "user": {"screen_name": "微博用户"},
+                }],
+            },
+        }),
+    )
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "http://weibo.com/6660086860/RflP1sai8",
+        "微博",
+        1,
+    ))
+
+    assert result.comments[0].text == "公开评论"
+    assert result.work_id == "5336588076712748"
+    assert client.calls[3][1]["params"]["id"] == "5336588076712748"
+    assert client.calls[3][1]["headers"]["Cookie"] == (
+        "SUB=guest-sub; SUBP=guest-subp"
+    )
+    assert result.source == (
+        "weibo.com/ajax/statuses/show + m.weibo.cn/comments/hotflow"
+    )
+
+
+def test_weibo_filtered_comments_are_a_confirmed_empty_public_page() -> None:
+    client = FakeClient(
+        FakeResponse(
+            text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
+            url="https://visitor.passport.weibo.cn/visitor/visitor?entry=miniblog",
+        ),
+        FakeResponse(text=(
+            'visitor_gray_callback({"retcode":20000000,"data":'
+            '{"sub":"guest-sub","subp":"guest-subp"}});'
+        )),
+        FakeResponse(payload={
+            "idstr": "5336877450135446",
+            "mblogid": "RfxbCqwNE",
+            "comments_count": 1,
+        }),
+        FakeResponse(payload={"ok": 0, "msg": "已过滤部分评论"}),
+        FakeResponse(payload={"ok": 0, "msg": "暂无数据"}),
+    )
+
+    result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
+        "http://weibo.com/8357503144/RfxbCqwNE",
+        "微博",
+        1,
+    ))
+
+    assert result.coverage == "partial"
+    assert result.comments == []
+    assert result.next_cursor is None
+    assert result.protocol_attempts == 1
+    assert result.source == (
+        "weibo.com/ajax/statuses/show + m.weibo.cn/api/comments/show"
+    )
 
 
 def test_weibo_missing_video_is_permanent() -> None:
     client = FakeClient(
         FakeResponse(
             text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
-            url="https://passport.weibo.com/visitor/visitor?entry=krvideo",
+            url="https://visitor.passport.weibo.cn/visitor/visitor?entry=krvideo",
         ),
         FakeResponse(text=(
             'visitor_gray_callback({"retcode":20000000,"data":'
@@ -1295,7 +1449,7 @@ def test_weibo_unavailable_desktop_status_is_permanent() -> None:
     client = FakeClient(
         FakeResponse(
             text='<script>var request_id = "0123456789abcdef0123456789abcdef";</script>',
-            url="https://passport.weibo.com/visitor/visitor?entry=miniblog",
+            url="https://visitor.passport.weibo.cn/visitor/visitor?entry=miniblog",
         ),
         FakeResponse(text=(
             'visitor_gray_callback({"retcode":20000000,"data":'
@@ -1514,7 +1668,6 @@ def test_xiaohongshu_blocked_page_is_not_reported_as_partial_success() -> None:
 
 def test_douyin_anonymous_session_fetches_stats_and_comments() -> None:
     client = FakeClient(
-        FakeResponse(text="<html>prewarm</html>"),
         FakeResponse(
             payload={"status_code": 0},
             cookies={"ttwid": "visitor-token"},
@@ -1546,10 +1699,14 @@ def test_douyin_anonymous_session_fetches_stats_and_comments() -> None:
     assert result.coverage == "partial"
     assert result.stats.likes == 9
     assert result.comments[0].text == "访客评论"
-    assert len(client.calls) == 4
-    assert client.calls[1][0].endswith("/ttwid/union/register/")
-    assert client.calls[2][1]["headers"]["Cookie"] == "ttwid=visitor-token"
-    assert client.calls[2][1]["params"]["a_bogus"]
+    assert len(client.calls) == 3
+    assert client.calls[0][0].endswith("/ttwid/union/register/")
+    assert client.calls[0][1]["headers"]["Cookie"] == ""
+    assert client.calls[0][1]["headers"]["Referer"].endswith(
+        "?previous_page=web_code_link"
+    )
+    assert client.calls[1][1]["headers"]["Cookie"] == "ttwid=visitor-token"
+    assert client.calls[1][1]["params"]["a_bogus"]
 
 
 def test_kuaishou_protected_graphql_is_not_reported_as_target_data() -> None:

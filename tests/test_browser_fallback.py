@@ -5,7 +5,6 @@ import asyncio
 from app.crawlers.browser_fallback import (
     BrowserFallback,
     BrowserFallbackSettings,
-    _browser_uses_proxy,
     _browser_target_url,
     _number,
     _parse_douyin,
@@ -14,6 +13,7 @@ from app.crawlers.browser_fallback import (
     _parse_xhs,
     _should_reload_page,
 )
+from app.crawlers.proxy_provider import ProxyUnavailableError
 from app.crawlers.engagement import EngagementCrawler
 from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
 
@@ -246,9 +246,43 @@ def test_caller_cookie_is_only_seeded_into_douyin_profile() -> None:
     }]
 
 
-def test_xhs_guest_browser_uses_stable_direct_egress() -> None:
-    assert _browser_uses_proxy("xiaohongshu") is False
-    assert _browser_uses_proxy("douyin") is True
+def test_required_browser_proxy_fails_closed_without_provider() -> None:
+    result = asyncio.run(BrowserFallback(proxy_required=True)._fetch_locked(
+        "https://www.xiaohongshu.com/explore/6a3b9a90000000000603149f",
+        "xiaohongshu",
+        "6a3b9a90000000000603149f",
+        page=1,
+        limit=20,
+        include_stats=False,
+        include_comments=True,
+    ))
+
+    assert result.coverage == "failed"
+    assert ProxyUnavailableError.__name__ in result.reason
+    assert "禁止" not in result.reason
+    assert "没有配置代理提供器" in result.reason
+
+
+def test_required_browser_proxy_fails_closed_when_pool_is_empty() -> None:
+    class EmptyProxyProvider:
+        async def get_requests_proxies(self):
+            return None
+
+    result = asyncio.run(BrowserFallback(
+        proxy_provider=EmptyProxyProvider(),
+        proxy_required=True,
+    )._fetch_locked(
+        "https://www.xiaohongshu.com/explore/6a3b9a90000000000603149f",
+        "xiaohongshu",
+        "6a3b9a90000000000603149f",
+        page=1,
+        limit=20,
+        include_stats=False,
+        include_comments=True,
+    ))
+
+    assert result.coverage == "failed"
+    assert "禁止本机直连请求" in result.reason
 
 
 def test_browser_fallback_persists_session_without_exposing_state() -> None:

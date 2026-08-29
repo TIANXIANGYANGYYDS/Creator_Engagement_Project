@@ -26,6 +26,9 @@ class FakeJobService:
     async def proxy_usage_scope(self):
         yield SimpleNamespace(added_endpoint_count=2)
 
+    async def wait_for_platform_ready(self, media_name: str) -> None:
+        return None
+
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
         if "failed" in url:
             raise ValueError("测试失败")
@@ -572,6 +575,112 @@ def test_job_item_timeout_isolated_as_a_failed_result() -> None:
         assert results.data[0].status == "failed"
         assert "超过 0.01 秒" in (results.data[0].error or "")
         assert results.data[0].duration_ms >= 0
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_zero_timeouts_disable_item_and_job_deadlines() -> None:
+    async def scenario() -> None:
+        service = FakeJobService()
+        manager = BatchJobManager(
+            retention_seconds=60,
+            item_timeout_seconds=0,
+            job_timeout_seconds=0,
+        )
+        request = CreateJobRequest.model_validate({
+            "items": [{
+                "item_id": "unbounded",
+                "url": "https://www.toutiao.com/article/1/",
+                "media_name": "今日头条",
+                "type": "interactions",
+            }]
+        })
+
+        async def collector(item) -> JobItemResponse:
+            await asyncio.sleep(0.03)
+            return JobItemResponse(
+                item_id=item.item_id,
+                url=item.url,
+                media_name=item.media_name,
+                type=item.type,
+                status="success",
+                complete=True,
+                result={},
+            )
+
+        submitted = await manager.submit(
+            request,
+            collector=collector,
+            proxy_usage_scope=service.proxy_usage_scope,
+        )
+        for _ in range(100):
+            status = await manager.get_status(submitted.job_id)
+            if status is not None and status.status == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("job did not finish")
+
+        assert status.progress.success == 1
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_job_circuit_backpressure_does_not_consume_item_timeout() -> None:
+    async def scenario() -> None:
+        service = FakeJobService()
+        manager = BatchJobManager(
+            retention_seconds=60,
+            item_timeout_seconds=0.01,
+        )
+        request = CreateJobRequest.model_validate({
+            "items": [{
+                "item_id": "delayed-before-collect",
+                "url": "https://www.douyin.com/video/1",
+                "media_name": "抖音",
+                "type": "interactions",
+            }]
+        })
+
+        async def before_collect(item) -> None:
+            await asyncio.sleep(0.03)
+
+        async def collector(item) -> JobItemResponse:
+            return JobItemResponse(
+                item_id=item.item_id,
+                url=item.url,
+                media_name=item.media_name,
+                type=item.type,
+                status="success",
+                complete=True,
+                result={},
+            )
+
+        submitted = await manager.submit(
+            request,
+            collector=collector,
+            proxy_usage_scope=service.proxy_usage_scope,
+            before_collect=before_collect,
+        )
+        for _ in range(100):
+            status = await manager.get_status(submitted.job_id)
+            if status is not None and status.status == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("job did not finish")
+        results = await manager.get_results(
+            submitted.job_id,
+            cursor=None,
+            limit=100,
+        )
+
+        assert status.progress.success == 1
+        assert results is not None
+        assert results.data[0].status == "success"
+        assert results.data[0].duration_ms >= 30
         await manager.aclose()
 
     asyncio.run(scenario())

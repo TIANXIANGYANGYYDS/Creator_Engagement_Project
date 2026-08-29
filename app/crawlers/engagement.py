@@ -88,8 +88,8 @@ class EngagementCrawler:
             raise ValueError("max_browser_attempts must be greater than zero")
         if protocol_retry_base_seconds < 0:
             raise ValueError("protocol_retry_base_seconds must not be negative")
-        if circuit_failure_threshold <= 0:
-            raise ValueError("circuit_failure_threshold must be greater than zero")
+        if circuit_failure_threshold < 0:
+            raise ValueError("circuit_failure_threshold must not be negative")
         if circuit_cooldown_seconds <= 0:
             raise ValueError("circuit_cooldown_seconds must be greater than zero")
         self._owns_client = client is None
@@ -118,6 +118,7 @@ class EngagementCrawler:
         self._circuit_failures: dict[EngagementPlatform, int] = {}
         self._circuit_open_until: dict[EngagementPlatform, float] = {}
         self._weibo_visitor_ready = False
+        self._weibo_visitor_cookie_header = ""
         self._weibo_visitor_lock = asyncio.Lock()
         self.strict_anonymous_mode = strict_anonymous_mode
         self.xiaohongshu_cookie_enabled = xiaohongshu_cookie_enabled
@@ -238,17 +239,7 @@ class EngagementCrawler:
         if not work_id:
             raise ValueError(f"cannot extract {platform} content id from URL")
 
-        open_until = self._circuit_open_until.get(platform, 0)
-        if open_until > monotonic():
-            result = result_error(
-                platform,
-                url,
-                work_id,
-                "blocked",
-                f"{platform} 上游连续失败，保护性熔断中，请稍后重试",
-            )
-            result.circuit_open = True
-            return result
+        await self._wait_for_circuit_cooldown(platform)
 
         handler = PLATFORM_HANDLERS.get(platform)
         if handler is None:
@@ -292,7 +283,27 @@ class EngagementCrawler:
         self._record_circuit_outcome(result)
         return result
 
+    async def _wait_for_circuit_cooldown(
+        self,
+        platform: EngagementPlatform,
+    ) -> None:
+        """Backpressure callers during an open circuit, then allow a real probe."""
+
+        open_until = self._circuit_open_until.get(platform, 0)
+        delay = open_until - monotonic()
+        if delay > 0:
+            logger.warning(
+                "platform_circuit_backpressure platform=%s delay=%.2f",
+                platform,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        if self._circuit_open_until.get(platform) == open_until:
+            self._circuit_open_until.pop(platform, None)
+
     def _record_circuit_outcome(self, result: EngagementResult) -> None:
+        if self.circuit_failure_threshold == 0:
+            return
         platform = result.platform
         if result.coverage in {"complete", "partial"}:
             self._circuit_failures.pop(platform, None)
@@ -336,6 +347,11 @@ class EngagementCrawler:
         for attempt in range(1, max_attempts + 1):
             lease_scope = getattr(self.client, "lease_scope", None)
             direct_scope = getattr(self.client, "direct_scope", None)
+            isolated_session_scope = getattr(
+                self.client,
+                "isolated_session_scope",
+                None,
+            )
             use_stable_direct_egress = (
                 platform in {"douyin", "weibo"}
                 and getattr(self.client, "proxy_mode", "direct") == "prefer"
@@ -354,13 +370,19 @@ class EngagementCrawler:
                     include_comments=include_comments,
                 )
 
+            async def invoke_with_transport_scope() -> EngagementResult:
+                if platform == "douyin" and callable(isolated_session_scope):
+                    async with isolated_session_scope():
+                        return await invoke_handler()
+                return await invoke_handler()
+
             if callable(lease_scope):
                 async with lease_scope():
                     if use_stable_direct_egress:
                         async with direct_scope():
-                            result = await invoke_handler()
+                            result = await invoke_with_transport_scope()
                     else:
-                        result = await invoke_handler()
+                        result = await invoke_with_transport_scope()
                     if self._should_retry_protocol(
                         result,
                         include_stats=include_stats,
@@ -372,7 +394,7 @@ class EngagementCrawler:
                                 f"semantic collection failure: {result.coverage}: {result.reason}"
                             )
             else:
-                result = await invoke_handler()
+                result = await invoke_with_transport_scope()
 
             result.protocol_attempts = attempt
             should_retry = self._should_retry_protocol(
@@ -702,14 +724,14 @@ class EngagementCrawler:
         *,
         entry: str,
     ) -> None:
-        """Create one reusable anonymous Weibo SUB session over HTTP."""
+        """Create one reusable anonymous Weibo SUB session over HTTPS."""
 
         if self._weibo_visitor_ready:
             return
         async with self._weibo_visitor_lock:
             if self._weibo_visitor_ready:
                 return
-            visitor_url = "https://passport.weibo.com/visitor/visitor"
+            visitor_url = "https://visitor.passport.weibo.cn/visitor/visitor"
             visitor_response = await self._get_response(
                 visitor_url,
                 params={
@@ -734,11 +756,11 @@ class EngagementCrawler:
                 raise PlatformCrawlerError("微博访客页未返回 request_id")
 
             generated = await self._post_response(
-                "https://passport.weibo.com/visitor/genvisitor2",
+                "https://visitor.passport.weibo.cn/visitor/genvisitor2",
                 headers={
                     "Accept": "*/*",
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "Origin": "https://passport.weibo.com",
+                    "Origin": "https://visitor.passport.weibo.cn",
                     "Referer": str(getattr(visitor_response, "url", "") or visitor_url),
                 },
                 data={
@@ -768,12 +790,27 @@ class EngagementCrawler:
                 raise PlatformBlockedError(
                     str(payload.get("msg") or "微博访客身份初始化失败")
                 )
+            cookie_parts = [f"SUB={data['sub']}"]
+            if data.get("subp"):
+                cookie_parts.append(f"SUBP={data['subp']}")
+            self._weibo_visitor_cookie_header = "; ".join(cookie_parts)
             self._weibo_visitor_ready = True
+
+    def _weibo_visitor_headers(self) -> dict[str, str]:
+        if not self._weibo_visitor_ready or not self._weibo_visitor_cookie_header:
+            return {}
+        return {"Cookie": self._weibo_visitor_cookie_header}
 
     def _invalidate_weibo_visitor_session(self) -> None:
         self._weibo_visitor_ready = False
+        self._weibo_visitor_cookie_header = ""
 
     def _platform_cookie(self, platform: EngagementPlatform) -> str:
+        if self.strict_anonymous_mode and platform == "douyin":
+            # A persisted browser guest identity is bound to the browser's
+            # former egress and device state.  Reusing it on a rotating proxy
+            # makes the detail endpoint silently return HTTP 200 with no body.
+            return ""
         if (
             self.strict_anonymous_mode
             and platform not in {"douyin", "kuaishou"}

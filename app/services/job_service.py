@@ -29,6 +29,7 @@ from app.models.engagement import (
 
 logger = logging.getLogger(__name__)
 CollectJobItem = Callable[[JobItemRequest], Awaitable[JobItemResponse]]
+BeforeCollectItem = Callable[[JobItemRequest], Awaitable[None]]
 
 
 class IdempotencyConflictError(ValueError):
@@ -63,7 +64,7 @@ class BatchJobManager:
         retention_seconds: int = 86_400,
         max_concurrency: int = 2,
         item_max_concurrency: int = 16,
-        item_timeout_seconds: float = 45,
+        item_timeout_seconds: float = 90,
         job_timeout_seconds: float = 1800,
         webhook_allowed_hosts: set[str] | None = None,
         webhook_timeout_seconds: float = 10,
@@ -73,10 +74,10 @@ class BatchJobManager:
     ) -> None:
         if item_max_concurrency <= 0:
             raise ValueError("item_max_concurrency must be greater than zero")
-        if item_timeout_seconds <= 0:
-            raise ValueError("item_timeout_seconds must be greater than zero")
-        if job_timeout_seconds <= 0:
-            raise ValueError("job_timeout_seconds must be greater than zero")
+        if item_timeout_seconds < 0:
+            raise ValueError("item_timeout_seconds must not be negative")
+        if job_timeout_seconds < 0:
+            raise ValueError("job_timeout_seconds must not be negative")
         self.retention_seconds = retention_seconds
         self.item_max_concurrency = item_max_concurrency
         self.item_timeout_seconds = item_timeout_seconds
@@ -108,6 +109,7 @@ class BatchJobManager:
         *,
         collector: CollectJobItem,
         proxy_usage_scope: Callable[[], Any],
+        before_collect: BeforeCollectItem | None = None,
         idempotency_key: str | None = None,
     ) -> JobSubmitResponse:
         self._validate_request(request)
@@ -140,7 +142,12 @@ class BatchJobManager:
                 self._idempotency[idempotency_key] = (job_id, fingerprint)
             self._persist_job(record)
             self._tasks[job_id] = asyncio.create_task(
-                self._run_job(record, collector, proxy_usage_scope)
+                self._run_job(
+                    record,
+                    collector,
+                    proxy_usage_scope,
+                    before_collect,
+                )
             )
             return JobSubmitResponse(job_id=job_id, status="queued")
 
@@ -218,11 +225,19 @@ class BatchJobManager:
         record: _JobRecord,
         collector: CollectJobItem,
         proxy_usage_scope: Callable[[], Any],
+        before_collect: BeforeCollectItem | None,
     ) -> None:
         try:
             async with self._semaphore:
-                async with asyncio.timeout(self.job_timeout_seconds):
-                    await self._execute_job(record, collector, proxy_usage_scope)
+                async with asyncio.timeout(
+                    self.job_timeout_seconds or None
+                ):
+                    await self._execute_job(
+                        record,
+                        collector,
+                        proxy_usage_scope,
+                        before_collect,
+                    )
             if record.request.webhook_url:
                 await self._send_webhook(record)
         except TimeoutError:
@@ -251,6 +266,7 @@ class BatchJobManager:
         record: _JobRecord,
         collector: CollectJobItem,
         proxy_usage_scope: Callable[[], Any],
+        before_collect: BeforeCollectItem | None,
     ) -> None:
         started = monotonic()
         record.status = "running"
@@ -272,7 +288,11 @@ class BatchJobManager:
                             item = queue.get_nowait()
                         except asyncio.QueueEmpty:
                             return
-                        result = await self._collect_one(item, collector)
+                        result = await self._collect_one(
+                            item,
+                            collector,
+                            before_collect,
+                        )
                         record.results.append(result)
                         self._persist_result(record, result)
                         record.completed += 1
@@ -317,10 +337,15 @@ class BatchJobManager:
         self,
         item: JobItemRequest,
         collector: CollectJobItem,
+        before_collect: BeforeCollectItem | None,
     ) -> JobItemResponse:
         started = monotonic()
         try:
-            async with asyncio.timeout(self.item_timeout_seconds):
+            if before_collect is not None:
+                await before_collect(item)
+            async with asyncio.timeout(
+                self.item_timeout_seconds or None
+            ):
                 result = await collector(item)
         except TimeoutError:
             result = JobItemResponse(

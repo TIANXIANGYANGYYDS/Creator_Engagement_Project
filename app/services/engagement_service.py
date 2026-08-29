@@ -4,11 +4,9 @@ import asyncio
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic
-from typing import Literal
-
 from app.core.config import Settings
 from app.crawlers.browser_fallback import BrowserFallback, BrowserFallbackSettings
 from app.crawlers.engagement import EngagementCrawler
@@ -41,7 +39,7 @@ class PlatformTrafficPolicy:
 
 
 ENTERPRISE_PLATFORM_POLICIES: dict[EngagementPlatform, PlatformTrafficPolicy] = {
-    "douyin": PlatformTrafficPolicy(max_concurrency=2, min_interval_seconds=0),
+    "douyin": PlatformTrafficPolicy(max_concurrency=4, min_interval_seconds=0),
     "toutiao": PlatformTrafficPolicy(max_concurrency=3, min_interval_seconds=0),
     "xiaohongshu": PlatformTrafficPolicy(
         max_concurrency=1,
@@ -133,12 +131,12 @@ class EngagementService:
     def from_settings(
         cls,
         settings: Settings,
-        *,
-        proxy_mode: Literal["direct", "prefer", "required"] | None = None,
     ) -> "EngagementService":
-        active_mode = proxy_mode or settings.proxy_mode
+        active_mode = settings.proxy_mode
         provider: AsyncProxyProvider | None = None
-        if active_mode == "required" and not settings.proxy_51_api_url.strip():
+        if active_mode != "required":
+            raise ValueError("生产采集仅允许 PROXY_MODE=required，禁止本机直连")
+        if not settings.proxy_51_api_url.strip():
             raise ValueError("PROXY_MODE=required 时必须配置 PROXY_51_API_URL")
         if active_mode != "direct" and settings.proxy_51_api_url.strip():
             provider = AsyncDailiProxyPool(
@@ -188,6 +186,7 @@ class EngagementService:
                     ),
                 ),
                 proxy_provider=provider,
+                proxy_required=active_mode == "required",
                 session_store=session_store,
                 cookies=(
                     ""
@@ -281,7 +280,13 @@ class EngagementService:
             ),
             cache_max_entries=settings.engagement_cache_max_entries,
             platform_policies=(
-                ENTERPRISE_PLATFORM_POLICIES
+                {
+                    **ENTERPRISE_PLATFORM_POLICIES,
+                    "douyin": replace(
+                        ENTERPRISE_PLATFORM_POLICIES["douyin"],
+                        max_concurrency=settings.douyin_max_concurrency,
+                    ),
+                }
                 if settings.reliability_mode == "enterprise"
                 else None
             ),
@@ -299,6 +304,12 @@ class EngagementService:
                 yield usage
             return
         yield ProxyUsage()
+
+    async def wait_for_platform_ready(self, media_name: str) -> None:
+        """Apply platform circuit backpressure before an async item starts timing."""
+
+        platform = normalize_media_name(media_name)
+        await self.crawler._wait_for_circuit_cooldown(platform)
 
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
         platform = normalize_media_name(media_name)
@@ -395,11 +406,7 @@ class EngagementService:
                 self._result_waiters[key] = remaining
             if self._result_tasks.get(key) is task:
                 self._result_tasks.pop(key, None)
-            cache_ttl = (
-                self._cache_ttl_seconds
-                if self._is_cacheable_result(result)
-                else self._failure_cache_ttl_seconds
-            )
+            cache_ttl = self._cache_ttl_for_result(result)
             if cache_ttl > 0:
                 self._result_cache[key] = (
                     monotonic() + cache_ttl,
@@ -438,6 +445,11 @@ class EngagementService:
         if result.comments or result.total_comments == 0:
             return True
         return result.page > 1 and result.next_page is None and result.total_comments is not None
+
+    def _cache_ttl_for_result(self, result: CachedResult) -> float:
+        if self._is_cacheable_result(result) or result.coverage == "unsupported":
+            return self._cache_ttl_seconds
+        return self._failure_cache_ttl_seconds
 
     async def fetch_many(
         self,
