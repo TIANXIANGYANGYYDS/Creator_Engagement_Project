@@ -454,6 +454,23 @@ def test_meaningful_result_is_cached() -> None:
     assert crawler.calls == [("toutiao:same-url", 0)]
 
 
+def test_cache_byte_limit_evicts_oversized_result() -> None:
+    crawler = FakeCrawler()
+    service = EngagementService(  # type: ignore[arg-type]
+        crawler,
+        cache_max_bytes=1,
+    )
+
+    asyncio.run(service.fetch_interactions("same-url", "toutiao"))
+    asyncio.run(service.fetch_interactions("same-url", "toutiao"))
+
+    assert crawler.calls == [
+        ("toutiao:same-url", 0),
+        ("toutiao:same-url", 0),
+    ]
+    assert service._cache_size_bytes == 0
+
+
 def test_platform_policy_serializes_and_spaces_request_starts() -> None:
     class TimedCrawler(FakeCrawler):
         def __init__(self) -> None:

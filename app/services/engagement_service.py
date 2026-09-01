@@ -67,6 +67,7 @@ class EngagementService:
         cache_ttl_seconds: float = 120,
         failure_cache_ttl_seconds: float = 120,
         cache_max_entries: int = 1000,
+        cache_max_bytes: int = 64 * 1024 * 1024,
         platform_policies: dict[EngagementPlatform, PlatformTrafficPolicy] | None = None,
     ) -> None:
         if collection_max_concurrency <= 0:
@@ -77,14 +78,18 @@ class EngagementService:
             raise ValueError("failure_cache_ttl_seconds must not be negative")
         if cache_max_entries <= 0:
             raise ValueError("cache_max_entries must be greater than zero")
+        if cache_max_bytes <= 0:
+            raise ValueError("cache_max_bytes must be greater than zero")
         self.crawler = crawler
         self.proxy_provider = proxy_provider
         self._collection_semaphore = asyncio.Semaphore(collection_max_concurrency)
         self._cache_ttl_seconds = cache_ttl_seconds
         self._failure_cache_ttl_seconds = failure_cache_ttl_seconds
         self._cache_max_entries = cache_max_entries
+        self._cache_max_bytes = cache_max_bytes
+        self._cache_size_bytes = 0
         self._result_cache: OrderedDict[
-            CacheKey, tuple[float, CachedResult]
+            CacheKey, tuple[float, int, CachedResult]
         ] = OrderedDict()
         self._result_tasks: dict[CacheKey, asyncio.Task[CachedResult]] = {}
         self._result_waiters: dict[CacheKey, int] = {}
@@ -279,6 +284,7 @@ class EngagementService:
                 settings.engagement_failure_cache_ttl_seconds
             ),
             cache_max_entries=settings.engagement_cache_max_entries,
+            cache_max_bytes=settings.engagement_cache_max_bytes,
             platform_policies=(
                 {
                     **ENTERPRISE_PLATFORM_POLICIES,
@@ -356,14 +362,17 @@ class EngagementService:
         now = monotonic()
         async with self._cache_lock:
             while self._result_cache:
-                oldest_key, (expires_at, _) = next(iter(self._result_cache.items()))
+                oldest_key, (expires_at, size_bytes, _) = next(
+                    iter(self._result_cache.items())
+                )
                 if expires_at > now:
                     break
                 self._result_cache.pop(oldest_key)
+                self._cache_size_bytes -= size_bytes
             cached = self._result_cache.get(key)
             if cached is not None and cached[0] > now:
                 self._result_cache.move_to_end(key)
-                return cached[1].model_copy(deep=True)
+                return cached[2].model_copy(deep=True)
             task = self._result_tasks.get(key)
             if task is None:
                 task = asyncio.create_task(
@@ -408,13 +417,23 @@ class EngagementService:
                 self._result_tasks.pop(key, None)
             cache_ttl = self._cache_ttl_for_result(result)
             if cache_ttl > 0:
+                size_bytes = len(result.model_dump_json().encode("utf-8"))
+                replaced = self._result_cache.pop(key, None)
+                if replaced is not None:
+                    self._cache_size_bytes -= replaced[1]
                 self._result_cache[key] = (
                     monotonic() + cache_ttl,
+                    size_bytes,
                     result.model_copy(deep=True),
                 )
+                self._cache_size_bytes += size_bytes
                 self._result_cache.move_to_end(key)
-                while len(self._result_cache) > self._cache_max_entries:
-                    self._result_cache.popitem(last=False)
+                while (
+                    len(self._result_cache) > self._cache_max_entries
+                    or self._cache_size_bytes > self._cache_max_bytes
+                ):
+                    _, (_, removed_size, _) = self._result_cache.popitem(last=False)
+                    self._cache_size_bytes -= removed_size
         return result.model_copy(deep=True)
 
     async def _collect_cached(

@@ -86,12 +86,12 @@ B站和微博等中文名称。所有业务响应中的 `media_name` 统一为�
 
 新接入的外部服务推荐调用 `POST /api/v1/jobs`。异步请求的每一项包含调用方唯一 `item_id`、
 `url`、`media_name`、`type` 和可选 `page`；提交后立即返回 `job_id`，调用方查询任务进度并按
-cursor 分页读取已完成结果。任务和结果使用 SQLite 持久化，默认保留 24 小时。可选
+cursor 分页读取已完成结果。任务和结果使用项目专用 MongoDB 持久化，默认保留 24 小时。可选
 `Idempotency-Key` 防止提交重试造成重复任务，也可配置 HTTPS Webhook 接收结束通知。
 
-`POST /api/v1/collect` 继续同步返回，保留给已有调用和耗时可控的小批次。两种批量接口都不设置
-业务条数上限，也不使用流式 JSON；实际容量仍受请求体大小、采集并发、平台限速和结果保留时间
-约束。
+`POST /api/v1/collect` 继续同步返回，保留给已有调用和耗时可控的小批次。异步任务默认最多
+5000 项；同步接口仍不设置业务条数上限，也不使用流式 JSON，实际容量仍受请求体大小、采集并发、
+平台限速和结果保留时间约束。
 
 所有批量结果统一使用规范中文媒体名，评论字段为 `comments`。项目 `status` 只使用 `success`
 或 `failed`，`complete` 单独表示是否覆盖了调用方请求的完整范围。平台没有公开的字段为
@@ -255,7 +255,12 @@ CLI 与 API 使用相同的强制代理配置；不提供绕过代理的直连�
 | `JOB_ITEM_TIMEOUT_SECONDS` | `90` | 单个异步项目的协议排队和执行上限；熔断冷却发生在计时之外 |
 | `JOB_TIMEOUT_SECONDS` | `1800` | 单个异步任务最大执行秒数 |
 | `JOB_RESULT_TTL_SECONDS` | `86400` | 已结束异步任务和结果的保留秒数 |
-| `JOB_DB_PATH` | `.local/jobs/jobs.sqlite3` | 异步任务 SQLite 持久化路径 |
+| `JOB_STORE_BACKEND` | `mongodb` | 任务存储；可显式切为 `sqlite` 回滚 |
+| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB 连接串，只应存放在本地部署配置中 |
+| `MONGO_DB_NAME` | `creator_engagement` | 本项目专用 MongoDB 库名 |
+| `JOB_DB_PATH` | `.local/jobs/jobs.sqlite3` | 使用 `sqlite` 回滚后端时的文件路径 |
+| `JOB_MAX_ITEMS` | `5000` | 单个异步任务允许的最大采集项数 |
+| `JOB_RESULT_MAX_BYTES` | `8388608` | 单条异步结果的序列化大小上限（8 MiB） |
 | `JOB_WEBHOOK_ALLOWED_HOSTS` | 空 | 允许接收任务通知的 HTTPS 域名，多个值用逗号分隔 |
 | `JOB_WEBHOOK_TIMEOUT_SECONDS` | `10` | 单次 Webhook 请求超时 |
 | `JOB_WEBHOOK_MAX_ATTEMPTS` | `3` | Webhook 最大尝试次数 |
@@ -272,6 +277,7 @@ CLI 与 API 使用相同的强制代理配置；不提供绕过代理的直连�
 | `ENGAGEMENT_CACHE_TTL_SECONDS` | `120` | 成功结果缓存时间 |
 | `ENGAGEMENT_FAILURE_CACHE_TTL_SECONDS` | `15` | 临时失败短缓存时间，抑制瞬时重试风暴且允许快速重新采集 |
 | `ENGAGEMENT_CACHE_MAX_ENTRIES` | `1000` | 最大缓存项数 |
+| `ENGAGEMENT_CACHE_MAX_BYTES` | `67108864` | 进程内结果缓存总字节上限（64 MiB） |
 | `CIRCUIT_FAILURE_THRESHOLD` | `24` | 同一平台连续临时失败多少次后触发熔断；相当于抖音并发 4 连续六轮失败 |
 | `CIRCUIT_COOLDOWN_SECONDS` | `20` | 上游熔断冷却秒数 |
 
@@ -328,6 +334,7 @@ app/models/engagement.py         统一响应模型
 app/services/engagement_service.py
                                  缓存、并发、代理和业务服务
 app/services/job_service.py       异步任务调度、持久化、分页和 Webhook
+app/repositories/                 MongoDB/SQLite 任务存储适配器
 app/crawlers/engagement.py       URL 校验、平台路由和浏览器兜底
 app/crawlers/comment_capabilities.py
                                  九个平台一级评论能力定义

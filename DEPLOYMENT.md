@@ -11,6 +11,31 @@ cp .env.example .local/env/.env
 部署时将真实的 `PROXY_51_API_URL`、平台会话 Cookie 等值写入
 `.local/env/.env`。该目录已被 Git 忽略，不应提交或打印敏感值。
 
+异步任务默认使用项目专用 MongoDB：
+
+```dotenv
+JOB_STORE_BACKEND=mongodb
+MONGO_URI=mongodb://<user>:<password>@<host>:27017/?authSource=creator_engagement
+MONGO_DB_NAME=creator_engagement
+JOB_RESULT_TTL_SECONDS=86400
+JOB_MAX_ITEMS=5000
+JOB_RESULT_MAX_BYTES=8388608
+```
+
+Mongo 用户只需对 `creator_engagement` 库具有 `readWrite` 权限。首次迁移前先停止新任务并执行：
+
+```bash
+conda run -n MyAgent python -m app.manually_execute_script.migrate_jobs_to_mongo
+conda run -n MyAgent python -m app.manually_execute_script.migrate_jobs_to_mongo --apply
+```
+
+脚本只迁移保留期内的数据并创建所需唯一索引、分页索引和 TTL 索引。需要回滚时设置
+`JOB_STORE_BACKEND=sqlite`，原 SQLite 文件不会被迁移脚本删除。
+
+浏览器兜底保留 Cookie 和登录状态，但不再启用磁盘 HTTP 缓存，避免 Profile 随采集量持续膨胀。
+升级前已经生成的 `cache2` 是可重建数据；如需回收其磁盘空间，应先停止服务并单独备份或清理
+这些缓存目录，不要删除整个 Profile。
+
 生产默认资源上限为 4 个采集、2 个浏览器、2 个代理 IP。低于约 2 GB 可用内存时建议：
 
 ```dotenv
@@ -20,6 +45,7 @@ PROXY_POOL_SIZE=2
 PROXY_MAX_CONCURRENCY=2
 ENGAGEMENT_CACHE_TTL_SECONDS=120
 ENGAGEMENT_CACHE_MAX_ENTRIES=1000
+ENGAGEMENT_CACHE_MAX_BYTES=67108864
 ```
 
 Uvicorn 建议只启动 1 个 worker；每增加一个 worker 都会复制浏览器并发槽位、缓存和代理池，

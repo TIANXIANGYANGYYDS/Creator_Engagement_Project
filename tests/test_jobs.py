@@ -221,6 +221,91 @@ def test_async_job_validation_and_item_failure_are_isolated() -> None:
     asyncio.run(manager.aclose())
 
 
+def test_async_job_rejects_more_than_configured_item_limit() -> None:
+    async def scenario() -> None:
+        service = FakeJobService()
+        manager = BatchJobManager(retention_seconds=60, max_items=1)
+        request = CreateJobRequest.model_validate(
+            {
+                "items": [
+                    {
+                        "item_id": f"item-{index}",
+                        "url": f"https://www.toutiao.com/article/{index}/",
+                        "media_name": "今日头条",
+                        "type": "interactions",
+                    }
+                    for index in range(2)
+                ]
+            }
+        )
+
+        async def collector(item) -> JobItemResponse:
+            raise AssertionError("collector must not run")
+
+        try:
+            await manager.submit(
+                request,
+                collector=collector,
+                proxy_usage_scope=service.proxy_usage_scope,
+            )
+        except ValueError as exc:
+            assert str(exc) == "单个异步任务最多允许 1 个采集项"
+        else:
+            raise AssertionError("oversized job was accepted")
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_async_job_replaces_oversized_result_with_small_failure() -> None:
+    async def scenario() -> None:
+        service = FakeJobService()
+        manager = BatchJobManager(retention_seconds=60, result_max_bytes=1)
+        request = CreateJobRequest.model_validate(
+            {
+                "items": [{
+                    "item_id": "oversized",
+                    "url": "https://www.toutiao.com/article/1/",
+                    "media_name": "今日头条",
+                    "type": "interactions",
+                }]
+            }
+        )
+
+        async def collector(item) -> JobItemResponse:
+            return JobItemResponse(
+                item_id=item.item_id,
+                url=item.url,
+                media_name=item.media_name,
+                type=item.type,
+                status="success",
+                complete=True,
+                result={"likes": 1},
+            )
+
+        submitted = await manager.submit(
+            request,
+            collector=collector,
+            proxy_usage_scope=service.proxy_usage_scope,
+        )
+        for _ in range(100):
+            status = await manager.get_status(submitted.job_id)
+            if status is not None and status.status == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("job did not finish")
+        results = await manager.get_results(submitted.job_id, cursor=None, limit=100)
+
+        assert status.progress.failed == 1
+        assert results is not None
+        assert results.data[0].status == "failed"
+        assert results.data[0].error == "单条结果超过 1 字节存储上限"
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_async_job_idempotency_conflict_and_webhook() -> None:
     webhook_calls: list[httpx.Request] = []
 

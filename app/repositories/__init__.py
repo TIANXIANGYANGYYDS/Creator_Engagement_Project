@@ -1,1 +1,1 @@
-"""Persistence adapters will live here when engagement history is stored."""
+"""Persistence adapters for asynchronous collection jobs."""

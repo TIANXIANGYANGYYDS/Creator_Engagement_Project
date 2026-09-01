@@ -15,6 +15,7 @@ dependencies = [
     "openpyxl>=3.1",
     "pydantic>=2",
     "pydantic-settings",
+    "pymongo>=4.9,<5",
     "requests",
     "uvicorn[standard]",
     "xhshow==0.2.0",

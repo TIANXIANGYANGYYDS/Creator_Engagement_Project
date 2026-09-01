@@ -28,6 +28,9 @@ async def health() -> dict[str, object]:
         "job_item_max_concurrency": settings.job_item_max_concurrency,
         "job_item_timeout_seconds": settings.job_item_timeout_seconds,
         "job_timeout_seconds": settings.job_timeout_seconds,
+        "job_store_backend": settings.job_store_backend,
+        "job_max_items": settings.job_max_items,
+        "job_result_max_bytes": settings.job_result_max_bytes,
         "toutiao_protocol_max_attempts": (
             settings.toutiao_protocol_max_attempts
             if settings.reliability_mode == "enterprise"

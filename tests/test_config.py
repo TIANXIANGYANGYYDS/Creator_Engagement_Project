@@ -28,7 +28,10 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.job_item_timeout_seconds == 90
     assert settings.job_timeout_seconds == 1800
     assert settings.job_result_ttl_seconds == 86400
+    assert settings.job_store_backend == "mongodb"
     assert settings.job_db_path == ".local/jobs/jobs.sqlite3"
+    assert settings.job_max_items == 5000
+    assert settings.job_result_max_bytes == 8 * 1024 * 1024
     assert settings.job_webhook_allowed_hosts == ""
     assert settings.job_webhook_timeout_seconds == 10
     assert settings.job_webhook_max_attempts == 3
@@ -40,6 +43,7 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.engagement_cache_ttl_seconds == 120
     assert settings.engagement_failure_cache_ttl_seconds == 15
     assert settings.engagement_cache_max_entries == 1000
+    assert settings.engagement_cache_max_bytes == 64 * 1024 * 1024
     assert settings.circuit_failure_threshold == 24
     assert settings.circuit_cooldown_seconds == 20
     assert settings.browser_max_concurrency == 3

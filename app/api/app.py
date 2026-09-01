@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse
 from app.api.routers import engagement, health, jobs
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.repositories.job_repository import SQLiteJobRepository
+from app.repositories.mongo_job_repository import MongoJobRepository
 from app.services.engagement_service import EngagementService
 from app.services.job_service import BatchJobManager
 
@@ -23,13 +25,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings)
     service = EngagementService.from_settings(settings)
+    if settings.job_store_backend == "mongodb":
+        job_repository = MongoJobRepository(
+            settings.mongo_uri,
+            settings.mongo_db_name,
+        )
+    else:
+        job_repository = SQLiteJobRepository(Path(settings.job_db_path))
     job_manager = BatchJobManager(
         retention_seconds=settings.job_result_ttl_seconds,
         max_concurrency=settings.job_max_concurrency,
         item_max_concurrency=settings.job_item_max_concurrency,
         item_timeout_seconds=settings.job_item_timeout_seconds,
         job_timeout_seconds=settings.job_timeout_seconds,
-        db_path=Path(settings.job_db_path),
+        max_items=settings.job_max_items,
+        result_max_bytes=settings.job_result_max_bytes,
+        repository=job_repository,
         webhook_allowed_hosts={
             host.strip()
             for host in settings.job_webhook_allowed_hosts.split(",")

@@ -135,9 +135,24 @@ class Settings(BaseSettings):
         alias="JOB_RESULT_TTL_SECONDS",
         ge=60,
     )
+    job_store_backend: Literal["mongodb", "sqlite"] = Field(
+        default="mongodb",
+        alias="JOB_STORE_BACKEND",
+    )
     job_db_path: str = Field(
         default=".local/jobs/jobs.sqlite3",
         alias="JOB_DB_PATH",
+    )
+    job_max_items: int = Field(
+        default=5_000,
+        alias="JOB_MAX_ITEMS",
+        ge=1,
+        le=100_000,
+    )
+    job_result_max_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        alias="JOB_RESULT_MAX_BYTES",
+        ge=1,
     )
     job_webhook_allowed_hosts: str = Field(
         default="",
@@ -196,6 +211,11 @@ class Settings(BaseSettings):
     engagement_cache_max_entries: int = Field(
         default=1000,
         alias="ENGAGEMENT_CACHE_MAX_ENTRIES",
+        ge=1,
+    )
+    engagement_cache_max_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        alias="ENGAGEMENT_CACHE_MAX_BYTES",
         ge=1,
     )
     circuit_failure_threshold: int = Field(

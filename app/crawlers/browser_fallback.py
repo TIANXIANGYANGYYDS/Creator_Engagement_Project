@@ -143,7 +143,11 @@ class BrowserFallback:
                 persistent_context=True,
                 user_data_dir=str(profile_dir),
                 exclude_addons=[DefaultAddons.UBO],
-                enable_cache=True,
+                enable_cache=False,
+                firefox_user_prefs={
+                    "browser.cache.disk.enable": False,
+                    "browser.cache.disk_cache_ssl": False,
+                },
             ) as context:
                 await self._prepare_proxy_bound_guest_state(
                     context,
