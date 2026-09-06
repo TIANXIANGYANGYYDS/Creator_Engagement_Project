@@ -130,6 +130,16 @@ class Settings(BaseSettings):
         ge=0,
         le=86_400,
     )
+    job_timeout_batch_size: int = Field(
+        default=500,
+        alias="JOB_TIMEOUT_BATCH_SIZE",
+        ge=1,
+    )
+    request_connect_timeout_seconds: float = Field(
+        default=5,
+        alias="REQUEST_CONNECT_TIMEOUT_SECONDS",
+        gt=0,
+    )
     job_result_ttl_seconds: int = Field(
         default=86_400,
         alias="JOB_RESULT_TTL_SECONDS",
@@ -193,7 +203,7 @@ class Settings(BaseSettings):
         le=10,
     )
     douyin_protocol_max_attempts: int = Field(
-        default=3,
+        default=8,
         alias="DOUYIN_PROTOCOL_MAX_ATTEMPTS",
         ge=1,
         le=10,

@@ -23,6 +23,10 @@ from app.services.job_service import BatchJobManager
 
 class FakeJobService:
     @asynccontextmanager
+    async def collection_slot(self, media_name: str):
+        yield
+
+    @asynccontextmanager
     async def proxy_usage_scope(self):
         yield SimpleNamespace(added_endpoint_count=2)
 

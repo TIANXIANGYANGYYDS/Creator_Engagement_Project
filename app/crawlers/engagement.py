@@ -53,6 +53,7 @@ class EngagementCrawler:
         *,
         client: AsyncHttpClient | None = None,
         timeout_seconds: float = 20,
+        connect_timeout_seconds: float = 5,
         cookies: str = "",
         proxy_provider: Any | None = None,
         proxy_mode: str = "direct",
@@ -95,6 +96,7 @@ class EngagementCrawler:
         self._owns_client = client is None
         self.client = client or CurlAsyncHttpClient(
             timeout_seconds=timeout_seconds,
+            connect_timeout_seconds=connect_timeout_seconds,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

@@ -88,6 +88,13 @@ B站和微博等中文名称。所有业务响应中的 `media_name` 统一为�
 `url`、`media_name`、`type` 和可选 `page`；提交后立即返回 `job_id`，调用方查询任务进度并按
 cursor 分页读取已完成结果。任务和结果使用项目专用 MongoDB 持久化，默认保留 24 小时。可选
 `Idempotency-Key` 防止提交重试造成重复任务，也可配置 HTTPS Webhook 接收结束通知。
+原始条目单独持久化到 `job_requests`，服务重启后自动续跑未完成条目，保留已有结果和分页顺序。
+主动取消的任务不会自动恢复；调用方可通过 `POST /api/v1/jobs/{job_id}/resume` 显式续跑中断任务。
+
+单条 90 秒执行预算在取得平台和全局采集槽位后开始，排队不占用这段预算。整批默认每 500 条
+给予 1800 秒，向上取整：2615 条允许执行 10800 秒。原始输入、任务和结果在任务结束后保留
+24 小时；续跑时重新计算保留期。部署升级前未保存原始条目的历史 MongoDB 任务需要调用方
+提供原始未完成条目重新提交。
 
 `POST /api/v1/collect` 继续同步返回，保留给已有调用和耗时可控的小批次。异步任务默认最多
 5000 项；同步接口仍不设置业务条数上限，也不使用流式 JSON，实际容量仍受请求体大小、采集并发、
@@ -253,7 +260,9 @@ CLI 与 API 使用相同的强制代理配置；不提供绕过代理的直连�
 | `JOB_MAX_CONCURRENCY` | `2` | 同时运行的异步批量任务数 |
 | `JOB_ITEM_MAX_CONCURRENCY` | `16` | 每个任务最多保持的活跃项目 worker 数 |
 | `JOB_ITEM_TIMEOUT_SECONDS` | `90` | 单个异步项目的协议排队和执行上限；熔断冷却发生在计时之外 |
-| `JOB_TIMEOUT_SECONDS` | `1800` | 单个异步任务最大执行秒数 |
+| `JOB_TIMEOUT_SECONDS` | `1800` | 每个时限分组的执行秒数；0 关闭整批时限 |
+| `JOB_TIMEOUT_BATCH_SIZE` | `500` | 按总条目数向上取整分组，整批时限为分组数乘基准秒数，最多 24 小时 |
+| `REQUEST_CONNECT_TIMEOUT_SECONDS` | `5` | 单次连接建立上限，不改变整个 HTTP 请求的 20 秒上限 |
 | `JOB_RESULT_TTL_SECONDS` | `86400` | 已结束异步任务和结果的保留秒数 |
 | `JOB_STORE_BACKEND` | `mongodb` | 任务存储；可显式切为 `sqlite` 回滚 |
 | `MONGO_URI` | `mongodb://localhost:27017` | MongoDB 连接串，只应存放在本地部署配置中 |
@@ -267,7 +276,7 @@ CLI 与 API 使用相同的强制代理配置；不提供绕过代理的直连�
 | `RELIABILITY_MODE` | `enterprise` | 启用协议重试、语义失败换 IP 和平台保护 |
 | `PROTOCOL_MAX_ATTEMPTS` | `3` | 企业模式最大协议尝试次数 |
 | `TOUTIAO_PROTOCOL_MAX_ATTEMPTS` | `1` | 头条 SSR 能力探测次数；避免确定性空结果重复换 IP |
-| `DOUYIN_PROTOCOL_MAX_ATTEMPTS` | `3` | 抖音临时失败的协议上限；每次尝试使用独立代理租约和 HTTP 会话 |
+| `DOUYIN_PROTOCOL_MAX_ATTEMPTS` | `8` | 抖音临时失败的协议上限；每次尝试使用独立代理租约和 HTTP 会话 |
 | `COLLECTION_MAX_CONCURRENCY` | `8` | 全局采集并发 |
 | `DOUYIN_MAX_CONCURRENCY` | `4` | 抖音平台并发；由 2/4/6 档真实请求对照确定 |
 | `BROWSER_FALLBACK_ENABLED` | `true` | 协议不可用时允许浏览器兜底 |
@@ -357,9 +366,11 @@ xiaohongshu.py / haokan.py / kuaishou.py / bilibili.py / weibo.py
 当前全量自动化结果：
 
 ```text
-209 passed
+250 passed, 3 skipped
 ruff check app tests: All checks passed
 ```
+
+开启隔离集合的 MongoDB 集成测试时，`CREATOR_RUN_MONGO_TESTS=1 pytest -q` 为 253 passed。
 
 本地复验：
 

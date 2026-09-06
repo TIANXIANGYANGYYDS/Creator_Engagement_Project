@@ -11,6 +11,9 @@ from typing import Iterator, Protocol
 from app.models.engagement import CreateJobRequest, JobItemResponse
 
 
+INTERRUPTED_ERRORS = ("服务关闭，任务未完成", "服务重启，任务未完成")
+
+
 class DuplicateIdempotencyKeyError(RuntimeError):
     pass
 
@@ -68,12 +71,19 @@ class JobRepository(Protocol):
 
     async def recover_interrupted(self, retention_seconds: int) -> None: ...
 
+    async def get_completed_items(self, job_id: str) -> list[tuple[str, str]]: ...
+
+    async def get_request(self, job_id: str) -> CreateJobRequest | None: ...
+
+    async def get_interrupted_jobs(self) -> list[StoredJob]: ...
+
     async def close(self) -> None: ...
 
 
 class MemoryJobRepository:
     def __init__(self) -> None:
         self._jobs: dict[str, StoredJob] = {}
+        self._requests: dict[str, CreateJobRequest] = {}
         self._results: dict[str, dict[int, JobItemResponse]] = {}
 
     async def initialize(self, retention_seconds: int) -> None:
@@ -91,6 +101,7 @@ class MemoryJobRepository:
         ):
             raise DuplicateIdempotencyKeyError(job.idempotency_key)
         self._jobs[job.job_id] = replace(job)
+        self._requests[job.job_id] = request.model_copy(deep=True)
         self._results[job.job_id] = {}
 
     async def get_job(self, job_id: str) -> StoredJob | None:
@@ -153,6 +164,21 @@ class MemoryJobRepository:
                 expires_at=now + timedelta(seconds=retention_seconds),
             )
 
+    async def get_completed_items(self, job_id: str) -> list[tuple[str, str]]:
+        self._cleanup_expired()
+        return [(result.item_id, result.status) for result in self._results.get(job_id, {}).values()]
+
+    async def get_request(self, job_id: str) -> CreateJobRequest | None:
+        self._cleanup_expired()
+        request = self._requests.get(job_id)
+        return request.model_copy(deep=True) if request is not None else None
+
+    async def get_interrupted_jobs(self) -> list[StoredJob]:
+        self._cleanup_expired()
+        return [replace(job) for job in self._jobs.values()
+                if job.status == "failed" and job.error in INTERRUPTED_ERRORS
+                and not job.cancel_requested]
+
     async def close(self) -> None:
         return None
 
@@ -165,6 +191,7 @@ class MemoryJobRepository:
         ]
         for job_id in expired:
             self._jobs.pop(job_id, None)
+            self._requests.pop(job_id, None)
             self._results.pop(job_id, None)
 
 
@@ -217,6 +244,41 @@ class SQLiteJobRepository:
 
     async def recover_interrupted(self, retention_seconds: int) -> None:
         await asyncio.to_thread(self._recover_interrupted_sync, retention_seconds)
+
+    async def get_completed_items(self, job_id: str) -> list[tuple[str, str]]:
+        return await asyncio.to_thread(self._get_completed_items_sync, job_id)
+
+    def _get_completed_items_sync(self, job_id: str) -> list[tuple[str, str]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT json_extract(result_json, '$.item_id') AS item_id, "
+                "json_extract(result_json, '$.status') AS status "
+                "FROM batch_job_results WHERE job_id = ?", (job_id,),
+            ).fetchall()
+        return [(row["item_id"], row["status"]) for row in rows]
+
+    async def get_request(self, job_id: str) -> CreateJobRequest | None:
+        return await asyncio.to_thread(self._get_request_sync, job_id)
+
+    async def get_interrupted_jobs(self) -> list[StoredJob]:
+        return await asyncio.to_thread(self._get_interrupted_jobs_sync)
+
+    def _get_request_sync(self, job_id: str) -> CreateJobRequest | None:
+        self._cleanup_expired_sync()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT request_json FROM batch_jobs WHERE job_id = ?", (job_id,),
+            ).fetchone()
+        return CreateJobRequest.model_validate_json(row["request_json"]) if row else None
+
+    def _get_interrupted_jobs_sync(self) -> list[StoredJob]:
+        self._cleanup_expired_sync()
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM batch_jobs WHERE status = 'failed' "
+                "AND cancel_requested = 0 AND error IN (?, ?)", INTERRUPTED_ERRORS,
+            ).fetchall()
+        return [self._row_to_job(row) for row in rows]
 
     async def close(self) -> None:
         return None
@@ -376,16 +438,12 @@ class SQLiteJobRepository:
                 "SELECT * FROM batch_jobs WHERE status IN ('queued', 'running')"
             ).fetchall()
             for row in rows:
-                result_rows = connection.execute(
-                    "SELECT result_json FROM batch_job_results "
-                    "WHERE job_id = ? ORDER BY sequence",
-                    (row["job_id"],),
-                ).fetchall()
-                results = [
-                    JobItemResponse.model_validate_json(result_row["result_json"])
-                    for result_row in result_rows
-                ]
-                success = sum(result.status == "success" for result in results)
+                progress = connection.execute(
+                    "SELECT COUNT(*) AS completed, "
+                    "COALESCE(SUM(json_extract(result_json, '$.status') = 'success'), 0) AS success "
+                    "FROM batch_job_results WHERE job_id = ?", (row["job_id"],),
+                ).fetchone()
+                completed, success = progress["completed"], progress["success"]
                 connection.execute(
                     """
                     UPDATE batch_jobs SET
@@ -398,9 +456,9 @@ class SQLiteJobRepository:
                     WHERE job_id = ?
                     """,
                     (
-                        len(results),
+                        completed,
                         success,
-                        len(results) - success,
+                        completed - success,
                         now.isoformat(),
                         "服务重启，任务未完成",
                         (now + timedelta(seconds=retention_seconds)).isoformat(),

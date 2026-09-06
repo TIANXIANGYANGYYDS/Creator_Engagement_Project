@@ -10,6 +10,7 @@ from pymongo.errors import DuplicateKeyError
 from app.models.engagement import CreateJobRequest, JobItemResponse
 from app.repositories.job_repository import (
     DuplicateIdempotencyKeyError,
+    INTERRUPTED_ERRORS,
     StoredJob,
 )
 
@@ -28,6 +29,7 @@ class MongoJobRepository:
         self.database = self.client[database_name]
         self.jobs = self.database["jobs"]
         self.results = self.database["job_results"]
+        self.requests = self.database["job_requests"]
 
     async def initialize(self, retention_seconds: int) -> None:
         await asyncio.to_thread(self._initialize_sync)
@@ -37,7 +39,7 @@ class MongoJobRepository:
         job: StoredJob,
         request: CreateJobRequest,
     ) -> None:
-        await asyncio.to_thread(self._create_job_sync, job)
+        await asyncio.to_thread(self._create_job_sync, job, request)
 
     async def get_job(self, job_id: str) -> StoredJob | None:
         document = await asyncio.to_thread(
@@ -90,11 +92,45 @@ class MongoJobRepository:
     async def recover_interrupted(self, retention_seconds: int) -> None:
         await asyncio.to_thread(self._recover_interrupted_sync, retention_seconds)
 
+    async def get_completed_items(self, job_id: str) -> list[tuple[str, str]]:
+        documents = await asyncio.to_thread(lambda: list(self.results.find(
+            {"job_id": job_id}, {"_id": 0, "item_id": 1, "status": 1},
+        )))
+        return [(document["item_id"], document["status"]) for document in documents]
+
+    async def get_request(self, job_id: str) -> CreateJobRequest | None:
+        return await asyncio.to_thread(self._get_request_sync, job_id)
+
+    def _get_request_sync(self, job_id: str) -> CreateJobRequest | None:
+        job = self.jobs.find_one(self._active_filter({"_id": job_id}))
+        if job is None:
+            return None
+        documents = list(self.requests.find({"job_id": job_id}).sort("sequence", ASCENDING))
+        if len(documents) != job["progress"]["total"]:
+            # Older jobs did not persist their input. Never invent missing URLs.
+            return None
+        return CreateJobRequest.model_validate({
+            "items": [document["item"] for document in documents],
+            "webhook_url": job.get("webhook_url"),
+        })
+
+    async def get_interrupted_jobs(self) -> list[StoredJob]:
+        documents = await asyncio.to_thread(lambda: list(self.jobs.find(self._active_filter({
+            "status": "failed", "error": {"$in": list(INTERRUPTED_ERRORS)},
+            "cancel_requested": {"$ne": True},
+        }))))
+        return [self._document_to_job(document) for document in documents]
+
     async def close(self) -> None:
         await asyncio.to_thread(self.client.close)
 
     def _initialize_sync(self) -> None:
         self.client.admin.command("ping")
+        self.requests.create_index(
+            [("job_id", ASCENDING), ("sequence", ASCENDING)], unique=True,
+            name="uq_job_request_sequence",
+        )
+        self.requests.create_index("expires_at", expireAfterSeconds=0, name="ttl_job_requests")
         self.jobs.create_index(
             [("idempotency_key", ASCENDING)],
             name="uq_jobs_idempotency_key",
@@ -121,7 +157,7 @@ class MongoJobRepository:
             expireAfterSeconds=0,
         )
 
-    def _create_job_sync(self, job: StoredJob) -> None:
+    def _create_job_sync(self, job: StoredJob, request: CreateJobRequest) -> None:
         if job.idempotency_key:
             expired = list(
                 self.jobs.find(
@@ -135,19 +171,34 @@ class MongoJobRepository:
             if expired:
                 expired_ids = [document["_id"] for document in expired]
                 self.results.delete_many({"job_id": {"$in": expired_ids}})
+                self.requests.delete_many({"job_id": {"$in": expired_ids}})
                 self.jobs.delete_many({"_id": {"$in": expired_ids}})
+        # Store each input separately so a 5000-item request cannot exceed
+        # MongoDB's document limit. An interrupted insert expires on its own.
+        orphan_expiry = datetime.now(timezone.utc) + timedelta(days=1)
         try:
+            self.requests.insert_many([
+                {"_id": f"{job.job_id}:{index}", "job_id": job.job_id,
+                 "sequence": index, "item": item.model_dump(mode="json"),
+                 "expires_at": orphan_expiry}
+                for index, item in enumerate(request.items)
+            ])
             self.jobs.insert_one(self._job_document(job))
         except DuplicateKeyError as exc:
+            self.requests.delete_many({"job_id": job.job_id})
             if job.idempotency_key:
                 raise DuplicateIdempotencyKeyError(job.idempotency_key) from exc
             raise
+        self.requests.update_many({"job_id": job.job_id}, {"$set": {"expires_at": None}})
 
     def _update_job_sync(self, job: StoredJob) -> None:
         document = self._job_document(job)
         document.pop("_id")
         self.jobs.update_one({"_id": job.job_id}, {"$set": document})
-        if job.expires_at is not None:
+        if job.expires_at is not None or job.status == "queued":
+            self.requests.update_many(
+                {"job_id": job.job_id}, {"$set": {"expires_at": job.expires_at}},
+            )
             self.results.update_many(
                 {"job_id": job.job_id},
                 {"$set": {"expires_at": job.expires_at}},
@@ -197,6 +248,9 @@ class MongoJobRepository:
             self.results.update_many(
                 {"job_id": job_id},
                 {"$set": {"expires_at": expires_at}},
+            )
+            self.requests.update_many(
+                {"job_id": job_id}, {"$set": {"expires_at": expires_at}},
             )
 
     @staticmethod

@@ -20,6 +20,20 @@ from app.services.job_service import BatchJobManager, IdempotencyConflictError
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
 
+def job_collector(service: EngagementService):
+    async def collect_item(item: JobItemRequest) -> JobItemResponse:
+        collect_request = CollectItemRequest.model_validate(
+            item.model_dump(exclude={"item_id"})
+        )
+        result = await _collect_item(service, collect_request)
+        return JobItemResponse(
+            item_id=item.item_id,
+            **result.model_dump(),
+        )
+
+    return collect_item
+
+
 @router.post(
     "",
     response_model=JobSubmitResponse,
@@ -36,25 +50,12 @@ async def create_job(
     service: EngagementService = Depends(get_engagement_service),
     manager: BatchJobManager = Depends(get_job_manager),
 ) -> JobSubmitResponse:
-    async def collect_item(item: JobItemRequest) -> JobItemResponse:
-        collect_request = CollectItemRequest.model_validate(
-            item.model_dump(exclude={"item_id"})
-        )
-        result = await _collect_item(service, collect_request)
-        return JobItemResponse(
-            item_id=item.item_id,
-            **result.model_dump(),
-        )
-
-    async def wait_for_platform(item: JobItemRequest) -> None:
-        await service.wait_for_platform_ready(item.media_name)
-
     try:
         return await manager.submit(
             request,
-            collector=collect_item,
+            collector=job_collector(service),
             proxy_usage_scope=service.proxy_usage_scope,
-            before_collect=wait_for_platform,
+            collection_scope=lambda item: service.collection_slot(item.media_name),
             idempotency_key=idempotency_key,
         )
     except IdempotencyConflictError as exc:
@@ -96,6 +97,25 @@ async def get_job_results(
         result = await manager.get_results(job_id, cursor=cursor, limit=limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="任务不存在或结果已过期")
+    return result
+
+
+@router.post("/{job_id}/resume", response_model=JobSubmitResponse, status_code=202)
+async def resume_job(
+    job_id: str,
+    service: EngagementService = Depends(get_engagement_service),
+    manager: BatchJobManager = Depends(get_job_manager),
+) -> JobSubmitResponse:
+    try:
+        result = await manager.resume(
+            job_id, collector=job_collector(service),
+            proxy_usage_scope=service.proxy_usage_scope,
+            collection_scope=lambda item: service.collection_slot(item.media_name),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="任务不存在或结果已过期")
     return result

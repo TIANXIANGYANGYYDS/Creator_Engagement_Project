@@ -333,3 +333,39 @@ def test_transport_error_discards_proxy_and_retries_once() -> None:
     assert [call["proxy"] for call in session.calls] == [first["https"], second["https"]]
     assert provider.failures[0][0] == first
     assert provider.successes == [second]
+
+
+def test_transport_failure_log_retains_error_code_without_secrets(caplog) -> None:
+    class DiagnosticTimeout(Exception):
+        code = 28
+    async def scenario():
+        client = CurlAsyncHttpClient(timeout_seconds=20, headers={}, session=FakeSession(
+            error=DiagnosticTimeout("https://user:proxy-secret@proxy.example/?token=query-secret")))
+        try:
+            with pytest.raises(DiagnosticTimeout):
+                await client.get("https://www.douyin.com/detail?token=signature-secret", headers={"Cookie": "cookie-secret"})
+        finally:
+            await client.aclose()
+    asyncio.run(scenario())
+    assert "code=28" in caplog.text
+    assert "endpoint=www.douyin.com/detail" in caplog.text
+    assert "secret" not in caplog.text
+
+
+def test_connection_deadline_is_separate_from_total_timeout(monkeypatch) -> None:
+    from curl_cffi import CurlOpt
+    from app.crawlers import http_client
+    settings = []
+    def session_factory(**kwargs):
+        settings.append(kwargs)
+        return FakeSession()
+    monkeypatch.setattr(http_client.curl_requests, "AsyncSession", session_factory)
+    async def scenario():
+        client = CurlAsyncHttpClient(timeout_seconds=20, connect_timeout_seconds=5, headers={})
+        async with client.isolated_session_scope():
+            pass
+        await client.aclose()
+    asyncio.run(scenario())
+    assert len(settings) == 2
+    assert all(s["timeout"] == 20 for s in settings)
+    assert all(s["curl_options"][CurlOpt.CONNECTTIMEOUT_MS] == 5000 for s in settings)

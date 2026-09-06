@@ -706,40 +706,45 @@ class AsyncDailiProxyPool(DailiProxyProvider):
                     await self._condition.wait()
                     continue
 
-            endpoints = await self._fetch_proxy_endpoints_async(fetch_count)
-            async with self._condition:
-                existing = {
-                    (slot.endpoint.host, slot.endpoint.port) for slot in self._slots
-                }
-                added = 0
-                for endpoint in endpoints:
-                    identity = (endpoint.host, endpoint.port)
-                    if identity in existing:
-                        continue
-                    existing.add(identity)
-                    self._slots.append(
-                        _ProxyPoolSlot(
-                            endpoint=endpoint,
-                            proxies=self._build_proxies_from_endpoint(endpoint),
-                            expire_at=self._slot_expire_at(),
+            try:
+                endpoints = await self._fetch_proxy_endpoints_async(fetch_count)
+                async with self._condition:
+                    existing = {
+                        (slot.endpoint.host, slot.endpoint.port) for slot in self._slots
+                    }
+                    added = 0
+                    for endpoint in endpoints:
+                        identity = (endpoint.host, endpoint.port)
+                        if identity in existing:
+                            continue
+                        existing.add(identity)
+                        self._slots.append(
+                            _ProxyPoolSlot(
+                                endpoint=endpoint,
+                                proxies=self._build_proxies_from_endpoint(endpoint),
+                                expire_at=self._slot_expire_at(),
+                            )
                         )
-                    )
-                    added += 1
-                    self.stats.added_endpoint_count += 1
-                self._fetching = False
-                usage = self._usage.get()
-                if usage is not None:
-                    usage.added_endpoint_count += added
-                self._condition.notify_all()
-                if added:
-                    logger.info(
-                        "proxy_pool_filled requested=%s added=%s active=%s",
-                        fetch_count,
-                        added,
-                        sum(not slot.draining for slot in self._slots),
-                    )
-                elif self._select_available_slot() is None:
-                    return None
+                        added += 1
+                        self.stats.added_endpoint_count += 1
+                    usage = self._usage.get()
+                    if usage is not None:
+                        usage.added_endpoint_count += added
+                    if added:
+                        logger.info(
+                            "proxy_pool_filled requested=%s added=%s active=%s",
+                            fetch_count,
+                            added,
+                            sum(not slot.draining for slot in self._slots),
+                        )
+                    elif self._select_available_slot() is None:
+                        return None
+            finally:
+                # A timed-out borrower must not leave the pool permanently
+                # believing that another task is replenishing it.
+                async with self._condition:
+                    self._fetching = False
+                    self._condition.notify_all()
 
     def _find_slot(self, proxies: Dict[str, str]) -> Optional[_ProxyPoolSlot]:
         """按完整 requests 代理映射查找对应池槽位，找不到时返回 ``None``。"""

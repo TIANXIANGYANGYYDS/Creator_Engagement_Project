@@ -27,6 +27,8 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.job_item_max_concurrency == 16
     assert settings.job_item_timeout_seconds == 90
     assert settings.job_timeout_seconds == 1800
+    assert settings.job_timeout_batch_size == 500
+    assert settings.request_connect_timeout_seconds == 5
     assert settings.job_result_ttl_seconds == 86400
     assert settings.job_store_backend == "mongodb"
     assert settings.job_db_path == ".local/jobs/jobs.sqlite3"
@@ -39,7 +41,7 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.protocol_max_attempts == 3
     assert settings.protocol_retry_base_seconds == 1
     assert settings.toutiao_protocol_max_attempts == 1
-    assert settings.douyin_protocol_max_attempts == 3
+    assert settings.douyin_protocol_max_attempts == 8
     assert settings.engagement_cache_ttl_seconds == 120
     assert settings.engagement_failure_cache_ttl_seconds == 15
     assert settings.engagement_cache_max_entries == 1000

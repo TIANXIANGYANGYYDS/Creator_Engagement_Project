@@ -6,11 +6,17 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import inspect
+import logging
+from time import monotonic
+from urllib.parse import urlsplit
 from typing import Any, AsyncIterator, Callable, Literal, Protocol, runtime_checkable
 
-from curl_cffi import requests as curl_requests
+from curl_cffi import CurlOpt, requests as curl_requests
 
 from app.crawlers.proxy_provider import AsyncProxyProvider, ProxyUnavailableError
+
+
+logger = logging.getLogger(__name__)
 
 
 class PlatformCrawlerError(RuntimeError):
@@ -60,6 +66,7 @@ class CurlAsyncHttpClient:
         self,
         *,
         timeout_seconds: float,
+        connect_timeout_seconds: float = 5,
         headers: dict[str, str],
         proxy_provider: AsyncProxyProvider | None = None,
         proxy_mode: Literal["direct", "prefer", "required"] | str = "direct",
@@ -68,12 +75,19 @@ class CurlAsyncHttpClient:
     ) -> None:
         if proxy_mode not in {"direct", "prefer", "required"}:
             raise ValueError("proxy_mode must be direct, prefer or required")
-        default_session_factory = lambda: curl_requests.AsyncSession(
-            impersonate="chrome124",
-            timeout=timeout_seconds,
-            allow_redirects=True,
-            headers=headers,
-        )
+        def default_session_factory():
+            return curl_requests.AsyncSession(
+                impersonate="chrome124",
+                timeout=timeout_seconds,
+                curl_options={
+                    CurlOpt.CONNECTTIMEOUT_MS: max(
+                        1, round(min(connect_timeout_seconds, timeout_seconds) * 1000),
+                    ),
+                },
+                allow_redirects=True,
+                headers=headers,
+            )
+
         self._session_factory = session_factory or (
             default_session_factory if session is None else None
         )
@@ -230,6 +244,9 @@ class CurlAsyncHttpClient:
                         error,
                     )
                 raise error
+            started = monotonic()
+            target = urlsplit(url)
+            endpoint = f"{target.hostname}{target.path}"
             try:
                 session = self._isolated_session.get() or self._session
                 request = getattr(session, "request", None)
@@ -262,6 +279,15 @@ class CurlAsyncHttpClient:
                         proxy=proxy_url,
                     )
             except Exception as exc:
+                # Exception messages and URLs can contain proxy credentials or
+                # signed query parameters; log only bounded diagnostic fields.
+                code = getattr(exc, "code", None)
+                logger.warning(
+                    "transport_failure method=%s endpoint=%s error_type=%s code=%s elapsed_ms=%s",
+                    method, endpoint, type(exc).__name__,
+                    code if isinstance(code, int) else None,
+                    round((monotonic() - started) * 1000),
+                )
                 last_error = exc
                 if lease_state is not None:
                     lease_state.failed = True
@@ -271,6 +297,11 @@ class CurlAsyncHttpClient:
                     continue
                 raise
             status = int(getattr(response, "status_code", 0))
+            if status >= 400:
+                logger.warning(
+                    "transport_rejected method=%s endpoint=%s status=%s elapsed_ms=%s",
+                    method, endpoint, status, round((monotonic() - started) * 1000),
+                )
             if status in {403, 407, 412, 418, 429, 432, 471} or status >= 500:
                 if lease_state is not None:
                     lease_state.failed = True

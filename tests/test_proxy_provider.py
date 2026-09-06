@@ -92,3 +92,34 @@ def test_async_pool_limits_concurrency_and_refills_failed_slot(monkeypatch) -> N
             await provider.close()
 
     asyncio.run(run())
+
+
+def test_cancelled_pool_refill_releases_waiters(monkeypatch) -> None:
+    async def scenario():
+        provider = AsyncDailiProxyPool(minutes=3, pool_size=1, api_url="https://proxy.example/getip")
+        entered = asyncio.Event()
+        calls = 0
+        async def fetch(count):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await asyncio.Event().wait()
+            return [ProxyEndpoint("127.0.0.1", 9000)]
+        monkeypatch.setattr(provider, "_fetch_proxy_endpoints_async", fetch)
+        first = asyncio.create_task(provider.get_requests_proxies())
+        await entered.wait()
+        second = asyncio.create_task(provider.get_requests_proxies())
+        await asyncio.sleep(0)
+        first.cancel()
+        try:
+            await asyncio.gather(first, return_exceptions=True)
+            lease = await asyncio.wait_for(second, 0.5)
+            assert lease["https"] == "http://127.0.0.1:9000"
+            assert calls == 2
+            await provider.on_success_for(lease)
+        finally:
+            second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
+            await provider.close()
+    asyncio.run(scenario())

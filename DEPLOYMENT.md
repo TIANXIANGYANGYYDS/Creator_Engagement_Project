@@ -20,9 +20,22 @@ MONGO_DB_NAME=creator_engagement
 JOB_RESULT_TTL_SECONDS=86400
 JOB_MAX_ITEMS=5000
 JOB_RESULT_MAX_BYTES=8388608
+JOB_TIMEOUT_SECONDS=1800
+JOB_TIMEOUT_BATCH_SIZE=500
+REQUEST_CONNECT_TIMEOUT_SECONDS=5
+DOUYIN_PROTOCOL_MAX_ATTEMPTS=8
 ```
 
-Mongo 用户只需对 `creator_engagement` 库具有 `readWrite` 权限。首次迁移前先停止新任务并执行：
+Mongo 用户只需对 `creator_engagement` 库具有 `readWrite` 权限。升级后会自动创建
+`job_requests` 的分页和 TTL 索引。服务启动自动续跑关闭/重启中断的任务；主动取消和整批超时
+任务通过 `POST /api/v1/jobs/{job_id}/resume` 显式续跑。旧 MongoDB 任务没有保存原始输入，
+不能恢复缺失条目，需由调用方提供原请求重新提交。
+
+单条 90 秒预算不再包含等待采集槽位；整批时限按每 500 条分配 1800 秒（向上取整），最大
+24 小时。默认连接建立上限 5 秒，整个 HTTP 请求仍为 20 秒；抖音最多尝试 8 次，每次失败后
+更换代理和访客会话。保留 1 个 Uvicorn worker，避免多个进程同时恢复同一任务。
+
+首次迁移前先停止新任务并执行：
 
 ```bash
 conda run -n MyAgent python -m app.manually_execute_script.migrate_jobs_to_mongo
@@ -56,6 +69,9 @@ Uvicorn 建议只启动 1 个 worker；每增加一个 worker 都会复制浏览
 - `direct`：本机直连；
 - `prefer`：有 51 代理配置时使用代理池，否则直连；
 - `required`：必须取得代理，获取失败直接报错。
+
+应用诊断日志写入 `.local/logs/api.log`，每个文件 10 MiB，保留 3 个轮转备份。
+日志记录请求阶段、异常类型、curl 错误码、耗时和批次完成计数，不记录签名查询参数或 Cookie。
 
 ## API
 

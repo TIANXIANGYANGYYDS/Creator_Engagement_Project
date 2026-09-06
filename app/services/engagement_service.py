@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic
@@ -83,6 +84,9 @@ class EngagementService:
         self.crawler = crawler
         self.proxy_provider = proxy_provider
         self._collection_semaphore = asyncio.Semaphore(collection_max_concurrency)
+        self._reserved_platform: ContextVar[str | None] = ContextVar(
+            "reserved_collection_platform", default=None,
+        )
         self._cache_ttl_seconds = cache_ttl_seconds
         self._failure_cache_ttl_seconds = failure_cache_ttl_seconds
         self._cache_max_entries = cache_max_entries
@@ -91,8 +95,8 @@ class EngagementService:
         self._result_cache: OrderedDict[
             CacheKey, tuple[float, int, CachedResult]
         ] = OrderedDict()
-        self._result_tasks: dict[CacheKey, asyncio.Task[CachedResult]] = {}
-        self._result_waiters: dict[CacheKey, int] = {}
+        self._result_tasks: dict[tuple[CacheKey, bool], asyncio.Task[CachedResult]] = {}
+        self._result_waiters: dict[tuple[CacheKey, bool], int] = {}
         self._cache_lock = asyncio.Lock()
         policies = platform_policies or {}
         for policy in policies.values():
@@ -201,6 +205,7 @@ class EngagementService:
             )
         crawler = EngagementCrawler(
             timeout_seconds=settings.request_timeout_seconds,
+            connect_timeout_seconds=settings.request_connect_timeout_seconds,
             cookies=(
                 ""
                 if strict_anonymous
@@ -317,6 +322,22 @@ class EngagementService:
         platform = normalize_media_name(media_name)
         await self.crawler._wait_for_circuit_cooldown(platform)
 
+    @asynccontextmanager
+    async def collection_slot(self, media_name: str) -> AsyncIterator[None]:
+        """Reserve capacity before a batch item's execution deadline starts."""
+        platform = normalize_media_name(media_name)
+        await self.wait_for_platform_ready(media_name)
+        async with AsyncExitStack() as stack:
+            semaphore = self._platform_semaphores.get(platform)
+            if semaphore is not None:
+                await stack.enter_async_context(semaphore)
+            await stack.enter_async_context(self._collection_semaphore)
+            token = self._reserved_platform.set(platform)
+            try:
+                yield
+            finally:
+                self._reserved_platform.reset(token)
+
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
         platform = normalize_media_name(media_name)
 
@@ -359,6 +380,9 @@ class EngagementService:
         key: CacheKey,
         collect: Callable[[], Awaitable[CachedResult]],
     ) -> CachedResult:
+        # A reserved caller must not join a task still waiting for its slot.
+        # Finished results remain shared between synchronous and batch callers.
+        task_key = (key, self._reserved_platform.get() == key[1])
         now = monotonic()
         async with self._cache_lock:
             while self._result_cache:
@@ -373,48 +397,48 @@ class EngagementService:
             if cached is not None and cached[0] > now:
                 self._result_cache.move_to_end(key)
                 return cached[2].model_copy(deep=True)
-            task = self._result_tasks.get(key)
+            task = self._result_tasks.get(task_key)
             if task is None:
                 task = asyncio.create_task(
                     self._collect_cached(key[0], key[1], collect)
                 )
-                self._result_tasks[key] = task
-            self._result_waiters[key] = self._result_waiters.get(key, 0) + 1
+                self._result_tasks[task_key] = task
+            self._result_waiters[task_key] = self._result_waiters.get(task_key, 0) + 1
         try:
             result = await asyncio.shield(task)
         except asyncio.CancelledError:
             cancel_task = False
             async with self._cache_lock:
-                remaining = self._result_waiters.get(key, 1) - 1
+                remaining = self._result_waiters.get(task_key, 1) - 1
                 if remaining <= 0:
-                    self._result_waiters.pop(key, None)
-                    if self._result_tasks.get(key) is task:
-                        self._result_tasks.pop(key, None)
+                    self._result_waiters.pop(task_key, None)
+                    if self._result_tasks.get(task_key) is task:
+                        self._result_tasks.pop(task_key, None)
                         cancel_task = not task.done()
                 else:
-                    self._result_waiters[key] = remaining
+                    self._result_waiters[task_key] = remaining
             if cancel_task:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             raise
         except Exception:
             async with self._cache_lock:
-                remaining = self._result_waiters.get(key, 1) - 1
+                remaining = self._result_waiters.get(task_key, 1) - 1
                 if remaining <= 0:
-                    self._result_waiters.pop(key, None)
+                    self._result_waiters.pop(task_key, None)
                 else:
-                    self._result_waiters[key] = remaining
-                if self._result_tasks.get(key) is task:
-                    self._result_tasks.pop(key, None)
+                    self._result_waiters[task_key] = remaining
+                if self._result_tasks.get(task_key) is task:
+                    self._result_tasks.pop(task_key, None)
             raise
         async with self._cache_lock:
-            remaining = self._result_waiters.get(key, 1) - 1
+            remaining = self._result_waiters.get(task_key, 1) - 1
             if remaining <= 0:
-                self._result_waiters.pop(key, None)
+                self._result_waiters.pop(task_key, None)
             else:
-                self._result_waiters[key] = remaining
-            if self._result_tasks.get(key) is task:
-                self._result_tasks.pop(key, None)
+                self._result_waiters[task_key] = remaining
+            if self._result_tasks.get(task_key) is task:
+                self._result_tasks.pop(task_key, None)
             cache_ttl = self._cache_ttl_for_result(result)
             if cache_ttl > 0:
                 size_bytes = len(result.model_dump_json().encode("utf-8"))
@@ -442,6 +466,11 @@ class EngagementService:
         platform: str,
         collect: Callable[[], Awaitable[CachedResult]],
     ) -> CachedResult:
+        if self._reserved_platform.get() == platform:
+            limiter = self._platform_rate_limiters.get((platform, operation))
+            if limiter is not None:
+                await limiter.acquire()
+            return await collect()
         platform_semaphore = self._platform_semaphores.get(platform)
         if platform_semaphore is None:
             async with self._collection_semaphore:
