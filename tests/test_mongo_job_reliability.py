@@ -153,3 +153,37 @@ def test_mongo_resume_clears_expiry_on_results_and_inputs(repository):
         assert await repository.get_request(job.job_id) is None
 
     asyncio.run(scenario())
+
+
+def test_mongo_accepts_and_completes_5925_item_job(repository):
+    async def scenario():
+        request = CreateJobRequest(items=[
+            {'item_id': str(index), 'url': f'https://www.toutiao.com/article/{index}/',
+             'media_name': 'toutiao', 'type': 'interactions'}
+            for index in range(5925)
+        ])
+        manager = BatchJobManager(repository=repository)
+
+        async def collector(item):
+            return successful(item)
+
+        try:
+            submitted = await manager.submit(request, collector=collector, proxy_usage_scope=no_cost)
+            restored = await repository.get_request(submitted.job_id)
+            assert restored == request
+            await asyncio.wait_for(asyncio.gather(*manager._tasks.values()), 60)
+            status = await manager.get_status(submitted.job_id)
+            assert status.status == 'completed'
+            assert status.progress.success == status.progress.completed == 5925
+            seen = []
+            cursor = None
+            for page in range(12):
+                result = await manager.get_results(submitted.job_id, cursor=cursor, limit=500)
+                seen.extend(item.item_id for item in result.data)
+                cursor = result.next_cursor
+                assert bool(cursor) == (page < 11)
+            assert len(seen) == len(set(seen)) == 5925
+        finally:
+            # The fixture owns the database connection and removes test collections.
+            await manager._webhook_client.aclose()
+    asyncio.run(scenario())

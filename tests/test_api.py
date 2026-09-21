@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
@@ -145,6 +146,46 @@ def test_health_interactions_and_comments_routes(monkeypatch) -> None:
     assert service.comment_calls == [(2, None), (1, None), (2, "cursor-2")]
 
 
+def test_sina_weibo_alias_uses_existing_interaction_and_comment_service() -> None:
+    app = create_app()
+    service = FakeService()
+    url = "https://m.weibo.cn/detail/12345678"
+    service.fetch_interactions = AsyncMock(return_value=InteractionResult(
+        platform="weibo", canonical_url=url, work_id="12345678",
+        coverage="complete", stats={"likes": 3, "comments": 1, "reposts": 2},
+    ))
+    service.fetch_comments = AsyncMock(return_value=CommentPageResult(
+        platform="weibo", canonical_url=url, work_id="12345678",
+        coverage="complete", page=1,
+        comments=[EngagementComment(comment_id="c1", text="公开评论")],
+        total_comments=1,
+    ))
+    app.dependency_overrides[get_engagement_service] = lambda: service
+
+    with TestClient(app) as client:
+        interactions = client.get("/api/v1/interactions", params={
+            "url": url, "media_name": "新浪微博",
+        })
+        comments = client.get("/api/v1/comments", params={
+            "url": url, "media_name": "新浪微博", "page": 1,
+        })
+        batch = client.post("/api/v1/collect", json={"items": [
+            {"url": url, "media_name": "新浪微博", "type": "interactions"},
+            {"url": url, "media_name": "新浪微博", "type": "comments", "page": 1},
+        ]})
+
+    assert interactions.status_code == comments.status_code == batch.status_code == 200
+    assert interactions.json()["media_name"] == comments.json()["media_name"] == "微博"
+    assert interactions.json()["data"]["likes"] == 3
+    assert comments.json()["comments"][0]["comment_id"] == "c1"
+    assert [(item["media_name"], item["status"]) for item in batch.json()["data"]] == [
+        ("微博", "success"), ("微博", "success"),
+    ]
+    assert service.fetch_interactions.await_count == service.fetch_comments.await_count == 2
+    assert all(call.args[1] == "微博" for call in service.fetch_interactions.await_args_list)
+    assert all(call.args[1] == "微博" for call in service.fetch_comments.await_args_list)
+
+
 def test_api_rejects_invalid_page_and_media_mismatch() -> None:
     app = create_app()
     app.dependency_overrides[get_engagement_service] = lambda: FakeService()
@@ -222,7 +263,10 @@ def test_collect_returns_uniform_results_chinese_media_and_batch_cost() -> None:
     assert service.comment_calls == [(1, None), (2, "cursor-2")]
 
 
-def test_collect_has_no_item_count_limit_and_isolates_item_failures() -> None:
+def test_collect_respects_configured_limit_and_isolates_item_failures(monkeypatch) -> None:
+    from app.api.routers import engagement
+
+    monkeypatch.setattr(engagement, "get_settings", lambda: SimpleNamespace(api_sync_max_items=200))
     app = create_app()
     service = FakeService()
     app.dependency_overrides[get_engagement_service] = lambda: service

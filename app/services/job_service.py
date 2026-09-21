@@ -60,7 +60,7 @@ class BatchJobManager:
         item_timeout_seconds: float = 90,
         job_timeout_seconds: float = 1800,
         timeout_batch_size: int = 500,
-        max_items: int = 5_000,
+        max_items: int = 0,
         result_max_bytes: int = 8 * 1024 * 1024,
         webhook_allowed_hosts: set[str] | None = None,
         webhook_timeout_seconds: float = 10,
@@ -75,8 +75,8 @@ class BatchJobManager:
             raise ValueError("item_timeout_seconds must not be negative")
         if job_timeout_seconds < 0:
             raise ValueError("job_timeout_seconds must not be negative")
-        if max_items <= 0:
-            raise ValueError("max_items must be greater than zero")
+        if max_items < 0:
+            raise ValueError("max_items must not be negative")
         if result_max_bytes <= 0:
             raise ValueError("result_max_bytes must be greater than zero")
         if repository is not None and db_path is not None:
@@ -534,7 +534,7 @@ class BatchJobManager:
         await self.repository.update_job(stored)
 
     def _validate_request(self, request: CreateJobRequest) -> None:
-        if len(request.items) > self.max_items:
+        if self.max_items and len(request.items) > self.max_items:
             raise ValueError(f"单个异步任务最多允许 {self.max_items} 个采集项")
         item_ids = [item.item_id for item in request.items]
         if len(set(item_ids)) != len(item_ids):

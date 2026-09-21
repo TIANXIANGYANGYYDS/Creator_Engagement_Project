@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.models.engagement import EngagementPlatform
 
@@ -20,6 +22,36 @@ class PlatformSessionStore:
 
     def state_path(self, platform: EngagementPlatform) -> Path:
         return self.root / f"{platform}.json"
+
+    def scoped_state(self, platform: EngagementPlatform, domains: tuple[str, ...]) -> dict:
+        """Read fresh state, preserving cookie scope and excluding expired tokens."""
+        try:
+            state = json.loads(self.state_path(platform).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"cookies": [], "origins": []}
+        if not isinstance(state, dict):
+            return {"cookies": [], "origins": []}
+
+        def allowed(host):
+            return any(host == domain or host.endswith("." + domain) for domain in domains)
+
+        cookies = []
+        for cookie in state.get("cookies", []):
+            if not isinstance(cookie, dict) or not cookie.get("name") or not cookie.get("value"):
+                continue
+            domain = str(cookie.get("domain") or "").lstrip(".").lower()
+            expires = cookie.get("expires", -1)
+            if not isinstance(expires, (int, float)) or (expires > 0 and expires <= time.time()):
+                continue
+            if allowed(domain):
+                cookies.append(cookie)
+        origins = [
+            item for item in state.get("origins", [])
+            if isinstance(item, dict)
+            and urlsplit(str(item.get("origin") or "")).scheme == "https"
+            and allowed(urlsplit(str(item.get("origin") or "")).hostname or "")
+        ]
+        return {"cookies": cookies, "origins": origins}
 
     def cookie_header(self, platform: EngagementPlatform) -> str:
         path = self.state_path(platform)

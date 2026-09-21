@@ -7,6 +7,8 @@ import pytest
 
 from app.crawlers.http_client import CurlAsyncHttpClient
 from app.crawlers.proxy_provider import ProxyUnavailableError
+from curl_cffi import CurlInfo, CurlOpt, requests as curl_requests
+from curl_cffi.requests.exceptions import ProxyError
 
 
 class FakeResponse:
@@ -369,3 +371,165 @@ def test_connection_deadline_is_separate_from_total_timeout(monkeypatch) -> None
     assert len(settings) == 2
     assert all(s["timeout"] == 20 for s in settings)
     assert all(s["curl_options"][CurlOpt.CONNECTTIMEOUT_MS] == 5000 for s in settings)
+
+
+def proxy_rejection(status=403):
+    response = FakeResponse()
+    response.infos = {CurlInfo.HTTP_CONNECTCODE: status}
+    return ProxyError("CONNECT failed", code=56, response=response)
+
+
+class RoutedSession(FakeSession):
+    def __init__(self, outcome=None):
+        super().__init__()
+        self.outcome = outcome or FakeResponse()
+        self.curl_options = {}
+        self.cookies = curl_requests.Cookies()
+        self.headers = curl_requests.Headers()
+
+    async def request(self, method, url, **options):
+        self.calls.append({"method": method, "url": url, **options})
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        self.cookies.set("response_cookie", "new", domain="edith.xiaohongshu.com")
+        return self.outcome
+
+
+@pytest.mark.parametrize("host", ["edith.xiaohongshu.com", "res.wx.qq.com", "webapi.rednote.com"])
+def test_xhs_connect_recovery_keeps_proxy_tls_target_and_cookie_flow(monkeypatch, host):
+    async def run():
+        proxy = {"https": "http://127.0.0.1:8080"}
+        provider = CountingProxyProvider(proxy)
+        original = RoutedSession(proxy_rejection())
+        original.cookies.set("session_cookie", "existing", domain="edith.xiaohongshu.com")
+        original.headers["User-Agent"] = "test-agent"
+        fallback = RoutedSession()
+        client = CurlAsyncHttpClient(timeout_seconds=5, headers={}, proxy_provider=provider,
+                                     proxy_mode="required", session=original,
+                                     session_factory=lambda: fallback)
+        async def resolve(*args, **kwargs):
+            return [(2, 1, 6, "", ("1.1.1.1", 443))]
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+        try:
+            async with client.lease_scope():
+                result = await client.post(f"https://{host}/api/test",
+                                           headers={"X-S": "signature"}, data="body")
+            assert result.status_code == 200
+            assert provider.acquisitions == 1 and provider.successes == [proxy]
+            assert provider.failures == []
+            assert original.calls == fallback.calls
+            assert fallback.calls[0]["proxy"] == proxy["https"]
+            assert "verify" not in fallback.calls[0]
+            assert fallback.headers["User-Agent"] == "test-agent"
+            assert fallback.cookies.get("session_cookie") == "existing"
+            assert original.cookies.get("response_cookie") == "new"
+            assert fallback.closed
+            assert CurlOpt.CONNECT_TO not in original.curl_options
+        finally:
+            await client.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("url,status", [
+    ("https://other.example/api", 403),
+    ("http://edith.xiaohongshu.com/api", 403),
+    ("https://edith.xiaohongshu.com:444/api", 403),
+    ("https://edith.xiaohongshu.com/api", 407),
+    ("https://edith.xiaohongshu.com/api", 0),
+])
+def test_connect_recovery_does_not_apply_to_other_failures(url, status):
+    async def run():
+        original = RoutedSession(proxy_rejection(status))
+        def forbidden_factory():
+            pytest.fail("unexpected resolved retry")
+        client = CurlAsyncHttpClient(timeout_seconds=5, headers={}, session=original,
+                                    proxy_provider=FakeProxyProvider({"https": "http://proxy:80"}),
+                                    proxy_mode="required", session_factory=forbidden_factory)
+        try:
+            async with client.lease_scope():
+                with pytest.raises(ProxyError):
+                    await client.get(url)
+        finally:
+            await client.aclose()
+    asyncio.run(run())
+
+
+def test_origin_403_is_not_replayed():
+    async def run():
+        original = RoutedSession(FakeResponse(403))
+        def forbidden_factory():
+            pytest.fail("origin request was replayed")
+        client = CurlAsyncHttpClient(timeout_seconds=5, headers={}, session=original,
+                                    session_factory=forbidden_factory)
+        try:
+            assert (await client.post("https://edith.xiaohongshu.com/api", data="body")).status_code == 403
+            assert len(original.calls) == 1
+        finally:
+            await client.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("resolved", ["127.0.0.1", "10.1.2.3", None])
+def test_connect_recovery_rejects_private_dns_and_dns_failure(monkeypatch, resolved):
+    async def run():
+        async def resolve(*args, **kwargs):
+            if resolved is None:
+                raise TimeoutError()
+            return [(2, 1, 6, "", (resolved, 443))]
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+        original = RoutedSession(proxy_rejection())
+        def forbidden_factory():
+            pytest.fail("unsafe or unresolved destination")
+        client = CurlAsyncHttpClient(timeout_seconds=5, headers={}, session=original,
+                                    proxy_provider=FakeProxyProvider({"https": "http://proxy:80"}),
+                                    proxy_mode="required", session_factory=forbidden_factory)
+        try:
+            async with client.lease_scope():
+                with pytest.raises(ProxyError):
+                    await client.get("https://edith.xiaohongshu.com/api")
+        finally:
+            await client.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_resolved_retry_closes_session_on_error_or_cancellation(monkeypatch, cancelled):
+    async def run():
+        async def resolve(*args, **kwargs):
+            return [(2, 1, 6, "", ("1.1.1.1", 443))]
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+        original = RoutedSession(proxy_rejection())
+        failure = asyncio.CancelledError() if cancelled else ConnectionError("failed")
+        fallback = RoutedSession(failure)
+        client = CurlAsyncHttpClient(timeout_seconds=5, headers={}, session=original,
+                                    session_factory=lambda: fallback,
+                                    proxy_provider=FakeProxyProvider({"https": "http://proxy:80"}),
+                                    proxy_mode="required")
+        try:
+            async with client.lease_scope():
+                with pytest.raises(type(failure)):
+                    await client.get("https://edith.xiaohongshu.com/api")
+            assert fallback.closed
+            assert CurlOpt.CONNECT_TO not in original.curl_options
+        finally:
+            await client.aclose()
+    asyncio.run(run())
+
+
+def test_resolved_retry_honors_discard_cookies(monkeypatch):
+    async def run():
+        async def resolve(*args, **kwargs):
+            return [(2, 1, 6, "", ("1.1.1.1", 443))]
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+        original, fallback = RoutedSession(proxy_rejection()), RoutedSession()
+        client = CurlAsyncHttpClient(timeout_seconds=5, headers={}, session=original,
+                                    session_factory=lambda: fallback,
+                                    proxy_provider=FakeProxyProvider({"https": "http://proxy:80"}),
+                                    proxy_mode="required")
+        try:
+            await client.get("https://edith.xiaohongshu.com/api", discard_cookies=True)
+            assert fallback.calls[0]["discard_cookies"] is True
+            assert original.cookies.get("response_cookie") is None
+        finally:
+            await client.aclose()
+    asyncio.run(run())

@@ -1,8 +1,9 @@
-"""Xiaohongshu SSR statistics and signed authenticated comment flow."""
+"""Xiaohongshu web SSR statistics and signed web comment flow."""
 
 from __future__ import annotations
 
 import html
+import json
 import re
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
@@ -41,6 +42,7 @@ async def fetch(
     try:
         stats = EngagementStats()
         comments: list[EngagementComment] = []
+        comment_page_returned = False
         next_cursor: str | None = None
         sources: list[str] = []
 
@@ -49,10 +51,12 @@ async def fetch(
             # counters in ``window.__INITIAL_STATE__``.  Prefer that single
             # unsigned request: the signed feed endpoint is account-gated and
             # currently returns an empty HTTP 461 response to guest sessions.
-            request_url = url
+            # Accept app-style discovery links without making the caller
+            # rewrite them. Preserve the original token and source parameters.
+            request_url = parsed._replace(path=f"/explore/{work_id}").geturl()
             if token and not source:
                 query = f"{parsed.query}&xsec_source=pc_feed"
-                request_url = parsed._replace(query=query).geturl()
+                request_url = urlparse(request_url)._replace(query=query).geturl()
             page_headers = {
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "User-Agent": DESKTOP_USER_AGENT,
@@ -71,7 +75,7 @@ async def fetch(
                     url,
                     work_id,
                     "unsupported",
-                    "小红书公开笔记页需要 URL 中当前有效的 xsec_token",
+                    "小红书网页未返回目标笔记，原始 URL 不含 xsec_token；当前网页采集路径未取得互动数据",
                 )
             else:
                 return result_error(
@@ -99,7 +103,7 @@ async def fetch(
                     url,
                     work_id,
                     "unsupported",
-                    "协议请求没有账号会话；将回退本地游客浏览器读取公开首屏。游客态不支持深分页",
+                    "当前网页评论请求缺少可用 Cookie；本地游客浏览器可尝试公开首屏，尚未验证游客深分页",
                 )
             if not token:
                 if include_stats:
@@ -117,7 +121,7 @@ async def fetch(
                     url,
                     work_id,
                     "unsupported",
-                    "小红书评论需要 URL 中的 xsec_token；请使用搜索或推荐流生成的完整笔记链接",
+                    "当前网页评论路径需要 xsec_token，尚未从原始 URL 自动取得该参数",
                 )
 
             cursor = comment_cursor or ""
@@ -138,7 +142,13 @@ async def fetch(
                     cookie,
                     url,
                 )
+                raw_comments = comment_payload.get("comments")
+                if not isinstance(raw_comments, list):
+                    raise PlatformCrawlerError("小红书评论响应缺少有效的 comments 列表")
                 comments = parse_comments(comment_payload)
+                if raw_comments and not comments:
+                    raise PlatformCrawlerError("小红书评论列表未包含可识别的评论数据")
+                comment_page_returned = True
                 total = to_int(
                     first_present(
                         comment_payload,
@@ -162,7 +172,7 @@ async def fetch(
                 stats = EngagementStats(comments=total)
             sources.append("api/sns/web/v2/comment/page")
 
-        if not comments and not _has_stats(stats):
+        if not comments and not _has_stats(stats) and not comment_page_returned:
             has_detail_session = bool(cookie and token)
             return result_error(
                 "xiaohongshu",
@@ -339,34 +349,27 @@ def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
 
 
 def parse_stats(text: str, work_id: str) -> EngagementStats:
-    decoded = html.unescape(text).replace("\\u002F", "/")
-    detail_anchor = decoded.find(f'"noteDetailMap":{{"{work_id}"')
-    if detail_anchor >= 0:
-        detail_segment = decoded[detail_anchor:detail_anchor + 20000]
-        detail_match = re.search(r'"interactInfo"\s*:\s*\{(.*?)\}', detail_segment, re.S)
-        if detail_match:
-            values = interaction_values(detail_match.group(1))
-            if values:
-                return _stats(values)
-    note_pattern = re.compile(r'"noteId"\s*:\s*"' + re.escape(work_id) + r'"')
-    for note_match in reversed(list(note_pattern.finditer(decoded))):
-        prefix = decoded[max(0, note_match.start() - 3000):note_match.start()]
-        matches = list(re.finditer(r'"interactInfo"\s*:\s*\{(.*?)\}', prefix, re.S))
-        if matches:
-            values = interaction_values(matches[-1].group(1))
-            if values:
-                return _stats(values)
-    return EngagementStats()
-
-
-def interaction_values(body: str) -> dict[str, int | None]:
-    return {
-        key: to_int(value)
-        for key, value in re.findall(
-            r'"(likedCount|collectedCount|shareCount|commentCount)"\s*:\s*"?([^",}]+)',
-            body,
+    # Proximity in a script is not an identity check: neighbouring recommended
+    # notes have their own counters. Decode the map and bind both key and ID.
+    for match in re.finditer(r'"noteDetailMap"\s*:\s*', text):
+        raw = text[match.end():]
+        raw = re.sub(
+            r'("(?:\\.|[^"\\])*"|\bundefined\b)',
+            lambda item: "null" if item[0] == "undefined" else item[0],
+            raw,
         )
-    }
+        try:
+            details, _ = json.JSONDecoder().raw_decode(raw)
+        except (ValueError, RecursionError):
+            continue
+        entry = details.get(work_id) if isinstance(details, dict) else None
+        note = entry.get("note") if isinstance(entry, dict) else None
+        if not isinstance(note, dict) or note.get("noteId") != work_id:
+            continue
+        values = note.get("interactInfo")
+        if isinstance(values, dict):
+            return _stats({key: to_int(value) for key, value in values.items()})
+    return EngagementStats()
 
 
 def _stats(values: dict[str, int | None]) -> EngagementStats:

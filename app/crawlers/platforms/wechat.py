@@ -40,6 +40,9 @@ async def fetch(
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
+    # Stored article links often still use HTTP. Keep the caller's URL in the
+    # result, but use the platform's HTTPS endpoint with the original query.
+    request_url = urlparse(url)._replace(scheme="https").geturl()
     cookie = crawler._platform_cookie("wechat")
     cookie_issue = ""
     official_issue = ""
@@ -48,7 +51,7 @@ async def fetch(
     bridge_stats: EngagementStats | None = None
     try:
         article_response = await crawler._get_response(
-            url,
+            request_url,
             headers={
                 "Accept": "text/html,application/xhtml+xml",
                 "Referer": "https://mp.weixin.qq.com/",
@@ -286,15 +289,13 @@ async def fetch(
                 stats=EngagementStats(comments=0),
             )
         comments = parse_comments(payload)
-        total = to_int(
-            payload.get("total_count")
-            or payload.get("total")
-            or payload.get("elected_comment_total_cnt")
-            or find_nested_value(
+        raw_total = first_present(payload, "total_count", "total", "elected_comment_total_cnt")
+        if raw_total is None:
+            raw_total = find_nested_value(
                 payload,
                 {"total_count", "total", "elected_comment_total_cnt"},
             )
-        )
+        total = to_int(raw_total)
         has_more = bool(
             payload.get("is_continue")
             or payload.get("has_more")
@@ -439,7 +440,14 @@ async def fetch_cookie_comments(
             ret = int(raw_ret) if raw_ret not in {None, ""} else 0
         except (TypeError, ValueError):
             ret = 0
-        if ret != 0 or current_page == page:
+        if ret != 0:
+            return payload
+        if to_int(payload.get("enabled")) != 0 and not any(
+            isinstance(payload.get(key), list)
+            for key in ("elected_comment", "comment", "comments")
+        ):
+            raise PlatformCrawlerError("公众号评论接口未返回有效评论列表；不能将空响应视为零评论")
+        if current_page == page:
             return payload
 
         has_more = bool(
@@ -796,6 +804,16 @@ def cookie_capability_suffix(metadata: dict[str, str], cookie: str) -> str:
 
 
 def parse_stats(text: str) -> EngagementStats:
+    # The current article footer labels old_like_count as 赞 and like_count as
+    # 推荐. Read its own object; surrounding scripts also contain placeholders.
+    bar_match = re.search(r"\bwindow\.appmsg_bar_data\s*=\s*\{", text)
+    bar_stats = EngagementStats()
+    if bar_match:
+        bar = extract_js_object(text[bar_match.start():], "window.appmsg_bar_data")
+        bar_stats = parse_bar_stats({
+            key: extract_js_scalar(bar, key, separator=":")
+            for key in (*BAR_STAT_FIELDS.values(), "is_red_flower_like")
+        })
     decoded = html.unescape(text).replace(r"\u0022", '"').replace(r'\"', '"')
     values: dict[str, int | None] = {}
     for key in (
@@ -810,7 +828,14 @@ def parse_stats(text: str) -> EngagementStats:
         )
         if match:
             values[key] = to_int(match.group(1))
-    return EngagementStats(
+    comments = to_int(first_present(values, "comment_count", "commentCount"))
+    if comments is None:
+        # Some public article pages preload only the selected-comment total.
+        # A zero preload placeholder is not evidence that comments are absent.
+        preloaded_total = parse_preloaded_comment_total(text)
+        if preloaded_total is not None and preloaded_total > 0:
+            comments = preloaded_total
+    stats = EngagementStats(
         views=to_int(first_present(
             values,
             "read_num",
@@ -828,12 +853,39 @@ def parse_stats(text: str) -> EngagementStats:
             "appmsg_old_like_num",
             "likeCount",
         )),
-        comments=to_int(first_present(values, "comment_count", "commentCount")),
+        comments=comments,
         shares=to_int(first_present(values, "share_count", "shareCount")),
     )
+    return stats.model_copy(update=bar_stats.model_dump(exclude_none=True))
+
+
+BAR_STAT_FIELDS = {
+    "views": "read_num",
+    "likes": "old_like_count",
+    "recommendations": "like_count",
+    "comments": "comment_count",
+    "shares": "share_count",
+    "favorites": "collect_count",
+}
+
+
+def parse_bar_stats(bar: dict[str, Any]) -> EngagementStats:
+    values = {field: to_int(bar.get(key)) for field, key in BAR_STAT_FIELDS.items()}
+    flower = bar.get("red_flower_like_info")
+    if to_int(bar.get("is_red_flower_like")) == 1 or (
+        isinstance(flower, dict) and to_int(flower.get("is_red_flower_like")) == 1
+    ):
+        # The special charity button says 助力 instead of 推荐.
+        values["recommendations"] = None
+    return EngagementStats(**values)
 
 
 def parse_stats_payload(payload: dict[str, Any]) -> EngagementStats:
+    bar = payload.get("appmsg_bar_data")
+    if isinstance(bar, dict):
+        # Retain legacy counters when the new footer only supplies some fields.
+        legacy = parse_stats_payload({k: v for k, v in payload.items() if k != "appmsg_bar_data"})
+        return legacy.model_copy(update=parse_bar_stats(bar).model_dump(exclude_none=True))
     nested = payload.get("appmsgstat") or payload.get("appmsg_stat") or payload
     if isinstance(nested, str):
         try:
@@ -888,6 +940,13 @@ def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
         user = item.get("user") or {}
         if not isinstance(user, dict):
             user = {}
+        reply_count = to_int(first_present(item, "reply_count", "reply_num"))
+        reply_new = item.get("reply_new")
+        if reply_count is None and isinstance(reply_new, dict):
+            reply_count = to_int(reply_new.get("reply_total_cnt"))
+        if reply_count is None and isinstance(item.get("reply"), dict):
+            if str(item["reply"].get("content") or "").strip():
+                reply_count = 1
         result.append(EngagementComment(
             comment_id=comment_id,
             author=str(
@@ -903,11 +962,7 @@ def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
                 item.get("create_time") or item.get("createTime") or item.get("created_at")
             ),
             likes=to_int(first_present(item, "like_num", "like_count", "liked_count")),
-            replies=(
-                to_int(first_present(item, "reply_count", "reply_num"))
-                or (1 if isinstance(item.get("reply"), dict)
-                    and str(item["reply"].get("content") or "").strip() else None)
-            ),
+            replies=reply_count,
         ))
     return result
 

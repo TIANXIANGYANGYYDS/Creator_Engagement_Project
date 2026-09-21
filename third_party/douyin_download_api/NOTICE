@@ -1,0 +1,8 @@
+Douyin_TikTok_Download_API
+Copyright Evil0ctal and contributors
+https://github.com/Evil0ctal/Douyin_TikTok_Download_API
+Revision: 9fa3e5406694c80ec0a97399f410948f130d0f9e
+
+app/crawlers/platforms/douyin_abogus_v2.py is adapted from src/dtk/signing/native/abogus.py.
+app/crawlers/authors/douyin_session.py adapts the WebSign algorithm from src/dtk/signing/native/websign.py.
+Local changes: OpenSSL SM3, session integration, and explicit URL encoding.

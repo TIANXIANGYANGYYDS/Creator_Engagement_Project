@@ -2,21 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import inspect
+from ipaddress import ip_address
 import logging
+import socket
 from time import monotonic
 from urllib.parse import urlsplit
 from typing import Any, AsyncIterator, Callable, Literal, Protocol, runtime_checkable
 
-from curl_cffi import CurlOpt, requests as curl_requests
+from curl_cffi import CurlInfo, CurlOpt, ffi, lib, requests as curl_requests
+from curl_cffi.requests.exceptions import ProxyError
 
 from app.crawlers.proxy_provider import AsyncProxyProvider, ProxyUnavailableError
 
 
 logger = logging.getLogger(__name__)
+
+# These hosts have been verified to reject domain CONNECT at the proxy while
+# accepting their DNS-resolved address. TLS still authenticates the URL host.
+RESOLVED_PROXY_HOSTS = frozenset({
+    "edith.xiaohongshu.com", "res.wx.qq.com", "webapi.rednote.com",
+})
 
 
 class PlatformCrawlerError(RuntimeError):
@@ -84,6 +94,7 @@ class CurlAsyncHttpClient:
                         1, round(min(connect_timeout_seconds, timeout_seconds) * 1000),
                     ),
                 },
+                curl_infos=[CurlInfo.HTTP_CONNECTCODE],
                 allow_redirects=True,
                 headers=headers,
             )
@@ -94,6 +105,7 @@ class CurlAsyncHttpClient:
         self._session = session or default_session_factory()
         self.proxy_provider = proxy_provider
         self.proxy_mode = proxy_mode
+        self._dns_timeout = min(3.0, connect_timeout_seconds, timeout_seconds)
         self._lease_state: ContextVar[_ProxyLeaseState | None] = ContextVar(
             "creator_engagement_proxy_lease",
             default=None,
@@ -164,6 +176,23 @@ class CurlAsyncHttpClient:
             return
         state.failed = True
         state.failure_reason = reason
+
+    def active_lease_remaining_seconds(self) -> float | None:
+        state = self._lease_state.get()
+        remaining = getattr(self.proxy_provider, "remaining_seconds", None)
+        if state is None or not state.proxies or remaining is None:
+            return None
+        return remaining(state.proxies)
+
+    async def active_proxy_mapping(self) -> dict[str, str] | None:
+        """Acquire the current scoped lease for a browser sharing this operation."""
+        state = self._lease_state.get()
+        if state is None:
+            raise RuntimeError("active_proxy_mapping requires lease_scope")
+        if not state.acquired:
+            state.proxies = await self._acquire_proxy()
+            state.acquired = True
+        return state.proxies
 
     async def get(
         self,
@@ -251,16 +280,16 @@ class CurlAsyncHttpClient:
                 session = self._isolated_session.get() or self._session
                 request = getattr(session, "request", None)
                 if request is not None:
-                    response = await request(
-                        method,
-                        url,
-                        params=params,
-                        headers=headers,
-                        data=data,
-                        json=json,
-                        proxy=proxy_url,
-                        discard_cookies=discard_cookies,
+                    request_options = dict(
+                        params=params, headers=headers, data=data, json=json,
+                        proxy=proxy_url, discard_cookies=discard_cookies,
                     )
+                    try:
+                        response = await request(method, url, **request_options)
+                    except ProxyError as exc:
+                        response = await self._retry_resolved_proxy(
+                            exc, session, method, url, request_options,
+                        )
                 elif method == "GET":
                     response = await session.get(
                         url,
@@ -317,6 +346,59 @@ class CurlAsyncHttpClient:
             return response
         assert last_error is not None
         raise last_error
+
+    async def _retry_resolved_proxy(
+        self, error: ProxyError, session: Any, method: str, url: str,
+        options: dict[str, Any],
+    ) -> Any:
+        """Retry a verified platform CONNECT rejection through the same proxy.
+
+        Only a proxy's CONNECT 403 qualifies: the origin has not received the
+        request. CONNECT_TO preserves the URL, Host, TLS SNI and certificate
+        verification. Never apply this to an origin 403 or arbitrary hosts.
+        """
+        target = urlsplit(url)
+        proxy = urlsplit(options.get("proxy") or "")
+        infos = getattr(getattr(error, "response", None), "infos", {})
+        if (target.hostname not in RESOLVED_PROXY_HOSTS or target.scheme != "https"
+                or target.port not in (None, 443) or proxy.scheme not in ("http", "https")
+                or infos.get(CurlInfo.HTTP_CONNECTCODE) != 403
+                or self._session_factory is None):
+            raise error
+        try:
+            addresses = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(
+                    target.hostname, 443, family=socket.AF_INET, type=socket.SOCK_STREAM,
+                ), self._dns_timeout,
+            )
+        except (OSError, TimeoutError):
+            raise error
+        address = next((row[4][0] for row in addresses if ip_address(row[4][0]).is_global), None)
+        if address is None:
+            raise error
+        rule = f"{target.hostname}:443:{address}:443".encode()
+        route = lib.curl_slist_append(ffi.NULL, rule)
+        if route == ffi.NULL:
+            raise MemoryError("Cannot allocate proxy connection route")
+        fallback = None
+        try:
+            # A separate session prevents concurrent requests from seeing this
+            # connection rule. Keep cookies within the current isolated flow.
+            fallback = self._session_factory()
+            fallback.curl_options[CurlOpt.CONNECT_TO] = route
+            fallback.cookies.update(session.cookies)
+            fallback.headers.update(session.headers)
+            logger.info("proxy_connect_resolved_retry host=%s connect_status=403", target.hostname)
+            response = await fallback.request(method, url, **options)
+            if not options.get("discard_cookies"):
+                session.cookies.update(fallback.cookies)
+            return response
+        finally:
+            try:
+                if fallback is not None:
+                    await fallback.close()
+            finally:
+                lib.curl_slist_free_all(route)
 
     async def _acquire_proxy(self) -> dict[str, str] | None:
         if self.proxy_mode == "direct":

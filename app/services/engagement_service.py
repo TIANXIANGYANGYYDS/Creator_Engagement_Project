@@ -70,6 +70,10 @@ class EngagementService:
         cache_max_entries: int = 1000,
         cache_max_bytes: int = 64 * 1024 * 1024,
         platform_policies: dict[EngagementPlatform, PlatformTrafficPolicy] | None = None,
+        author_douyin_cookie: str = "",
+        author_platform_cookies: dict[str, str] | None = None,
+        author_session_store: PlatformSessionStore | None = None,
+        author_guest_only: bool = True,
     ) -> None:
         if collection_max_concurrency <= 0:
             raise ValueError("collection_max_concurrency must be greater than zero")
@@ -82,6 +86,10 @@ class EngagementService:
         if cache_max_bytes <= 0:
             raise ValueError("cache_max_bytes must be greater than zero")
         self.crawler = crawler
+        self.author_guest_only = author_guest_only
+        self.author_douyin_cookie = author_douyin_cookie
+        self.author_platform_cookies = author_platform_cookies or {}
+        self.author_session_store = author_session_store
         self.proxy_provider = proxy_provider
         self._collection_semaphore = asyncio.Semaphore(collection_max_concurrency)
         self._reserved_platform: ContextVar[str | None] = ContextVar(
@@ -142,6 +150,11 @@ class EngagementService:
         settings: Settings,
     ) -> "EngagementService":
         active_mode = settings.proxy_mode
+        author_douyin_cookie = ""
+        if not settings.author_guest_only and settings.douyin_author_session_mode == "cookie":
+            author_douyin_cookie = settings.douyin_author_cookie.get_secret_value().strip()
+            if not author_douyin_cookie:
+                raise ValueError("DOUYIN_AUTHOR_SESSION_MODE=cookie 需要配置 DOUYIN_AUTHOR_COOKIE")
         provider: AsyncProxyProvider | None = None
         if active_mode != "required":
             raise ValueError("生产采集仅允许 PROXY_MODE=required，禁止本机直连")
@@ -282,6 +295,17 @@ class EngagementService:
         )
         return cls(
             crawler,
+            author_guest_only=settings.author_guest_only,
+            author_douyin_cookie=author_douyin_cookie,
+            author_platform_cookies={} if settings.author_guest_only else {
+                platform: getattr(settings, f"{platform}_author_cookie").get_secret_value().strip()
+                for platform in ("kuaishou", "weibo", "bilibili", "toutiao")
+                if getattr(settings, f"{platform}_author_cookie").get_secret_value().strip()
+            },
+            author_session_store=(
+                PlatformSessionStore(Path(settings.platform_session_dir))
+                if settings.author_use_saved_sessions and not settings.author_guest_only else None
+            ),
             proxy_provider=provider,
             collection_max_concurrency=settings.collection_max_concurrency,
             cache_ttl_seconds=settings.engagement_cache_ttl_seconds,

@@ -564,6 +564,7 @@ def test_xiaohongshu_interaction_wall_retries_with_required_proxy(
         ),
         ("http://weibo.com/6539142196/RdVPmEYKD", ("weibo", "5333205569766651")),
         ("https://www.xiaohongshu.com/explore/6a5585c000000000080326ac", ("xiaohongshu", "6a5585c000000000080326ac")),
+        ("https://www.xiaohongshu.com/discovery/item/6aad6b8c0000000028002d0a", ("xiaohongshu", "6aad6b8c0000000028002d0a")),
         ("https://haokan.baidu.com/v?vid=327646248367276281", ("haokan", "327646248367276281")),
         ("https://www.douyin.com/video/7665718789363309172", ("douyin", "7665718789363309172")),
         ("https://www.toutiao.com/article/1234567890/", ("toutiao", "1234567890")),
@@ -752,6 +753,7 @@ def test_bilibili_live_url_is_outside_content_scope() -> None:
         ("B 站", "bilibili"),
         ("哔哩哔哩", "bilibili"),
         ("微博", "weibo"),
+        ("新浪微博", "weibo"),
     ],
 )
 def test_normalize_media_name(media_name: str, expected: str) -> None:

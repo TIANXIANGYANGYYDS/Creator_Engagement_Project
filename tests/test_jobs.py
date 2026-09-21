@@ -874,7 +874,7 @@ def test_running_progress_is_persisted_and_worker_count_is_bounded(tmp_path) -> 
                     "SELECT completed FROM batch_jobs WHERE job_id = ?",
                     (submitted.job_id,),
                 ).fetchone()[0]
-            if completed == 1:
+            if completed == 1 and max_active == 2:
                 break
             await asyncio.sleep(0.01)
         else:
@@ -891,5 +891,59 @@ def test_running_progress_is_persisted_and_worker_count_is_bounded(tmp_path) -> 
             raise AssertionError("job did not finish")
         assert status.progress.completed == 3
         await manager.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_default_api_accepts_5925_items_and_keeps_worker_concurrency_bounded() -> None:
+    async def scenario():
+        class Service(FakeJobService):
+            active = 0
+            peak = 0
+
+            async def fetch_interactions(self, url, media_name):
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                try:
+                    await asyncio.sleep(0)
+                    return await super().fetch_interactions(url, media_name)
+                finally:
+                    self.active -= 1
+
+        service = Service()
+        manager = BatchJobManager(item_max_concurrency=16)
+        app = create_app()
+        app.dependency_overrides[get_engagement_service] = lambda: service
+        app.dependency_overrides[get_job_manager] = lambda: manager
+        items = [
+            {"item_id": f"item-{index}", "url": f"https://www.toutiao.com/article/{index}/",
+             "media_name": "toutiao", "type": "interactions"}
+            for index in range(5925)
+        ]
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post("/api/v1/jobs", json={"items": items})
+                assert response.status_code == 202
+                job_id = response.json()["job_id"]
+                await asyncio.wait_for(asyncio.gather(*manager._tasks.values()), 15)
+                status = (await client.get(f"/api/v1/jobs/{job_id}")).json()
+                assert status["status"] == "completed"
+                assert status["progress"] == {"total": 5925, "completed": 5925, "success": 5925, "failed": 0}
+                assert 1 < service.peak <= 16
+                seen = []
+                cursor = None
+                for page in range(12):
+                    params = {"limit": 500}
+                    if cursor:
+                        params["cursor"] = cursor
+                    response = await client.get(f"/api/v1/jobs/{job_id}/results", params=params)
+                    assert response.status_code == 200
+                    payload = response.json()
+                    seen.extend(item["item_id"] for item in payload["data"])
+                    cursor = payload["next_cursor"]
+                    assert bool(cursor) == (page < 11)
+                assert len(seen) == len(set(seen)) == 5925
+        finally:
+            await manager.aclose()
 
     asyncio.run(scenario())

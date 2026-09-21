@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+import logging
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from app.api.dependencies import get_engagement_service, get_job_manager
 from app.api.routers.engagement import _collect_item
@@ -18,6 +20,7 @@ from app.services.job_service import BatchJobManager, IdempotencyConflictError
 
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
+logger = logging.getLogger(__name__)
 
 
 def job_collector(service: EngagementService):
@@ -41,6 +44,7 @@ def job_collector(service: EngagementService):
 )
 async def create_job(
     request: CreateJobRequest,
+    http_request: Request,
     idempotency_key: str | None = Header(
         default=None,
         alias="Idempotency-Key",
@@ -51,16 +55,26 @@ async def create_job(
     manager: BatchJobManager = Depends(get_job_manager),
 ) -> JobSubmitResponse:
     try:
-        return await manager.submit(
+        result = await manager.submit(
             request,
             collector=job_collector(service),
             proxy_usage_scope=service.proxy_usage_scope,
             collection_scope=lambda item: service.collection_slot(item.media_name),
             idempotency_key=idempotency_key,
         )
+        logger.info(
+            "job_submitted request_id=%s job_id=%s status=%s total=%s",
+            getattr(http_request.state, "request_id", "unknown"),
+            result.job_id, result.status, len(request.items),
+        )
+        return result
     except IdempotencyConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
+        logger.warning(
+            "job_submission_rejected request_id=%s total=%s reason=%s",
+            getattr(http_request.state, "request_id", "unknown"), len(request.items), str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

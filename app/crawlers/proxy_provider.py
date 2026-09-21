@@ -750,6 +750,11 @@ class AsyncDailiProxyPool(DailiProxyProvider):
         """按完整 requests 代理映射查找对应池槽位，找不到时返回 ``None``。"""
         return next((slot for slot in self._slots if slot.proxies == proxies), None)
 
+    def remaining_seconds(self, proxies: Dict[str, str]) -> float:
+        """Remaining usable time for a leased endpoint, including early refresh."""
+        slot = self._find_slot(proxies)
+        return max(0, slot.expire_at - time.monotonic()) if slot else 0
+
     async def on_success_for(
         self,
         proxies: Optional[Dict[str, str]],

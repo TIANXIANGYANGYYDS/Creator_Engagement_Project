@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.crawlers.proxy_provider import ProxyUnavailableError
+from app.crawlers.wechat_browser_resources import wechat_static_resources
 from app.models.engagement import (
     EngagementComment,
     EngagementPlatform,
@@ -148,7 +149,10 @@ class BrowserFallback:
                     "browser.cache.disk.enable": False,
                     "browser.cache.disk_cache_ssl": False,
                 },
-            ) as context:
+            ) as context, wechat_static_resources(
+                context, proxy_mapping if platform == "wechat" else None,
+                self.settings.timeout_seconds,
+            ):
                 await self._prepare_proxy_bound_guest_state(
                     context,
                     platform,
@@ -997,6 +1001,7 @@ def _challenge_reason(body: str) -> str:
         ("need captcha", "页面要求验证码，浏览器兜底未自动完成验证码"),
         ("验证码", "页面要求验证码，浏览器兜底未自动完成验证码"),
         ("安全验证", "页面进入安全验证挑战，未获得目标数据"),
+        ("完成验证后即可继续访问", "公众号要求完成访问环境验证，未获得目标数据"),
         ("登录后", "页面要求登录后才能读取目标数据"),
     ):
         if marker in lowered:

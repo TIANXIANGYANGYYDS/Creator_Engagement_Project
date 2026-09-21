@@ -7,6 +7,8 @@ from time import monotonic
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.dependencies import get_engagement_service
+from app.api.reliability import SyncCollectionRoute
+from app.core.config import get_settings
 from app.crawlers.platforms.registry import normalize_media_name
 from app.models.engagement import (
     CommentDataResponse,
@@ -23,7 +25,7 @@ from app.models.engagement import (
 from app.services.engagement_service import EngagementService
 
 
-router = APIRouter(prefix="/api/v1", tags=["engagement"])
+router = APIRouter(prefix="/api/v1", tags=["engagement"], route_class=SyncCollectionRoute)
 logger = logging.getLogger(__name__)
 
 MEDIA_NAMES_ZH = {
@@ -102,6 +104,12 @@ async def collect(
     request: CollectRequest,
     service: EngagementService = Depends(get_engagement_service),
 ) -> CollectResponse:
+    max_items = get_settings().api_sync_max_items
+    if max_items and len(request.items) > max_items:
+        raise HTTPException(
+            status_code=422,
+            detail=f"同步采集最多允许 {max_items} 个采集项，请改用 POST /api/v1/jobs",
+        )
     started_at = monotonic()
     async with service.proxy_usage_scope() as proxy_usage:
         results = await asyncio.gather(*(

@@ -42,6 +42,7 @@ MEDIA_ALIASES: dict[str, EngagementPlatform] = {
     "哔哩哔哩": "bilibili",
     "weibo": "weibo",
     "微博": "weibo",
+    "新浪微博": "weibo",
 }
 
 
@@ -151,7 +152,7 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
             return "weibo", weibo_bid_to_mid(desktop_match.group(1))
         return "weibo", query.get("id", [""])[0]
     if "xiaohongshu.com" in host:
-        match = re.search(r"/explore/([0-9a-f]{24})", path, re.I)
+        match = re.search(r"/(?:explore|discovery/item)/([0-9a-f]{24})(?:/|$)", path, re.I)
         return "xiaohongshu", match.group(1) if match else ""
     if "haokan.baidu.com" in host:
         return "haokan", query.get("vid", [""])[0]

@@ -18,7 +18,7 @@ JOB_STORE_BACKEND=mongodb
 MONGO_URI=mongodb://<user>:<password>@<host>:27017/?authSource=creator_engagement
 MONGO_DB_NAME=creator_engagement
 JOB_RESULT_TTL_SECONDS=86400
-JOB_MAX_ITEMS=5000
+JOB_MAX_ITEMS=0
 JOB_RESULT_MAX_BYTES=8388608
 JOB_TIMEOUT_SECONDS=1800
 JOB_TIMEOUT_BATCH_SIZE=500
@@ -72,6 +72,17 @@ Uvicorn 建议只启动 1 个 worker；每增加一个 worker 都会复制浏览
 
 应用诊断日志写入 `.local/logs/api.log`，每个文件 10 MiB，保留 3 个轮转备份。
 日志记录请求阶段、异常类型、curl 错误码、耗时和批次完成计数，不记录签名查询参数或 Cookie。
+HTTP 请求的开始、结束、响应状态、耗时和 `X-Request-ID` 也写入该轮转日志；
+422 参数校验记录字段位置和错误类型（最多前 20 项），不记录输入值。
+任务提交记录关联 `request_id` 和 `job_id`。日志中的 `response_complete` 表示应用已
+完成响应发送，不代表调用方已完成业务处理。
+
+同步采集默认 `API_SYNC_TIMEOUT_SECONDS=120`、`API_SYNC_MAX_ITEMS=0`。
+同步和异步的条目数配置为 0 表示不限制总数；设为正整数时才对超限批次返回 422。
+升级旧部署时，将 `.local/env/.env` 中原有的 `JOB_MAX_ITEMS=5000` 改为 `0`。
+采集并发仍由 worker、平台及全局槽位控制。同步总时限包含排队、重试和评论分页，超过返回 504。
+大批量及长时间评论采集使用 `/api/v1/jobs`，其执行时限不受同步设置影响。
+MongoDB 单次操作配置 10 秒客户端总时限，避免任务提交和查询无限等待数据库响应。
 
 ## API
 
@@ -113,3 +124,7 @@ conda run -n MyAgent python -m app.manually_execute_script.fetch_url_engagement 
 ```bash
 conda run -n MyAgent creator-engagement-login xiaohongshu --url '<小红书笔记 URL>'
 ```
+
+作者内容接口使用同一 MongoDB 中独立的 `author_jobs`、`author_works` 集合，启动时自动建索引并恢复未完成作者任务。保留一个 worker；作者任务共用互动服务代理池及全局采集并发。每个作者 4 个详情 worker，列表在代理有效期内保留会话、接近到期时换 IP 接着游标执行。浏览器复用现有 Camoufox 依赖及浏览器并发预算，所有列表与详情都遵循强制代理配置。接口范围与平台限制见 `docs/AUTHOR_CONTENT_API.md`。
+
+当前没有账号配置，作者流程使用全自动访客 Cookie：设置 `AUTHOR_GUEST_ONLY=true`、`AUTHOR_USE_SAVED_SESSIONS=false`、`DOUYIN_AUTHOR_SESSION_MODE=anonymous`。第一个开关优先于其余账号配置，旧 Cookie 即使留在部署文件中也不会进入作者请求；前文人工建立 Profile 的流程不适用于此作者采集模式。检查 `/api/v1/health` 的 `author_pipeline_version=7`、`author_guest_only=true`、`author_use_saved_sessions=false`。作者任务失败后自动等待重试；取消测试任务时使用作者任务 cancel 接口，避免遗留运行任务继续消耗代理。

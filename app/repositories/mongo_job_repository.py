@@ -25,6 +25,7 @@ class MongoJobRepository:
             uri,
             tz_aware=True,
             serverSelectionTimeoutMS=5_000,
+            timeoutMS=10_000,
         )
         self.database = self.client[database_name]
         self.jobs = self.database["jobs"]
@@ -173,7 +174,7 @@ class MongoJobRepository:
                 self.results.delete_many({"job_id": {"$in": expired_ids}})
                 self.requests.delete_many({"job_id": {"$in": expired_ids}})
                 self.jobs.delete_many({"_id": {"$in": expired_ids}})
-        # Store each input separately so a 5000-item request cannot exceed
+        # Store each input separately so a large request cannot exceed
         # MongoDB's document limit. An interrupted insert expires on its own.
         orphan_expiry = datetime.now(timezone.utc) + timedelta(days=1)
         try:

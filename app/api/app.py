@@ -6,16 +6,21 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.routers import engagement, health, jobs
+from app.api.routers import authors, engagement, health, jobs
 from app.api.dependencies import get_engagement_service, get_job_manager
+from app.api.reliability import RequestLoggingMiddleware, validation_error_handler
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.repositories.job_repository import SQLiteJobRepository
 from app.repositories.mongo_job_repository import MongoJobRepository
 from app.services.engagement_service import EngagementService
 from app.services.job_service import BatchJobManager
+from app.repositories.author_repository import AuthorRepository
+from app.services.author_service import AuthorService
+from app.services.author_job_service import AuthorJobManager
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +58,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.engagement_service = service
     app.state.batch_job_manager = job_manager
+    author_repository = AuthorRepository(settings.mongo_uri, settings.mongo_db_name)
+    author_manager = AuthorJobManager(
+        author_repository,
+        AuthorService(service, identity_repository=author_repository),
+        retention_seconds=settings.job_result_ttl_seconds,
+    )
+    app.state.author_job_manager = author_manager
     try:
         if not ({get_engagement_service, get_job_manager} & app.dependency_overrides.keys()):
             await job_manager.resume_interrupted(
@@ -60,15 +72,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 proxy_usage_scope=service.proxy_usage_scope,
                 collection_scope=lambda item: service.collection_slot(item.media_name),
             )
+        if not app.dependency_overrides:
+            await author_manager.start()
         yield
     finally:
+        await author_manager.aclose()
         await job_manager.aclose()
         await service.aclose()
 
 
 async def _unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("API request failed method=%s path=%s", request.method, request.url.path)
-    return JSONResponse(status_code=500, content={"detail": "服务器内部错误"})
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.exception("API request failed request_id=%s method=%s", request_id, request.method)
+    return JSONResponse(
+        status_code=500, content={"detail": "服务器内部错误"},
+        headers={"X-Request-ID": request_id},
+    )
 
 
 def create_app() -> FastAPI:
@@ -79,7 +98,10 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.add_exception_handler(Exception, _unexpected_error_handler)
+    app.add_exception_handler(RequestValidationError, validation_error_handler)
+    app.add_middleware(RequestLoggingMiddleware)
     app.include_router(health.router)
     app.include_router(engagement.router)
     app.include_router(jobs.router)
+    app.include_router(authors.router)
     return app

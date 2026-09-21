@@ -4,6 +4,8 @@ import asyncio
 import json
 from typing import Any
 
+import pytest
+
 from app.crawlers.engagement import EngagementCrawler
 from app.crawlers.platform_session import PlatformSessionStore
 from app.crawlers.platforms.wechat import parse_metadata as parse_wechat_metadata
@@ -121,6 +123,42 @@ def test_xiaohongshu_retries_blocked_xys_with_xyw() -> None:
     assert client.get_calls[0][1]["headers"]["X-S"].startswith("XYS_")
     assert client.get_calls[1][1]["headers"]["X-S"].startswith("XYW_")
     assert "X-Xray-Traceid" in client.get_calls[1][1]["headers"]
+
+
+def test_xiaohongshu_empty_terminal_comment_page_is_not_a_block() -> None:
+    client = DualFakeClient(gets=[FakeResponse({
+        "success": True,
+        "data": {"comments": [], "has_more": False, "cursor": ""},
+    })])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"xiaohongshu": "a1=a1-value; web_session=session-value"},
+    ).fetch_comments(
+        "https://www.xiaohongshu.com/explore/6a5585c000000000080326ac?xsec_token=token",
+        "小红书", 2, cursor="last-page",
+    ))
+
+    assert result.coverage == "partial"
+    assert result.comments == []
+    assert result.total_comments is None
+    assert result.next_page is None
+    assert len(client.get_calls) == 1
+
+
+@pytest.mark.parametrize("data", [{}, {"comments": {}}, {"comments": [{}]}])
+def test_xiaohongshu_missing_comment_data_is_not_an_empty_page(data) -> None:
+    client = DualFakeClient(gets=[FakeResponse({"success": True, "data": data})])
+    result = asyncio.run(EngagementCrawler(
+        client=client,
+        platform_cookies={"xiaohongshu": "a1=a1-value; web_session=session-value"},
+    ).fetch_comments(
+        "https://www.xiaohongshu.com/explore/6a5585c000000000080326ac?xsec_token=token",
+        "小红书", 1,
+    ))
+
+    assert result.coverage in {"blocked", "failed"}
+    assert result.total_comments is None
+    assert result.comments == []
 
 
 def test_xiaohongshu_empty_authenticated_detail_is_retryable_block() -> None:
@@ -596,6 +634,145 @@ def test_wechat_reads_unquoted_zero_and_v2_stats() -> None:
     assert result.stats.shares == 9
 
 
+def test_wechat_new_footer_keeps_likes_and_recommendations_distinct() -> None:
+    text = """<script>window.appmsg_bar_data = {
+      old_like_count: '17' * 1, like_count: '5' * 1,
+      comment_count: '0' * 1, collect_count: '9' * 1,
+      share_count: '11' * 1, read_num: '203' * 1
+    };</script>"""
+    result = asyncio.run(EngagementCrawler(
+        client=DualFakeClient(gets=[FakeResponse(text=text)]),
+    ).fetch_interactions("https://mp.weixin.qq.com/s/article", "微信"))
+    assert result.stats.model_dump(exclude_none=True) == {
+        "views": 203, "likes": 17, "recommendations": 5,
+        "comments": 0, "shares": 11, "favorites": 9,
+    }
+
+
+def test_wechat_empty_footer_does_not_create_zero_counters() -> None:
+    from app.crawlers.platforms.wechat import parse_stats
+
+    text = """<script>window.appmsg_bar_data = {
+      old_like_count: '' * 1, like_count: '' * 1,
+      comment_count: '' * 1, collect_count: '' * 1,
+      share_count: '' * 1, read_num: '' * 1
+    };</script>"""
+    assert parse_stats(text).model_dump(exclude_none=True) == {}
+
+
+def test_wechat_footer_payload_merges_partial_fields_without_losing_zero() -> None:
+    from app.crawlers.platforms.wechat import parse_stats_payload
+
+    assert parse_stats_payload({
+        "appmsgstat": {"read_num": 100, "like_num": 9},
+        "appmsg_bar_data": {"old_like_count": 0, "like_count": 3, "collect_count": 7},
+    }).model_dump(exclude_none=True) == {
+        "views": 100, "likes": 0, "recommendations": 3, "favorites": 7,
+    }
+
+
+def test_wechat_charity_footer_is_not_reported_as_recommendations() -> None:
+    from app.crawlers.platforms.wechat import parse_stats, parse_stats_payload
+
+    assert parse_stats_payload({"appmsg_bar_data": {
+        "like_count": 4, "old_like_count": 2,
+        "red_flower_like_info": {"is_red_flower_like": 1},
+    }}).model_dump(exclude_none=True) == {"likes": 2}
+    assert parse_stats("""window.appmsg_bar_data = {
+      like_count: '4' * 1, old_like_count: '2' * 1,
+      red_flower_like_info: {is_red_flower_like: '1' * 1}
+    };""").model_dump(exclude_none=True) == {"likes": 2}
+
+
+def test_wechat_http_input_can_return_only_preloaded_comment_count() -> None:
+    url = "http://mp.weixin.qq.com/s?__biz=MzA=&mid=20&idx=1&sn=abc"
+    client = DualFakeClient(gets=[FakeResponse(text=(
+        '<script>var preload_comment_total_cnt = "7";</script>'
+    ))])
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(url, "微信"))
+
+    assert client.get_calls[0][0] == url.replace("http:", "https:", 1)
+    assert result.canonical_url == url
+    assert result.coverage == "partial"
+    assert result.stats.model_dump(exclude_none=True) == {"comments": 7}
+
+
+def test_wechat_zero_preload_placeholder_does_not_invent_zero_comments() -> None:
+    client = DualFakeClient(gets=[FakeResponse(text=(
+        '<script>var preload_comment_total_cnt = "0";</script>'
+    ))])
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        "https://mp.weixin.qq.com/s/article-token", "微信",
+    ))
+
+    assert result.coverage == "unsupported"
+    assert result.stats.comments is None
+
+
+def test_wechat_explicit_comment_count_takes_precedence_over_preload_count() -> None:
+    client = DualFakeClient(gets=[FakeResponse(text=(
+        '<script>window.appmsgstat = {comment_count: 20};'
+        'var preload_comment_total_cnt = "7";</script>'
+    ))])
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        "https://mp.weixin.qq.com/s/article-token", "微信",
+    ))
+
+    assert result.stats.comments == 20
+
+
+def test_xiaohongshu_discovery_interactions_keep_original_url_and_token() -> None:
+    note_id = "6aad6b8c0000000028002d0a"
+    url = f"https://www.xiaohongshu.com/discovery/item/{note_id}?xsec_token=token&xsec_source=app_share"
+    client = DualFakeClient(gets=[FakeResponse(text=(
+        'window.__INITIAL_STATE__={"note":{"noteDetailMap":{"' + note_id +
+        '":{"note":{"noteId":"' + note_id + '","interactInfo":{"commentCount":"12"}}}}}}'
+    ))])
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(url, "小红书"))
+
+    assert client.get_calls[0][0] == url.replace("/discovery/item/", "/explore/")
+    assert result.coverage == "partial"
+    assert result.stats.model_dump(exclude_none=True) == {"comments": 12}
+
+
+def test_xiaohongshu_discovery_without_token_reaches_platform_request() -> None:
+    note_id = "6aad6b8c0000000028002d0a"
+    client = DualFakeClient(gets=[FakeResponse(text='<html>请登录</html>')])
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        f"https://www.xiaohongshu.com/discovery/item/{note_id}", "小红书",
+    ))
+
+    assert client.get_calls[0][0] == f"https://www.xiaohongshu.com/explore/{note_id}"
+    assert result.coverage == "unsupported"
+    assert "xsec_token" in result.reason
+    assert not any(v is not None for v in result.stats.model_dump().values())
+
+
+def test_xhs_stats_cannot_borrow_neighbouring_note_counters():
+    from app.crawlers.platforms.xiaohongshu import parse_stats
+    import json
+
+    for notes in [
+        {"target": {"note": {"noteId": "target"}},
+         "other": {"note": {"noteId": "other", "interactInfo": {"likedCount": "999"}}}},
+        {"other": {"note": {"interactInfo": {"likedCount": "999"}, "noteId": "other"}},
+         "target": {"note": {"noteId": "target"}}},
+        {"target": {"note": {"noteId": "other", "interactInfo": {"likedCount": "999"}}}},
+    ]:
+        body = '<script>' + json.dumps({"noteDetailMap": notes}) + '</script>'
+        assert parse_stats(body, "target").model_dump(exclude_none=True) == {}
+
+
+def test_xhs_stats_accepts_reordered_map_and_preserves_string_contents():
+    from app.crawlers.platforms.xiaohongshu import parse_stats
+    body = '''<script>window.__INITIAL_STATE__={"noteDetailMap": {
+        "other": {"note":{"noteId":"other","interactInfo":{"likedCount":999}}},
+        "target": {"note":{"noteId":"target","desc":"undefined and \\"quoted\\"",
+                            "missing":undefined,"interactInfo":{"likedCount":"0","commentCount":"12"}}}
+    }}</script>'''
+    assert parse_stats(body, "target").model_dump(exclude_none=True) == {"likes": 0, "comments": 12}
+
+
 def test_wechat_metadata_uses_full_article_query_when_html_omits_biz() -> None:
     metadata = parse_wechat_metadata(
         "<script>window.cgiDataNew = {show_comment: 1, comment_id: 10};</script>",
@@ -747,6 +924,54 @@ def test_wechat_verify_html_is_an_ip_block_not_a_cookie_error() -> None:
 
     assert result.coverage == "blocked"
     assert "访问验证" in result.reason
+
+
+@pytest.mark.parametrize("payload, expected_coverage", [
+    ({"base_resp": {"ret": 0}}, "failed"),
+    ({"base_resp": {"ret": 0}, "elected_comment": {}}, "failed"),
+    ({"base_resp": {"ret": 0}, "elected_comment": [], "continue_flag": False}, "partial"),
+])
+def test_wechat_empty_page_requires_a_comment_list(payload, expected_coverage) -> None:
+    html = '<script>window.cgiDataNew = {comment_id: "10", bizuin: "MzA=", mid: "20", idx: "1"};</script>'
+    client = DualFakeClient(gets=[FakeResponse(text=html), FakeResponse(payload)])
+    result = asyncio.run(EngagementCrawler(
+        client=client, platform_cookies={"wechat": "wap_sid2=session"},
+    ).fetch_comments("https://mp.weixin.qq.com/s/article-token", "微信", 1))
+
+    assert result.coverage == expected_coverage
+    assert result.comments == []
+    assert result.total_comments is None
+    assert result.next_page is None
+
+
+def test_wechat_comment_total_zero_is_not_replaced_by_another_count() -> None:
+    html = '<script>window.cgiDataNew = {comment_id: "10", bizuin: "MzA=", mid: "20", idx: "1"};</script>'
+    client = DualFakeClient(gets=[FakeResponse(text=html), FakeResponse({
+        "base_resp": {"ret": 0}, "elected_comment": [],
+        "total_count": 0, "total": 7, "continue_flag": False,
+    })])
+    result = asyncio.run(EngagementCrawler(
+        client=client, platform_cookies={"wechat": "wap_sid2=session"},
+    ).fetch_comments("https://mp.weixin.qq.com/s/article-token", "微信", 1))
+
+    assert result.total_comments == 0
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"reply_new": {"reply_total_cnt": 5, "reply_list": []}}, 5),
+    ({"reply_new": {"reply_total_cnt": 0}}, 0),
+    ({"reply_count": 0, "reply": {"content": "stale reply"}}, 0),
+    ({"reply": {"content": "作者回复"}}, 1),
+    ({}, None),
+])
+def test_wechat_parses_reply_total_without_counting_preview_rows(fields, expected) -> None:
+    from app.crawlers.platforms.wechat import parse_comments
+
+    comments = parse_comments({"elected_comment": [{
+        "content_id": "4700265259775918081", "content": "评论", **fields,
+    }]})
+    assert comments[0].comment_id == "4700265259775918081"
+    assert comments[0].replies == expected
 
 
 def test_wechat_captcha_redirect_is_reported_as_blocked() -> None:

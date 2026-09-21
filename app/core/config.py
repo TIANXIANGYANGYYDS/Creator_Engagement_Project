@@ -53,6 +53,18 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         alias="XIAOHONGSHU_COOKIE",
     )
+    douyin_author_session_mode: Literal["anonymous", "cookie"] = Field(
+        default="anonymous", alias="DOUYIN_AUTHOR_SESSION_MODE"
+    )
+    douyin_author_cookie: SecretStr = Field(
+        default=SecretStr(""), alias="DOUYIN_AUTHOR_COOKIE"
+    )
+    author_use_saved_sessions: bool = Field(default=False, alias="AUTHOR_USE_SAVED_SESSIONS")
+    author_guest_only: bool = Field(default=True, alias="AUTHOR_GUEST_ONLY")
+    kuaishou_author_cookie: SecretStr = Field(default=SecretStr(""), alias="KUAISHOU_AUTHOR_COOKIE")
+    weibo_author_cookie: SecretStr = Field(default=SecretStr(""), alias="WEIBO_AUTHOR_COOKIE")
+    bilibili_author_cookie: SecretStr = Field(default=SecretStr(""), alias="BILIBILI_AUTHOR_COOKIE")
+    toutiao_author_cookie: SecretStr = Field(default=SecretStr(""), alias="TOUTIAO_AUTHOR_COOKIE")
 
     creator_engagement_cookie: SecretStr = Field(
         default=SecretStr(""),
@@ -95,6 +107,8 @@ class Settings(BaseSettings):
         alias="REQUEST_TIMEOUT_SECONDS",
         gt=0,
     )
+    api_sync_timeout_seconds: float = Field(default=120, alias="API_SYNC_TIMEOUT_SECONDS", gt=0)
+    api_sync_max_items: int = Field(default=0, alias="API_SYNC_MAX_ITEMS", ge=0)
     collection_max_concurrency: int = Field(
         default=8,
         alias="COLLECTION_MAX_CONCURRENCY",
@@ -154,10 +168,9 @@ class Settings(BaseSettings):
         alias="JOB_DB_PATH",
     )
     job_max_items: int = Field(
-        default=5_000,
+        default=0,
         alias="JOB_MAX_ITEMS",
-        ge=1,
-        le=100_000,
+        ge=0,
     )
     job_result_max_bytes: int = Field(
         default=8 * 1024 * 1024,
