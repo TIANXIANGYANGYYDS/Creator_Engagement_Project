@@ -1711,6 +1711,30 @@ def test_douyin_anonymous_session_fetches_stats_and_comments() -> None:
     assert client.calls[1][1]["params"]["a_bogus"]
 
 
+def test_douyin_argus_rejection_stops_proxy_retries() -> None:
+    client = FakeClient(
+        FakeResponse(payload={"status_code": 0}, cookies={"ttwid": "visitor-token"}),
+        FakeResponse(
+            status_code=403,
+            text="Blocked by ArgusSecurityPlugin Uifid Not Found",
+        ),
+    )
+    crawler = EngagementCrawler(
+        client=client,
+        platform_protocol_max_attempts={"douyin": 8},
+    )
+
+    result = asyncio.run(crawler.fetch(
+        "https://www.iesdouyin.com/share/video/7694332600140252142"
+    ))
+
+    assert result.coverage == "blocked"
+    assert result.retryable is False
+    assert "ArgusSecurityPlugin" in result.reason
+    assert result.protocol_attempts == 1
+    assert len(client.calls) == 2
+
+
 def test_kuaishou_protected_graphql_is_not_reported_as_target_data() -> None:
     client = FakeClient()
     result = asyncio.run(EngagementCrawler(client=client).fetch(

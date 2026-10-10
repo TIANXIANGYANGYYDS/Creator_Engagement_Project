@@ -103,7 +103,11 @@ async def fetch(
                     url,
                     work_id,
                     "unsupported",
-                    "当前网页评论请求缺少可用 Cookie；本地游客浏览器可尝试公开首屏，尚未验证游客深分页",
+                    (
+                        "已保存的小红书账号会话不存在或 Cookie 已过期，请在本机重新登录并保存会话"
+                        if getattr(crawler, "xiaohongshu_session_store", None) is not None
+                        else "当前网页评论请求缺少可用 Cookie；本地游客浏览器可尝试公开首屏，尚未验证游客深分页"
+                    ),
                 )
             if not token:
                 if include_stats:
@@ -204,6 +208,13 @@ async def fetch(
     except PlatformBlockedError as exc:
         return result_error("xiaohongshu", url, work_id, "blocked", str(exc))
     except Exception as exc:
+        if "登录已过期" in str(exc):
+            result = result_error(
+                "xiaohongshu", url, work_id, "blocked",
+                "小红书登录态已失效，请重新扫码授权",
+            )
+            result.retryable = False
+            return result
         return result_error("xiaohongshu", url, work_id, "failed", str(exc))
 
 

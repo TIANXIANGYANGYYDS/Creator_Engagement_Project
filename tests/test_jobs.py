@@ -625,6 +625,47 @@ def test_running_job_can_be_cancelled_without_marking_it_failed() -> None:
     asyncio.run(scenario())
 
 
+def test_job_stops_after_repeated_douyin_argus_rejections() -> None:
+    async def scenario() -> None:
+        service = FakeJobService()
+        manager = BatchJobManager(retention_seconds=60, item_max_concurrency=1)
+        request = CreateJobRequest.model_validate({"items": [
+            {
+                "item_id": f"argus-{index}",
+                "url": f"https://www.douyin.com/video/{7694332600140252142 + index}",
+                "media_name": "抖音",
+                "type": "interactions",
+            }
+            for index in range(30)
+        ]})
+
+        async def collector(item) -> JobItemResponse:
+            index = int(item.item_id.rsplit("-", 1)[-1])
+            return JobItemResponse(
+                item_id=item.item_id, url=item.url, media_name=item.media_name,
+                type=item.type, status="failed", complete=False, result={},
+                error=(
+                    "抖音详情接口被 ArgusSecurityPlugin 拒绝：访客请求缺少有效设备标识或签名"
+                    if index % 2 == 0 else "engagement request failed"
+                ),
+            )
+
+        submitted = await manager.submit(
+            request, collector=collector,
+            proxy_usage_scope=service.proxy_usage_scope,
+        )
+        await manager._tasks[submitted.job_id]
+        status = await manager.get_status(submitted.job_id)
+        assert status is not None
+        assert status.status == "failed"
+        assert status.progress.completed == 19
+        assert status.progress.failed == 19
+        assert "ArgusSecurityPlugin" in status.error
+        await manager.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_job_item_timeout_isolated_as_a_failed_result() -> None:
     async def scenario() -> None:
         service = FakeJobService()

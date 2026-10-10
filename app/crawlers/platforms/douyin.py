@@ -9,7 +9,11 @@ from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 
-from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
+from app.crawlers.http_client import (
+    PlatformBlockedError,
+    PlatformCrawlerError,
+    PlatformDeterministicBlockedError,
+)
 from app.crawlers.platforms.base import PlatformCrawlerContext
 from app.crawlers.platforms.common import (
     COMMENT_PAGE_SIZE,
@@ -51,11 +55,31 @@ async def fetch(
         "User-Agent": DOUYIN_PROTOCOL_USER_AGENT,
     }
     try:
-        cookie = crawler._platform_cookie("douyin")
-        if cookie:
-            headers["Cookie"] = cookie
+        sessions = getattr(crawler, "douyin_visitor_sessions", None)
+        visitor = await sessions.get(referer) if sessions is not None else None
+        if visitor is not None:
+            headers = visitor.headers(referer)
         else:
-            headers["Cookie"] = await prepare_anonymous_session(crawler, referer)
+            headers["Cookie"] = crawler._platform_cookie("douyin") or (
+                await prepare_anonymous_session(crawler, referer)
+            )
+
+        async def request(endpoint, params):
+            if visitor is not None:
+                from app.crawlers.authors.douyin_session import signed_url
+
+                response = await crawler._get_response(
+                    signed_url(endpoint, params, visitor.cookies, visitor.profile),
+                    headers=visitor.headers(referer),
+                )
+                response_cookies = getattr(response, "cookies", None)
+                if response_cookies is not None:
+                    visitor.cookies.update(dict(response_cookies.items()))
+                return response
+            return await crawler._get_response(
+                endpoint, params=signed_params({**params, "msToken": random_ms_token()}),
+                headers=headers, include_cookies=True,
+            )
 
         stats = EngagementStats()
         comments: list[EngagementComment] = []
@@ -64,17 +88,14 @@ async def fetch(
         sources: list[str] = []
 
         if include_stats:
-            detail_response = await crawler._get_response(
+            detail_response = await request(
                 DETAIL_URL,
-                params=signed_params({
+                {
                     "device_platform": "webapp",
                     "aid": "6383",
                     "channel": "channel_pc_web",
                     "aweme_id": work_id,
-                    "msToken": random_ms_token(),
-                }),
-                headers=headers,
-                include_cookies=True,
+                },
             )
             detail_text = str(getattr(detail_response, "text", "") or "")
             if not detail_text.strip():
@@ -109,6 +130,10 @@ async def fetch(
                 return result
             if detail_payload.get("status_code") != 0 or not detail:
                 raise PlatformCrawlerError("抖音详情接口没有有效作品数据")
+            if (
+                visitor is not None or detail.get("aweme_id")
+            ) and str(detail.get("aweme_id")) != work_id:
+                raise PlatformCrawlerError("抖音详情返回的作品 ID 与请求不匹配")
             statistics = detail.get("statistics") or {}
             stats = EngagementStats(
                 views=public_view_count(statistics),
@@ -138,14 +163,8 @@ async def fetch(
                     "whale_cut_token": "",
                     "cut_version": "1",
                     "rcFT": "",
-                    "msToken": random_ms_token(),
                 }
-                comment_response = await crawler._get_response(
-                    COMMENT_URL,
-                    params=signed_params(comment_params),
-                    headers=headers,
-                    include_cookies=True,
-                )
+                comment_response = await request(COMMENT_URL, comment_params)
                 comment_text = str(getattr(comment_response, "text", "") or "")
                 if not comment_text.strip():
                     comments = []
@@ -182,6 +201,10 @@ async def fetch(
             comments=comments[:limit],
             next_cursor=next_cursor,
         )
+    except PlatformDeterministicBlockedError as exc:
+        result = result_error("douyin", url, work_id, "blocked", str(exc))
+        result.retryable = False
+        return result
     except PlatformBlockedError as exc:
         return result_error("douyin", url, work_id, "blocked", str(exc))
     except Exception as exc:

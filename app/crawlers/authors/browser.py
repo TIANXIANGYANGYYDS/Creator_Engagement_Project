@@ -34,7 +34,7 @@ def profile_url(request):
 
 
 class BrowserTransport:
-    def __init__(self, crawler, semaphore, *, headless=True):
+    def __init__(self, crawler, semaphore, *, headless=True, wait_for_douyin_sdk=True):
         self.crawler = crawler
         self.client = crawler.client
         self.semaphore = semaphore
@@ -46,6 +46,7 @@ class BrowserTransport:
         self._acquired = False
         self.douyin_sdk_ready = False
         self.douyin_request_mode = "native"
+        self.wait_for_douyin_sdk = wait_for_douyin_sdk
 
     async def open(self, url):
         from camoufox.async_api import AsyncCamoufox
@@ -163,7 +164,11 @@ class BrowserTransport:
                 cookies = await self.page.context.cookies("https://www.douyin.com")
                 names = {c["name"] for c in cookies if c["value"]}
                 if names.intersection(douyin_session.VISITOR_COOKIES):
-                    if self.douyin_sdk_ready or monotonic() >= deadline:
+                    if (
+                        not self.wait_for_douyin_sdk
+                        or self.douyin_sdk_ready
+                        or monotonic() >= deadline
+                    ):
                         return
             except Exception as exc:
                 if monotonic() >= deadline:

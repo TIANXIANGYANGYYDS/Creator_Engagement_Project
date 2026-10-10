@@ -388,6 +388,8 @@ class BatchJobManager:
         await self.repository.update_job(stored)
         tasks: list[asyncio.Task[None]] = []
         proxy_usage: Any = None
+        douyin_argus_failures = 0
+        douyin_unavailable = asyncio.Event()
         try:
             async with proxy_usage_scope() as active_proxy_usage:
                 proxy_usage = active_proxy_usage
@@ -396,7 +398,10 @@ class BatchJobManager:
                     queue.put_nowait(item)
 
                 async def worker() -> None:
+                    nonlocal douyin_argus_failures
                     while True:
+                        if douyin_unavailable.is_set():
+                            return
                         try:
                             item = queue.get_nowait()
                         except asyncio.QueueEmpty:
@@ -408,6 +413,13 @@ class BatchJobManager:
                             collection_scope,
                         )
                         result = self._bounded_result(result)
+                        if result.media_name in {"douyin", "抖音"}:
+                            if result.error and "ArgusSecurityPlugin" in result.error:
+                                douyin_argus_failures += 1
+                                if douyin_argus_failures >= 10:
+                                    douyin_unavailable.set()
+                            elif result.status == "success":
+                                douyin_argus_failures = 0
                         async def persist_result() -> None:
                             async with self._lock:
                                 await self.repository.append_result(stored.job_id, stored.completed, result)
@@ -439,7 +451,11 @@ class BatchJobManager:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
             if not stored.cancel_requested:
-                stored.status = "completed"
+                if douyin_unavailable.is_set():
+                    stored.status = "failed"
+                    stored.error = "抖音接口多次返回 ArgusSecurityPlugin 拒绝；已停止任务以保留未处理项"
+                else:
+                    stored.status = "completed"
         except asyncio.CancelledError:
             raise
         except Exception:

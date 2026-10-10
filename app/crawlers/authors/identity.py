@@ -155,7 +155,7 @@ def select_xhs_user(payload, account):
             str(user.get(k) or "") for k in ("red_id", "redId", "user_id", "userid")
         }:
             continue
-        uid = str(user.get("user_id") or user.get("userid") or "")
+        uid = str(user.get("user_id") or user.get("userid") or user.get("id") or "")
         if re.fullmatch(r"[0-9a-f]{24}", uid):
             matches[uid] = uid
     if len(matches) != 1:
@@ -185,6 +185,8 @@ async def resolve_xiaohongshu(crawler, account):
                 if endpoint in request.url:
                     payload = value
     if payload is None:
+        from xhshow import Xhshow
+
         cookie = (
             await crawler.cookie_header(origin)
             if hasattr(crawler, "cookie_header")
@@ -192,14 +194,15 @@ async def resolve_xiaohongshu(crawler, account):
         )
         if not cookie:
             raise PlatformCrawlerError("小红书号解析需要有效的平台会话")
+        search_ids = Xhshow()
         body = {
             "search_user_request": {
                 "keyword": account,
                 "page": 1,
                 "page_size": 15,
-                "search_id": "",
+                "search_id": search_ids.get_search_id(),
                 "biz_type": "web_search_user",
-                "request_id": "",
+                "request_id": search_ids.get_search_request_id(),
             }
         }
         headers = authenticated_headers(

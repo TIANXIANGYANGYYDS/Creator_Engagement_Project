@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from time import monotonic
+import json
+from time import monotonic, time
 
 import pytest
 
@@ -355,6 +356,49 @@ def test_strict_mode_allows_only_explicit_xiaohongshu_cookie(tmp_path) -> None:
     assert service.crawler._platform_cookie("wechat") == ""
     assert service.crawler.platform_cookies == {"xiaohongshu": cookie}
     assert service.crawler.xiaohongshu_cookie_enabled is True
+    asyncio.run(service.aclose())
+
+
+def test_stored_xiaohongshu_session_is_reloaded_and_scoped(tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        strict_anonymous_mode=True,
+        xiaohongshu_session_mode="stored",
+        browser_fallback_enabled=False,
+        platform_session_dir=str(tmp_path / "sessions"),
+        proxy_51_api_url="https://proxy-provider.example/api",
+    )
+    service = EngagementService.from_settings(settings)
+    store = service.crawler.xiaohongshu_session_store
+    assert store is not None
+    assert service.crawler._platform_cookie("xiaohongshu") == ""
+    assert service.crawler._platform_cookie("wechat") == ""
+    assert not service.crawler._should_use_browser_fallback(
+        EngagementResult(
+            platform="xiaohongshu", canonical_url="https://www.xiaohongshu.com/explore/abc",
+            work_id="abc", coverage="unsupported",
+        ),
+        include_stats=False,
+        include_comments=True,
+    )
+    store.root.mkdir(parents=True)
+
+    def save_session(session: str, expires: float) -> None:
+        store.state_path("xiaohongshu").write_text(json.dumps({"cookies": [
+            {"name": "a1", "value": "device", "domain": ".xiaohongshu.com",
+             "path": "/", "expires": time() + 3600},
+            {"name": "web_session", "value": session,
+             "domain": ".xiaohongshu.com", "path": "/", "expires": expires},
+            {"name": "other", "value": "nope", "domain": ".example.com",
+             "path": "/", "expires": time() + 3600},
+        ]}), encoding="utf-8")
+
+    save_session("first", time() + 3600)
+    assert service.crawler._platform_cookie("xiaohongshu") == "a1=device; web_session=first"
+    save_session("renewed", time() + 3600)
+    assert service.crawler._platform_cookie("xiaohongshu") == "a1=device; web_session=renewed"
+    save_session("expired", time() - 1)
+    assert service.crawler._platform_cookie("xiaohongshu") == ""
     asyncio.run(service.aclose())
 
 

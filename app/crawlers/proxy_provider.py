@@ -590,6 +590,10 @@ class AsyncDailiProxyPool(DailiProxyProvider):
             "creator_engagement_proxy_usage",
             default=None,
         )
+        self._affinity: ContextVar[str | None] = ContextVar(
+            "creator_engagement_proxy_affinity", default=None,
+        )
+        self._affinity_slots: dict[str, tuple[str, int]] = {}
 
     @property
     def _condition(self) -> asyncio.Condition:
@@ -608,6 +612,15 @@ class AsyncDailiProxyPool(DailiProxyProvider):
             yield usage
         finally:
             self._usage.reset(token)
+
+    @asynccontextmanager
+    async def affinity_scope(self, key: str) -> AsyncIterator[None]:
+        """Prefer one live proxy endpoint for requests sharing an account."""
+        token = self._affinity.set(key)
+        try:
+            yield
+        finally:
+            self._affinity.reset(token)
 
     def _slot_expire_at(self) -> float:
         """计算新槽位在单调时钟上的提前刷新截止点。"""
@@ -645,7 +658,18 @@ class AsyncDailiProxyPool(DailiProxyProvider):
         ]
         if not candidates:
             return None
-        return min(candidates, key=lambda slot: (slot.in_flight, slot.expire_at))
+        affinity = self._affinity.get()
+        if affinity:
+            pinned = self._affinity_slots.get(affinity)
+            for slot in candidates:
+                if (slot.endpoint.host, slot.endpoint.port) == pinned:
+                    return slot
+        selected = min(candidates, key=lambda slot: (slot.in_flight, slot.expire_at))
+        if affinity:
+            self._affinity_slots[affinity] = (
+                selected.endpoint.host, selected.endpoint.port,
+            )
+        return selected
 
     async def _fetch_proxy_endpoints_async(
         self,

@@ -20,6 +20,7 @@ from app.crawlers.http_client import (
     CurlAsyncHttpClient,
     PlatformBlockedError,
     PlatformCrawlerError,
+    PlatformDeterministicBlockedError,
 )
 from app.crawlers.comment_capabilities import comment_capabilities
 from app.crawlers.platforms import PLATFORM_HANDLERS
@@ -38,6 +39,7 @@ from app.models.engagement import (
 if TYPE_CHECKING:
     from app.crawlers.browser_fallback import BrowserFallback
     from app.crawlers.platform_session import PlatformSessionStore
+    from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolver
     from app.crawlers.wechat_session_bridge import HttpWeChatSessionBridgeClient
     from app.crawlers.wechat_channels_bridge import HttpWeChatChannelsBridgeClient
 
@@ -59,6 +61,8 @@ class EngagementCrawler:
         proxy_mode: str = "direct",
         browser_fallback: "BrowserFallback | None" = None,
         session_store: "PlatformSessionStore | None" = None,
+        xiaohongshu_session_store: "PlatformSessionStore | None" = None,
+        xiaohongshu_url_resolver: "XiaohongshuUrlResolver | None" = None,
         platform_cookies: dict[EngagementPlatform, str] | None = None,
         max_protocol_attempts: int = 1,
         platform_protocol_max_attempts: dict[EngagementPlatform, int] | None = None,
@@ -110,6 +114,8 @@ class EngagementCrawler:
         self.cookies = cookies
         self.browser_fallback = browser_fallback
         self.session_store = session_store
+        self.xiaohongshu_session_store = xiaohongshu_session_store
+        self.xiaohongshu_url_resolver = xiaohongshu_url_resolver
         self.platform_cookies = platform_cookies or {}
         self.max_protocol_attempts = max_protocol_attempts
         self.platform_protocol_max_attempts = platform_protocol_max_attempts or {}
@@ -240,6 +246,20 @@ class EngagementCrawler:
         )
         if not work_id:
             raise ValueError(f"cannot extract {platform} content id from URL")
+
+        if platform == "xiaohongshu" and self.xiaohongshu_url_resolver is not None:
+            from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolutionError
+
+            try:
+                url = await self.xiaohongshu_url_resolver.resolve(self, url, work_id)
+            except XiaohongshuUrlResolutionError as exc:
+                result = result_error(platform, url, work_id, "unsupported", str(exc))
+                result.retryable = False
+                return result
+            except PlatformCrawlerError as exc:
+                result = result_error(platform, url, work_id, "blocked", str(exc))
+                result.retryable = False
+                return result
 
         await self._wait_for_circuit_cooldown(platform)
 
@@ -517,6 +537,13 @@ class EngagementCrawler:
             # WeChat and never requests comment bodies in the browser page.
             return False
         if (
+            result.platform == "xiaohongshu"
+            and include_comments
+            and self.xiaohongshu_session_store is not None
+        ):
+            # The fallback uses an anonymous profile, not the saved account.
+            return False
+        if (
             result.platform == "wechat_channels"
             and result.work_id.startswith("export/")
         ):
@@ -673,6 +700,14 @@ class EngagementCrawler:
         except Exception as exc:
             raise PlatformCrawlerError("engagement request failed") from exc
         status = int(getattr(response, "status_code", 0))
+        if (
+            status == 403
+            and url.startswith("https://www.douyin.com/aweme/v1/web/")
+            and "Blocked by ArgusSecurityPlugin" in str(getattr(response, "text", "") or "")
+        ):
+            raise PlatformDeterministicBlockedError(
+                "抖音接口被 ArgusSecurityPlugin 拒绝：访客请求缺少有效设备标识或签名"
+            )
         if status in {401, 403, 406, 412, 418, 429, 432, 461, 471}:
             raise PlatformBlockedError(f"engagement endpoint blocked with HTTP {status}")
         if status < 200 or status >= 300:
@@ -808,6 +843,12 @@ class EngagementCrawler:
         self._weibo_visitor_cookie_header = ""
 
     def _platform_cookie(self, platform: EngagementPlatform) -> str:
+        if platform == "xiaohongshu" and self.xiaohongshu_session_store is not None:
+            cookie = self.xiaohongshu_session_store.cookie_header_for_url(
+                platform, "https://edith.xiaohongshu.com/api/sns/web/v2/comment/page"
+            )
+            names = {part.partition("=")[0].strip().lower() for part in cookie.split(";")}
+            return cookie if {"a1", "web_session"} <= names else ""
         if self.strict_anonymous_mode and platform == "douyin":
             # A persisted browser guest identity is bound to the browser's
             # former egress and device state.  Reusing it on a rotating proxy

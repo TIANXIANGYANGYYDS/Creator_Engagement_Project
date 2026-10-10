@@ -130,7 +130,7 @@ def test_health_interactions_and_comments_routes(monkeypatch) -> None:
     assert health.json()["douyin_max_concurrency"] == 4
     assert health.json()["browser_max_concurrency"] == 3
     assert health.json()["browser_max_attempts"] == 3
-    assert health.json()["douyin_protocol_max_attempts"] == 8
+    assert health.json()["douyin_protocol_max_attempts"] == 2
     assert health.json()["job_item_timeout_seconds"] == 90
     assert health.json()["job_timeout_seconds"] == 1800
     assert interactions.status_code == 200

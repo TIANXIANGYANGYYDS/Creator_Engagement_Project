@@ -14,7 +14,7 @@
   部署方显式提供已有账号 Cookie。
 - 不依赖其他项目或缓存型数据服务；无法从平台实时协议取得的数据会明确返回失败。
 - 历史账号 Cookie、公众号凭据、微信侧车和账号 Profile 均被忽略；只有显式启用的
-  `XIAOHONGSHU_SESSION_MODE=cookie` 可以注入小红书专用 Cookie。
+  `XIAOHONGSHU_SESSION_MODE=cookie|stored` 可以注入小红书专用账号会话。
 - 只获取一级评论正文，不获取评论下的回复正文。
 - 评论对象中的 `replies` 仅表示平台返回的回复数量，不会触发额外请求。
 - “全部评论”指当前会话能顺序访问的全部一级评论；小红书匿名游客通常只开放首批。结果不包含
@@ -45,10 +45,13 @@
 App 签名、设备会话与微信客户端方案的实测进展见 [App 路径研究](docs/APP_INTERACTION_RESEARCH_2026-09-20.md)。
 2026-09-20 续测仍未从样例中的这三个平台原始 URL 取得互动字段；一次无账号浏览器取得了
 原始公众号正文及评论参数，但评论接口仍返回 `no session`，后续正文复测也未稳定成功。
-工作区已修复小红书统计误取相邻推荐笔记的问题，并补充代理静态资源恢复；候选版本回归
-为 372 passed、22 skipped，尚未切换到 8200。最新修复还支持公众号新版页脚中的赞、推荐、
+9 月 21 日已部署小红书统计归属校验及代理静态资源恢复修复；当时候选版本回归
+为 372 passed、22 skipped。该版本还支持公众号新版页脚中的赞、推荐、
 收藏等计数，并区分空值与真实零值；这项解析修复不代表原始样例已能取得上游计数。
 App 与网页联合分析的实测结果及限制见上述研究记录的续测部分。
+2026-10-11 的抖音修复自动建立代理绑定的匿名访客会话，补齐 UIFID 与 Web 签名；
+临时失败最多尝试两次，明确的 Argus 拒绝不重试，批量任务持续拒绝时提前停止。
+具体故障证据、恢复验证及原批次补采结果见 [事故报告](docs/incident-2026-10-10-douyin.md)。
 后续验证已能无账号读取原始公众号的公开合集及其文章链接，并取得一篇原始文章正文；
 8 个不同公众号样例的扩展信息、合集条目仍未提供单篇互动计数。网页游客调用小红书
 App 详情/评论路径也仍无数据，尚未形成新的生产采集路径。
@@ -270,8 +273,8 @@ CLI 与 API 使用相同的强制代理配置；不提供绕过代理的直连�
 | 配置项 | 默认值 | 作用 |
 |---|---:|---|
 | `STRICT_ANONYMOUS_MODE` | `true` | 禁止复用账号 Cookie、凭据、侧车和历史账号 Profile |
-| `XIAOHONGSHU_SESSION_MODE` | `disabled` | 设为 `cookie` 时仅放行小红书专用会话 |
-| `XIAOHONGSHU_COOKIE` | 空 | 小红书 Cookie Secret，必须包含非空 `a1` 和 `web_session` |
+| `XIAOHONGSHU_SESSION_MODE` | `disabled` | `cookie` 读取静态 Secret；`stored` 动态读取本地已保存的小红书登录态 |
+| `XIAOHONGSHU_COOKIE` | 空 | `cookie` 模式使用的小红书 Secret，必须包含非空 `a1` 和 `web_session` |
 | `WECHAT_CHANNELS_BRIDGE_URL` | 空 | 授权视频号侧车地址；客户端 `feedID` 评论正文需要配置 |
 | `WECHAT_CHANNELS_BRIDGE_TOKEN` | 空 | 视频号侧车鉴权令牌 |
 | `PROXY_MODE` | `required` | 所有目标平台采集流量强制使用代理；无可用代理时明确失败，禁止本机直连 |
@@ -299,7 +302,7 @@ CLI 与 API 使用相同的强制代理配置；不提供绕过代理的直连�
 | `RELIABILITY_MODE` | `enterprise` | 启用协议重试、语义失败换 IP 和平台保护 |
 | `PROTOCOL_MAX_ATTEMPTS` | `3` | 企业模式最大协议尝试次数 |
 | `TOUTIAO_PROTOCOL_MAX_ATTEMPTS` | `1` | 头条 SSR 能力探测次数；避免确定性空结果重复换 IP |
-| `DOUYIN_PROTOCOL_MAX_ATTEMPTS` | `8` | 抖音临时失败的协议上限；每次尝试使用独立代理租约和 HTTP 会话 |
+| `DOUYIN_PROTOCOL_MAX_ATTEMPTS` | `2` | 抖音临时失败最多尝试两次；明确的 Argus 签名拒绝不重试 |
 | `COLLECTION_MAX_CONCURRENCY` | `8` | 全局采集并发 |
 | `DOUYIN_MAX_CONCURRENCY` | `4` | 抖音平台并发；由 2/4/6 档真实请求对照确定 |
 | `BROWSER_FALLBACK_ENABLED` | `true` | 协议不可用时允许浏览器兜底 |
@@ -354,8 +357,46 @@ XIAOHONGSHU_SESSION_MODE="cookie"
 XIAOHONGSHU_COOKIE="a1=<设备会话>; web_session=<账号会话>; ..."
 ```
 
-评论 URL 仍须带当前有效的 `xsec_token`。Cookie 失效后接口会返回明确失败状态，服务不会
-通过扫码、短信、验证码或浏览器自动登录恢复账号会话。
+不想反复复制 Cookie 时，可在可见浏览器中完成一次登录并保存会话。无图形界面的 Linux
+服务器可加 `--headless`，在 VS Code 打开 `.local/analysis/xhs-login-qr.png` 扫码确认；
+命令会刷新页面核验账号状态后自动保存：
+
+```bash
+conda run -n MyAgent creator-engagement-login xiaohongshu
+conda run -n MyAgent creator-engagement-login xiaohongshu --headless
+conda run -n MyAgent creator-engagement-login xiaohongshu --headless --check-only
+```
+
+随后在 `.local/env/.env` 设置 `XIAOHONGSHU_SESSION_MODE="stored"` 并重启 API。服务会在每次
+评论请求时重新读取 `.local/platform-sessions/xiaohongshu.json` 中未到期、且适用于小红书评论
+域名的 Cookie；更新该文件无需重启。该文件及浏览器 Profile 位于 Git 忽略的 `.local/` 下，
+必须限制其他用户读取。`--check-only` 可用已有浏览器资料目录核验并续存登录态，失效时立即
+退出，不要求扫码。保存会话避免每次采集重新登录；平台使会话失效或要求安全验证时，仍需重新
+授权，不能保证永久登录。服务会在评论请求中报告失效，不把缺失评论当作零条。
+当前 Linux 服务器已配置每小时第 15 分钟运行一次无扫码续存检查；结果记录在
+`.local/analysis/xhs-session-health.json`，`status=valid` 表示当次核验通过，
+`reauthorization_required` 表示需要重新扫码。定时检查不能覆盖平台主动撤销登录。
+小红书采集会优先复用同一条有效代理租约；当前代理最长约 3 分钟，过期或请求失败后仍会换 IP。
+服务器扫码登录的浏览器与 API 代理出口目前也不一致，因此不能据此承诺账号长期不掉线。
+
+业务文件 `.local/top20_platform_data.json` 中的小红书 589 行（588 个不同笔记）全部是无
+`xsec_token` 的 `/discovery/item/{id}` 链接。当前互动、评论和任务 API 均直接接受原始 URL；
+服务根据来源文件中的作者 ID 精确解析账号，或根据作者名检索候选账号，再通过目标笔记 ID
+核验归属，取得 token 后采集。结果缓存 30 分钟。作者资料缺失、作品不可见或登录失效时返回
+明确失败，不能保证全部历史链接都可恢复。已用授权账号验证原始链接的互动与评论。
+线上小批任务曾完成 4/4 项；在代理亲和改动前扩大到 20 项后仅 5 项成功，随后浏览器核验
+确认登录态失效。代理亲和改动尚未在重新授权后的线上批次验证。
+当前不能把这批 588 个笔记视为已经稳定覆盖，重跑需先恢复授权并验证账号与代理的稳定性。
+也可提前执行批处理命令：
+
+```bash
+conda run -n MyAgent python -m app.manually_execute_script.backfill_xiaohongshu_urls
+```
+
+命令把补齐的 URL 写到 `.local/top20_platform_data_xhs_enriched.json`，不改原文件，
+处理进度和失败原因写到同目录的 `-status.json`。初次可加 `--max-authors 5` 小批验证；
+重复运行会跳过已完成作者。文件中 32 行缺少作者 ID，运行时只在目标笔记确实出现在同名
+账号的作品列表时才采信，不能仅凭昵称认定归属。
 
 ## 项目结构
 

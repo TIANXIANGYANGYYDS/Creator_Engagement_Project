@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -700,8 +701,33 @@ def test_public_account_resolution_requires_exact_unique_match():
         },
     }
     assert select_xhs_user(xhs, "27247934734") == "6667a191000000000700539e"
+    xhs["data"]["users"] = [{"id": "6667a191000000000700539e", "red_id": "27247934734"}]
+    assert select_xhs_user(xhs, "27247934734") == "6667a191000000000700539e"
     with pytest.raises(PlatformCrawlerError, match="完全匹配"):
         select_xhs_user(xhs, "hello")
+
+
+def test_xiaohongshu_author_search_sends_generated_request_ids(monkeypatch):
+    from app.crawlers.authors import identity
+
+    monkeypatch.setattr(identity, "signed_headers", lambda *args, **kwargs: {})
+
+    class SearchCrawler:
+        def _platform_cookie(self, platform):
+            return "a1=device; web_session=account"
+
+        async def _post_json(self, url, **kwargs):
+            request = json.loads(kwargs["data"])["search_user_request"]
+            assert request["keyword"] == "27247934734"
+            assert request["search_id"]
+            assert "-" in request["request_id"]
+            return {"success": True, "data": {"users": [{
+                "id": "6667a191000000000700539e", "red_id": request["keyword"],
+            }]}}
+
+    assert asyncio.run(identity.resolve_xiaohongshu(SearchCrawler(), "27247934734")) == (
+        "6667a191000000000700539e"
+    )
 
 
 def test_numeric_douyin_handle_falls_back_from_internal_uid_lookup(monkeypatch):

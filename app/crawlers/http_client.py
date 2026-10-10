@@ -37,6 +37,10 @@ class PlatformBlockedError(PlatformCrawlerError):
     """The platform rejected an otherwise valid public request."""
 
 
+class PlatformDeterministicBlockedError(PlatformBlockedError):
+    """A request shape rejected independently of the selected proxy."""
+
+
 @dataclass
 class _ProxyLeaseState:
     proxies: dict[str, str] | None = None

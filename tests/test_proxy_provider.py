@@ -94,6 +94,40 @@ def test_async_pool_limits_concurrency_and_refills_failed_slot(monkeypatch) -> N
     asyncio.run(run())
 
 
+def test_async_pool_reuses_account_endpoint_until_lease_fails(monkeypatch) -> None:
+    provider = AsyncDailiProxyPool(
+        minutes=3, pool_size=2, max_concurrency_per_proxy=1,
+        api_url="https://proxy.example/getip",
+    )
+
+    async def fake_fetch(count: int) -> list[ProxyEndpoint]:
+        return [ProxyEndpoint("127.0.0.1", 8000 + index) for index in range(count)]
+
+    monkeypatch.setattr(provider, "_fetch_proxy_endpoints_async", fake_fetch)
+
+    async def run() -> None:
+        try:
+            occupied = await provider.get_requests_proxies()
+            async with provider.affinity_scope("xiaohongshu"):
+                first = await provider.get_requests_proxies()
+                assert first != occupied
+                await provider.on_success_for(first)
+            await provider.on_success_for(occupied)
+
+            async with provider.affinity_scope("xiaohongshu"):
+                assert await provider.get_requests_proxies() == first
+            await provider.on_failure_for(first, ConnectionError("failed"))
+
+            async with provider.affinity_scope("xiaohongshu"):
+                replacement = await provider.get_requests_proxies()
+                assert replacement != first
+                await provider.on_success_for(replacement)
+        finally:
+            await provider.close()
+
+    asyncio.run(run())
+
+
 def test_cancelled_pool_refill_releases_waiters(monkeypatch) -> None:
     async def scenario():
         provider = AsyncDailiProxyPool(minutes=3, pool_size=1, api_url="https://proxy.example/getip")

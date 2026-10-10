@@ -8,10 +8,13 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic
-from app.core.config import Settings
+from urllib.parse import urlsplit
+from app.core.config import PROJECT_ROOT, Settings
 from app.crawlers.browser_fallback import BrowserFallback, BrowserFallbackSettings
 from app.crawlers.engagement import EngagementCrawler
+from app.crawlers.douyin_visitor import DouyinVisitorSessions
 from app.crawlers.platform_session import PlatformSessionStore
+from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolver
 from app.crawlers.platforms.registry import normalize_media_name
 from app.crawlers.proxy_provider import (
     AsyncDailiProxyPool,
@@ -193,6 +196,11 @@ class EngagementService:
             session_dir /= "anonymous"
             profile_dir /= "anonymous"
         session_store = PlatformSessionStore(session_dir)
+        xiaohongshu_session_store = (
+            PlatformSessionStore(Path(settings.platform_session_dir))
+            if settings.xiaohongshu_session_mode == "stored"
+            else None
+        )
         browser_fallback = None
         if settings.browser_fallback_enabled:
             browser_fallback = BrowserFallback(
@@ -242,6 +250,14 @@ class EngagementService:
             proxy_mode=active_mode,
             browser_fallback=browser_fallback,
             session_store=session_store,
+            xiaohongshu_session_store=xiaohongshu_session_store,
+            xiaohongshu_url_resolver=(
+                XiaohongshuUrlResolver(
+                    PROJECT_ROOT / ".local/top20_platform_data.json",
+                    PROJECT_ROOT / ".local/xiaohongshu-url-cache.json",
+                )
+                if xiaohongshu_session_store is not None else None
+            ),
             max_protocol_attempts=(
                 settings.protocol_max_attempts
                 if settings.reliability_mode == "enterprise"
@@ -264,7 +280,9 @@ class EngagementService:
             circuit_failure_threshold=settings.circuit_failure_threshold,
             circuit_cooldown_seconds=settings.circuit_cooldown_seconds,
             strict_anonymous_mode=strict_anonymous,
-            xiaohongshu_cookie_enabled=bool(xiaohongshu_cookie),
+            xiaohongshu_cookie_enabled=(
+                bool(xiaohongshu_cookie) or xiaohongshu_session_store is not None
+            ),
             wechat_mp_app_id=("" if strict_anonymous else settings.wechat_mp_app_id),
             wechat_mp_app_secret=(
                 ""
@@ -293,6 +311,7 @@ class EngagementService:
                 else settings.wechat_channels_bridge_token.get_secret_value()
             ),
         )
+        crawler.douyin_visitor_sessions = DouyinVisitorSessions(crawler.client)
         return cls(
             crawler,
             author_guest_only=settings.author_guest_only,
@@ -329,7 +348,21 @@ class EngagementService:
 
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         async with self._collection_semaphore:
-            return await self.crawler.fetch(url, comment_limit=comment_limit)
+            host = urlsplit(url).hostname or ""
+            platform = "xiaohongshu" if (
+                host == "xiaohongshu.com" or host.endswith(".xiaohongshu.com")
+            ) else ""
+            async with self._proxy_affinity(platform):
+                return await self.crawler.fetch(url, comment_limit=comment_limit)
+
+    @asynccontextmanager
+    async def _proxy_affinity(self, platform: str) -> AsyncIterator[None]:
+        scope = getattr(self.proxy_provider, "affinity_scope", None)
+        if platform == "xiaohongshu" and callable(scope):
+            async with scope("xiaohongshu"):
+                yield
+            return
+        yield
 
     @asynccontextmanager
     async def proxy_usage_scope(self) -> AsyncIterator[ProxyUsage]:
@@ -366,7 +399,8 @@ class EngagementService:
         platform = normalize_media_name(media_name)
 
         async def collect() -> CachedResult:
-            return await self.crawler.fetch_interactions(url, media_name)
+            async with self._proxy_affinity(platform):
+                return await self.crawler.fetch_interactions(url, media_name)
 
         result = await self._fetch_cached(
             ("interactions", platform, url, 0),
@@ -388,9 +422,10 @@ class EngagementService:
         platform = normalize_media_name(media_name)
 
         async def collect() -> CachedResult:
-            if cursor is None:
-                return await self.crawler.fetch_comments(url, media_name, page)
-            return await self.crawler.fetch_comments(url, media_name, page, cursor=cursor)
+            async with self._proxy_affinity(platform):
+                if cursor is None:
+                    return await self.crawler.fetch_comments(url, media_name, page)
+                return await self.crawler.fetch_comments(url, media_name, page, cursor=cursor)
 
         result = await self._fetch_cached(
             ("comments", platform, url, page),

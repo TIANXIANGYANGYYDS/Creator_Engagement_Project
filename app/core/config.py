@@ -45,7 +45,7 @@ class Settings(BaseSettings):
         default=True,
         alias="STRICT_ANONYMOUS_MODE",
     )
-    xiaohongshu_session_mode: Literal["disabled", "cookie"] = Field(
+    xiaohongshu_session_mode: Literal["disabled", "cookie", "stored"] = Field(
         default="disabled",
         alias="XIAOHONGSHU_SESSION_MODE",
     )
@@ -216,7 +216,7 @@ class Settings(BaseSettings):
         le=10,
     )
     douyin_protocol_max_attempts: int = Field(
-        default=8,
+        default=2,
         alias="DOUYIN_PROTOCOL_MAX_ATTEMPTS",
         ge=1,
         le=10,

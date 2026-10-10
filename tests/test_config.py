@@ -42,7 +42,7 @@ def test_proxy_defaults_are_ready_for_managed_pool() -> None:
     assert settings.protocol_max_attempts == 3
     assert settings.protocol_retry_base_seconds == 1
     assert settings.toutiao_protocol_max_attempts == 1
-    assert settings.douyin_protocol_max_attempts == 8
+    assert settings.douyin_protocol_max_attempts == 2
     assert settings.engagement_cache_ttl_seconds == 120
     assert settings.engagement_failure_cache_ttl_seconds == 15
     assert settings.engagement_cache_max_entries == 1000

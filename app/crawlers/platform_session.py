@@ -72,6 +72,40 @@ class PlatformSessionStore:
                 values.append(f"{name}={value}")
         return "; ".join(values)
 
+    def cookie_header_for_url(self, platform: EngagementPlatform, url: str) -> str:
+        """Return unexpired cookies that a browser would send to this URL."""
+        target = urlsplit(url)
+        host = (target.hostname or "").lower()
+        if target.scheme != "https" or not host:
+            return ""
+        try:
+            state = json.loads(self.state_path(platform).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(state, dict):
+            return ""
+        cookies = state.get("cookies")
+        if not isinstance(cookies, list):
+            return ""
+        values = []
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            name, value = cookie.get("name"), cookie.get("value")
+            domain = str(cookie.get("domain") or "").lstrip(".").lower()
+            path = str(cookie.get("path") or "/")
+            expires = cookie.get("expires", -1)
+            if not isinstance(name, str) or not isinstance(value, str) or not name or not value:
+                continue
+            if not domain or not (host == domain or host.endswith("." + domain)):
+                continue
+            if not target.path.startswith(path):
+                continue
+            if not isinstance(expires, (int, float)) or (expires > 0 and expires <= time.time()):
+                continue
+            values.append(f"{name}={value}")
+        return "; ".join(values)
+
     async def save_context(self, platform: EngagementPlatform, context: Any) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.state_path(platform)
