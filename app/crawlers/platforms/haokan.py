@@ -93,9 +93,9 @@ async def fetch(
             next_cursor=next_cursor,
         )
     except PlatformBlockedError as exc:
-        return result_error("haokan", url, work_id, "blocked", str(exc))
+        return result_error("haokan", url, work_id, "blocked", exc)
     except Exception as exc:
-        return result_error("haokan", url, work_id, "failed", str(exc))
+        return result_error("haokan", url, work_id, "failed", exc)
 
 
 def parse_ssr_stats(text: str, work_id: str) -> EngagementStats:

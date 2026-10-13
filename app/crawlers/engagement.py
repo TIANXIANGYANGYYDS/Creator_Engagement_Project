@@ -72,6 +72,8 @@ class EngagementCrawler:
         circuit_cooldown_seconds: float = 20,
         strict_anonymous_mode: bool = False,
         xiaohongshu_cookie_enabled: bool = False,
+        xiaohongshu_request_interval_seconds: float = 0,
+        xiaohongshu_session_socket: str = "",
         wechat_mp_app_id: str = "",
         wechat_mp_app_secret: str = "",
         wechat_mp_access_token: str = "",
@@ -110,6 +112,8 @@ class EngagementCrawler:
             },
             proxy_provider=proxy_provider,
             proxy_mode=proxy_mode,
+            account_direct_min_interval_seconds=xiaohongshu_request_interval_seconds,
+            xiaohongshu_session_socket=xiaohongshu_session_socket,
         )
         self.cookies = cookies
         self.browser_fallback = browser_fallback
@@ -192,9 +196,11 @@ class EngagementCrawler:
             include_stats=True,
             include_comments=False,
         )
-        return InteractionResult.model_validate(
+        converted = InteractionResult.model_validate(
             result.model_dump(exclude={"comments", "next_cursor"})
         )
+        converted._status_error = result._status_error
+        return converted
 
     async def fetch_comments(
         self,
@@ -215,7 +221,7 @@ class EngagementCrawler:
             include_stats=False,
             include_comments=True,
         )
-        return CommentPageResult.model_validate({
+        converted = CommentPageResult.model_validate({
             **result.model_dump(exclude={"stats", "next_cursor", "resume_cursor"}),
             "page": page,
             "next_page": page + 1 if result.next_cursor is not None else None,
@@ -229,6 +235,8 @@ class EngagementCrawler:
                 ),
             ),
         })
+        converted._status_error = result._status_error
+        return converted
 
     async def _fetch(
         self,
@@ -253,11 +261,11 @@ class EngagementCrawler:
             try:
                 url = await self.xiaohongshu_url_resolver.resolve(self, url, work_id)
             except XiaohongshuUrlResolutionError as exc:
-                result = result_error(platform, url, work_id, "unsupported", str(exc))
+                result = result_error(platform, url, work_id, "unsupported", exc)
                 result.retryable = False
                 return result
             except PlatformCrawlerError as exc:
-                result = result_error(platform, url, work_id, "blocked", str(exc))
+                result = result_error(platform, url, work_id, "blocked", exc)
                 result.retryable = False
                 return result
 
@@ -512,6 +520,10 @@ class EngagementCrawler:
         include_stats: bool,
         include_comments: bool,
     ) -> bool:
+        if result.platform in {"sina", "sina_finance", "baijiahao", "yoojia", "dongchedi", "netease", "autohome", "ixigua", "qq_stock"}:
+            # These collectors already use the public page/API; the generic
+            # browser parser has no additional path for their failed inputs.
+            return False
         if result.platform in {"douyin", "weibo"}:
             # Both protocol collectors now establish their own guest session
             # and distinguish unavailable content. Browser navigation did not
@@ -680,6 +692,7 @@ class EngagementCrawler:
         include_cookies: bool = False,
         force_direct: bool = False,
         discard_cookies: bool = False,
+        allow_statuses: set[int] | None = None,
     ) -> Any:
         request_headers = dict(headers or {})
         if include_cookies and self.cookies:
@@ -697,6 +710,8 @@ class EngagementCrawler:
                     response = await self.client.get(url, **request_kwargs)
             else:
                 response = await self.client.get(url, **request_kwargs)
+        except PlatformCrawlerError:
+            raise
         except Exception as exc:
             raise PlatformCrawlerError("engagement request failed") from exc
         status = int(getattr(response, "status_code", 0))
@@ -710,7 +725,7 @@ class EngagementCrawler:
             )
         if status in {401, 403, 406, 412, 418, 429, 432, 461, 471}:
             raise PlatformBlockedError(f"engagement endpoint blocked with HTTP {status}")
-        if status < 200 or status >= 300:
+        if (status < 200 or status >= 300) and status not in (allow_statuses or set()):
             raise PlatformCrawlerError(f"engagement endpoint returned HTTP {status}")
         return response
 
@@ -746,6 +761,8 @@ class EngagementCrawler:
                     data=data,
                     json=json_body,
                 )
+        except PlatformCrawlerError:
+            raise
         except Exception as exc:
             raise PlatformCrawlerError("engagement request failed") from exc
         status = int(getattr(response, "status_code", 0))

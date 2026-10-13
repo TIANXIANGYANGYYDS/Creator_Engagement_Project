@@ -53,6 +53,23 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         alias="XIAOHONGSHU_COOKIE",
     )
+    xiaohongshu_source_path: str = Field(
+        default=".local/top20_platform_data.json", alias="XIAOHONGSHU_SOURCE_PATH",
+    )
+    xiaohongshu_session_dir: str = Field(default="", alias="XIAOHONGSHU_SESSION_DIR")
+    xiaohongshu_browser_profile_dir: str = Field(default="", alias="XIAOHONGSHU_BROWSER_PROFILE_DIR")
+    xiaohongshu_session_socket: str = Field(default="", alias="XIAOHONGSHU_SESSION_SOCKET")
+    xiaohongshu_request_interval_seconds: float = Field(
+        default=5, ge=0, alias="XIAOHONGSHU_REQUEST_INTERVAL_SECONDS",
+    )
+    xiaohongshu_monitor_url: str = Field(
+        default="https://www.xiaohongshu.com/discovery/item/6aca066d000000000a0213b8",
+        alias="XIAOHONGSHU_MONITOR_URL",
+    )
+    feishu_app_id: str = Field(default="", alias="FEISHU_APP_ID")
+    feishu_app_secret: SecretStr = Field(default=SecretStr(""), alias="FEISHU_APP_SECRET")
+    feishu_error_re_chat_id: str = Field(default="", alias="FEISHU_ERROR_RE_CHAT_ID")
+    feishu_status_alerts_enabled: bool = Field(default=False, alias="FEISHU_STATUS_ALERTS_ENABLED")
     douyin_author_session_mode: Literal["anonymous", "cookie"] = Field(
         default="anonymous", alias="DOUYIN_AUTHOR_SESSION_MODE"
     )

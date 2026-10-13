@@ -61,6 +61,7 @@ class BrowserTransport:
                 os="windows",
                 locale="zh-CN",
                 proxy=_playwright_proxy(mapping),
+                firefox_user_prefs={"network.proxy.type": 0} if platform_for_url(url) == "xiaohongshu" else {},
                 geoip=False,
                 block_webrtc=True,
                 exclude_addons=[DefaultAddons.UBO],

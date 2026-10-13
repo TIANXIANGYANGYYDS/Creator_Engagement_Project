@@ -96,6 +96,8 @@ async def fetch_video(
             params={"bvid": work_id} if work_id.startswith("BV") else {"aid": work_id},
         )
         data = view.get("data") or {}
+        if view.get("code") in {-101, -352, -412, -509}:
+            raise PlatformBlockedError(f"bilibili view returned code {view['code']}")
         if view.get("code") != 0 or not data:
             raise PlatformCrawlerError("bilibili view payload is unavailable")
         actual_id = str(data.get("bvid") or work_id)
@@ -152,9 +154,9 @@ async def fetch_video(
             resume_cursor=resume_cursor,
         )
     except PlatformBlockedError as exc:
-        return result_error("bilibili", url, work_id, "blocked", str(exc))
+        return result_error("bilibili", url, work_id, "blocked", exc)
     except Exception as exc:
-        return result_error("bilibili", url, work_id, "failed", str(exc))
+        return result_error("bilibili", url, work_id, "failed", exc)
 
 
 async def fetch_article(
@@ -178,6 +180,8 @@ async def fetch_article(
                 headers={"Referer": f"https://www.bilibili.com/read/cv{article_id}/"},
             )
             data = payload.get("data") or {}
+            if payload.get("code") in {-101, -352, -412, -509}:
+                raise PlatformBlockedError(f"bilibili article returned code {payload['code']}")
             if payload.get("code") != 0 or not isinstance(data.get("stats"), dict):
                 raise PlatformCrawlerError("bilibili article payload is unavailable")
             stats = parse_article_stats(data)
@@ -219,9 +223,9 @@ async def fetch_article(
             resume_cursor=resume_cursor,
         )
     except PlatformBlockedError as exc:
-        return result_error("bilibili", url, article_id, "blocked", str(exc))
+        return result_error("bilibili", url, article_id, "blocked", exc)
     except Exception as exc:
-        return result_error("bilibili", url, article_id, "failed", str(exc))
+        return result_error("bilibili", url, article_id, "failed", exc)
 
 
 async def fetch_opus(
@@ -295,9 +299,9 @@ async def fetch_opus(
             resume_cursor=resume_cursor,
         )
     except PlatformBlockedError as exc:
-        return result_error("bilibili", url, opus_id, "blocked", str(exc))
+        return result_error("bilibili", url, opus_id, "blocked", exc)
     except Exception as exc:
-        return result_error("bilibili", url, opus_id, "failed", str(exc))
+        return result_error("bilibili", url, opus_id, "failed", exc)
 
 
 def parse_article_stats(data: dict[str, Any]) -> EngagementStats:

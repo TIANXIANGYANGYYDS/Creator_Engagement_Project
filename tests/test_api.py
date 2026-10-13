@@ -432,3 +432,23 @@ def test_collect_comment_page_must_be_a_json_number() -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_incomplete_replies_are_not_reported_complete_with_or_without_page():
+    class ReplyService(FakeService):
+        async def fetch_comments(self, url, media_name, page, **kwargs):
+            result = await super().fetch_comments(url, media_name, page, **kwargs)
+            result.comments_complete = False
+            result.comments.append(EngagementComment(comment_id='reply', text='回复', parent_comment_id='c1'))
+            return result
+    app = create_app()
+    app.dependency_overrides[get_engagement_service] = lambda: ReplyService()
+    with TestClient(app) as client:
+        for page_args in [{}, {'page': 1}]:
+            response = client.post('/api/v1/collect', json={'items': [{
+                'url': 'https://www.xiaohongshu.com/explore/xhs-note',
+                'media_name': '小红书', 'type': 'comments', **page_args,
+            }]})
+            item = response.json()['data'][0]
+            assert item['status'] == 'success' and item['complete'] is False
+            assert item['result']['comments'][1]['parent_comment_id'] == 'c1'

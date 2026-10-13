@@ -209,9 +209,9 @@ async def fetch(
             stats=stats if include_stats else EngagementStats(),
         )
     except PlatformBlockedError as exc:
-        return result_error("wechat_channels", url, work_id, "blocked", str(exc))
+        return result_error("wechat_channels", url, work_id, "blocked", exc)
     except Exception as exc:
-        return result_error("wechat_channels", url, work_id, "failed", str(exc))
+        return result_error("wechat_channels", url, work_id, "failed", exc)
 
 
 def build_feed_request(url: str) -> tuple[dict[str, Any], str, str]:

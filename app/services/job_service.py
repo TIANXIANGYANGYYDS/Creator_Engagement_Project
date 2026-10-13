@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import httpx
 
+from app.services.status_alerts import StatusAlerts
 from app.models.engagement import (
     CreateJobRequest,
     JobItemRequest,
@@ -68,6 +69,7 @@ class BatchJobManager:
         webhook_client: httpx.AsyncClient | None = None,
         repository: JobRepository | None = None,
         db_path: Path | None = None,
+        status_alerts: StatusAlerts | None = None,
     ) -> None:
         if item_max_concurrency <= 0:
             raise ValueError("item_max_concurrency must be greater than zero")
@@ -82,6 +84,7 @@ class BatchJobManager:
         if repository is not None and db_path is not None:
             raise ValueError("repository and db_path cannot be used together")
         self.retention_seconds = retention_seconds
+        self.status_alerts = status_alerts or StatusAlerts()
         self.item_max_concurrency = item_max_concurrency
         self.item_timeout_seconds = item_timeout_seconds
         self.job_timeout_seconds = job_timeout_seconds
@@ -337,7 +340,8 @@ class BatchJobManager:
                     )
             if active.request.webhook_url:
                 await self._send_webhook(active)
-        except TimeoutError:
+        except TimeoutError as exc:
+            self.status_alerts.record("api", "batch_job", exc)
             stored.status = "failed"
             stored.error = f"任务超过最大执行时间 {timeout:g} 秒"
             stored.finished_at = datetime.now(timezone.utc)
@@ -458,7 +462,8 @@ class BatchJobManager:
                     stored.status = "completed"
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            self.status_alerts.record("api", "batch_job", exc)
             logger.exception("batch job failed job_id=%s", stored.job_id)
             stored.status = "failed"
         finally:
@@ -490,7 +495,8 @@ class BatchJobManager:
             async with scope:
                 async with asyncio.timeout(self.item_timeout_seconds or None):
                     result = await collector(item)
-        except TimeoutError:
+        except TimeoutError as exc:
+            self.status_alerts.record(item.media_name, item.type, exc)
             result = JobItemResponse(
                 item_id=item.item_id,
                 url=item.url,
@@ -501,7 +507,8 @@ class BatchJobManager:
                 result={},
                 error=f"单条采集超过 {self.item_timeout_seconds:g} 秒",
             )
-        except Exception:
+        except Exception as exc:
+            self.status_alerts.record(item.media_name, item.type, exc)
             logger.exception("batch job item failed item_id=%s", item.item_id)
             result = JobItemResponse(
                 item_id=item.item_id,

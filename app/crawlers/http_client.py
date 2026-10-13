@@ -86,6 +86,8 @@ class CurlAsyncHttpClient:
         proxy_mode: Literal["direct", "prefer", "required"] | str = "direct",
         session: Any | None = None,
         session_factory: Callable[[], Any] | None = None,
+        account_direct_min_interval_seconds: float = 0,
+        xiaohongshu_session_socket: str = "",
     ) -> None:
         if proxy_mode not in {"direct", "prefer", "required"}:
             raise ValueError("proxy_mode must be direct, prefer or required")
@@ -109,6 +111,7 @@ class CurlAsyncHttpClient:
         self._session = session or default_session_factory()
         self.proxy_provider = proxy_provider
         self.proxy_mode = proxy_mode
+        self._xiaohongshu_session_socket = xiaohongshu_session_socket
         self._dns_timeout = min(3.0, connect_timeout_seconds, timeout_seconds)
         self._lease_state: ContextVar[_ProxyLeaseState | None] = ContextVar(
             "creator_engagement_proxy_lease",
@@ -118,10 +121,25 @@ class CurlAsyncHttpClient:
             "creator_engagement_force_direct",
             default=False,
         )
+        self._account_direct: ContextVar[bool] = ContextVar(
+            "creator_engagement_account_direct", default=False,
+        )
+        self._account_direct_interval = account_direct_min_interval_seconds
+        self._account_direct_lock = asyncio.Lock()
+        self._account_direct_last_end = 0.0
         self._isolated_session: ContextVar[Any | None] = ContextVar(
             "creator_engagement_isolated_http_session",
             default=None,
         )
+
+    @asynccontextmanager
+    async def account_direct_scope(self) -> AsyncIterator[None]:
+        """Explicit fixed egress for an account, including required-proxy setups."""
+        token = self._account_direct.set(True)
+        try:
+            yield
+        finally:
+            self._account_direct.reset(token)
 
     @asynccontextmanager
     async def direct_scope(self) -> AsyncIterator[None]:
@@ -190,6 +208,8 @@ class CurlAsyncHttpClient:
 
     async def active_proxy_mapping(self) -> dict[str, str] | None:
         """Acquire the current scoped lease for a browser sharing this operation."""
+        if self._account_direct.get():
+            return None
         state = self._lease_state.get()
         if state is None:
             raise RuntimeError("active_proxy_mapping requires lease_scope")
@@ -232,7 +252,27 @@ class CurlAsyncHttpClient:
             json=json,
         )
 
-    async def _request(
+    async def _request(self, method: str, url: str, **kwargs: Any) -> Any:
+        host = urlsplit(url).hostname or ""
+        if self._xiaohongshu_session_socket and (
+            host == "xiaohongshu.com" or host.endswith(".xiaohongshu.com")
+        ):
+            from app.crawlers.xiaohongshu_session import browser_request
+
+            return await browser_request(self._xiaohongshu_session_socket, method, url, **kwargs)
+        if not self._account_direct.get() or self._account_direct_interval <= 0:
+            return await self._request_unthrottled(method, url, **kwargs)
+        # Serialize every upstream request, including author and reply pages.
+        async with self._account_direct_lock:
+            wait = self._account_direct_last_end + self._account_direct_interval - monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                return await self._request_unthrottled(method, url, **kwargs)
+            finally:
+                self._account_direct_last_end = monotonic()
+
+    async def _request_unthrottled(
         self,
         method: str,
         url: str,
@@ -243,8 +283,9 @@ class CurlAsyncHttpClient:
         json: dict[str, Any] | None = None,
         discard_cookies: bool = False,
     ) -> Any:
-        lease_state = self._lease_state.get()
-        force_direct = self._force_direct.get() and self.proxy_mode != "required"
+        account_direct = self._account_direct.get()
+        lease_state = None if account_direct else self._lease_state.get()
+        force_direct = account_direct or (self._force_direct.get() and self.proxy_mode != "required")
         attempts = (
             1
             if lease_state is not None or force_direct
@@ -262,7 +303,7 @@ class CurlAsyncHttpClient:
             else:
                 proxies = await self._acquire_proxy()
             proxy_url = (proxies or {}).get("https") or (proxies or {}).get("http")
-            if self.proxy_mode == "required" and not proxy_url:
+            if self.proxy_mode == "required" and not proxy_url and not account_direct:
                 error = ProxyUnavailableError(
                     "代理映射缺少 http/https 地址，禁止本机直连请求"
                 )
@@ -288,6 +329,9 @@ class CurlAsyncHttpClient:
                         params=params, headers=headers, data=data, json=json,
                         proxy=proxy_url, discard_cookies=discard_cookies,
                     )
+                    if account_direct:
+                        # libcurl otherwise honors HTTPS_PROXY even when proxy=None.
+                        request_options["proxies"] = {"all": ""}
                     try:
                         response = await request(method, url, **request_options)
                     except ProxyError as exc:
@@ -301,6 +345,7 @@ class CurlAsyncHttpClient:
                         headers=headers,
                         proxy=proxy_url,
                         discard_cookies=discard_cookies,
+                        **({"proxies": {"all": ""}} if account_direct else {}),
                     )
                 else:
                     response = await session.post(
@@ -310,6 +355,7 @@ class CurlAsyncHttpClient:
                         data=data,
                         json=json,
                         proxy=proxy_url,
+                        **({"proxies": {"all": ""}} if account_direct else {}),
                     )
             except Exception as exc:
                 # Exception messages and URLs can contain proxy credentials or

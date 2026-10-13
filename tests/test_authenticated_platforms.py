@@ -204,7 +204,7 @@ def test_xiaohongshu_interactions_prefer_one_unsigned_ssr_request() -> None:
     assert result.source == "note SSR noteDetailMap"
     assert len(client.get_calls) == 1
     assert "xsec_source=pc_feed" in client.get_calls[0][0]
-    assert "Cookie" not in client.get_calls[0][1]["headers"]
+    assert client.get_calls[0][1]["headers"]["Cookie"] == "a1=a1-value; web_session=session-value"
     assert "Referer" not in client.get_calls[0][1]["headers"]
     assert client.post_calls == []
 
@@ -1176,16 +1176,15 @@ def test_platform_session_store_reads_playwright_state(tmp_path) -> None:
 
 def test_platform_session_store_saves_private_playwright_state(tmp_path) -> None:
     class FakeContext:
-        async def storage_state(self, *, path: str) -> None:
-            from pathlib import Path
-
-            Path(path).write_text('{"cookies":[]}', encoding="utf-8")
+        async def storage_state(self) -> dict:
+            return {"cookies": []}
 
     store = PlatformSessionStore(tmp_path)
     path = asyncio.run(store.save_context("wechat", FakeContext()))
 
     assert path == tmp_path / "wechat.json"
     assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(path.read_text()) == {"cookies": []}
 
 
 def test_xiaohongshu_invalid_ssr_page_is_not_reported_as_partial_success() -> None:

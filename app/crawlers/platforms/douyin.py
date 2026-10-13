@@ -202,13 +202,13 @@ async def fetch(
             next_cursor=next_cursor,
         )
     except PlatformDeterministicBlockedError as exc:
-        result = result_error("douyin", url, work_id, "blocked", str(exc))
+        result = result_error("douyin", url, work_id, "blocked", exc)
         result.retryable = False
         return result
     except PlatformBlockedError as exc:
-        return result_error("douyin", url, work_id, "blocked", str(exc))
+        return result_error("douyin", url, work_id, "blocked", exc)
     except Exception as exc:
-        return result_error("douyin", url, work_id, "failed", str(exc))
+        return result_error("douyin", url, work_id, "failed", exc)
 
 
 async def prepare_anonymous_session(

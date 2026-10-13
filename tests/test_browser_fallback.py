@@ -248,8 +248,8 @@ def test_caller_cookie_is_only_seeded_into_douyin_profile() -> None:
 
 def test_required_browser_proxy_fails_closed_without_provider() -> None:
     result = asyncio.run(BrowserFallback(proxy_required=True)._fetch_locked(
-        "https://www.xiaohongshu.com/explore/6a3b9a90000000000603149f",
-        "xiaohongshu",
+        "https://www.kuaishou.com/short-video/6a3b9a90000000000603149f",
+        "kuaishou",
         "6a3b9a90000000000603149f",
         page=1,
         limit=20,
@@ -272,8 +272,8 @@ def test_required_browser_proxy_fails_closed_when_pool_is_empty() -> None:
         proxy_provider=EmptyProxyProvider(),
         proxy_required=True,
     )._fetch_locked(
-        "https://www.xiaohongshu.com/explore/6a3b9a90000000000603149f",
-        "xiaohongshu",
+        "https://www.kuaishou.com/short-video/6a3b9a90000000000603149f",
+        "kuaishou",
         "6a3b9a90000000000603149f",
         page=1,
         limit=20,
@@ -283,6 +283,30 @@ def test_required_browser_proxy_fails_closed_when_pool_is_empty() -> None:
 
     assert result.coverage == "failed"
     assert "禁止本机直连请求" in result.reason
+
+
+def test_xhs_browser_explicitly_bypasses_proxy_pool(tmp_path, monkeypatch):
+    from app.crawlers.browser_fallback import BrowserFallbackSettings
+    class Provider:
+        async def get_requests_proxies(self):
+            raise AssertionError('must not allocate proxy for XHS')
+    seen = []
+    class Browser:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+        async def __aenter__(self):
+            raise RuntimeError('browser_launch_verified')
+        async def __aexit__(self, *args):
+            pass
+    monkeypatch.setattr('camoufox.async_api.AsyncCamoufox', Browser)
+    result = asyncio.run(BrowserFallback(
+        settings=BrowserFallbackSettings(profile_dir=tmp_path),
+        proxy_provider=Provider(), proxy_required=True,
+    )._fetch_locked('https://www.xiaohongshu.com/explore/1', 'xiaohongshu', '1',
+        page=1, limit=20, include_stats=False, include_comments=True))
+    assert 'browser_launch_verified' in result.reason
+    assert seen[0]['proxy'] is None
+    assert seen[0]['firefox_user_prefs']['network.proxy.type'] == 0
 
 
 def test_browser_fallback_persists_session_without_exposing_state() -> None:

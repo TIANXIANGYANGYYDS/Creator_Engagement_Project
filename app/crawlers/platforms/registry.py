@@ -43,6 +43,30 @@ MEDIA_ALIASES: dict[str, EngagementPlatform] = {
     "weibo": "weibo",
     "微博": "weibo",
     "新浪微博": "weibo",
+    "sina": "sina",
+    "新浪看点": "sina",
+    "baijiahao": "baijiahao",
+    "百家号": "baijiahao",
+    "yoojia": "yoojia",
+    "有驾": "yoojia",
+    "sina_finance": "sina_finance",
+    "新浪财经头条号": "sina_finance",
+    "sohu": "sohu",
+    "搜狐号": "sohu",
+    "dongchedi": "dongchedi",
+    "懂车帝": "dongchedi",
+    "weitoutiao": "weitoutiao",
+    "今日头条微头条": "weitoutiao",
+    "netease": "netease",
+    "网易号": "netease",
+    "xueqiu": "xueqiu",
+    "雪球": "xueqiu",
+    "autohome": "autohome",
+    "汽车之家": "autohome",
+    "ixigua": "ixigua",
+    "西瓜视频": "ixigua",
+    "qq_stock": "qq_stock",
+    "腾讯自选股": "qq_stock",
 }
 
 
@@ -50,10 +74,7 @@ def normalize_media_name(media_name: str) -> EngagementPlatform:
     normalized = re.sub(r"\s+", "", media_name.strip().casefold())
     platform = MEDIA_ALIASES.get(normalized)
     if platform is None:
-        supported = ", ".join((
-            "douyin", "toutiao", "wechat", "wechat_channels", "xiaohongshu",
-            "haokan", "kuaishou", "bilibili", "weibo",
-        ))
+        supported = ", ".join(dict.fromkeys(MEDIA_ALIASES.values()))
         raise ValueError(f"unsupported media_name; expected one of: {supported}")
     return platform
 
@@ -61,6 +82,10 @@ def normalize_media_name(media_name: str) -> EngagementPlatform:
 def validate_media_url(url: str, media_name: str) -> tuple[EngagementPlatform, str]:
     requested_platform = normalize_media_name(media_name)
     detected_platform, work_id = identify_url(url)
+    # Legacy /i links are shared by articles and micro-posts. The caller's
+    # media name disambiguates them; /w and /article remain unambiguous.
+    if requested_platform == "weitoutiao" and detected_platform == "toutiao" and re.fullmatch(r"/i\d+/?", urlparse(url).path):
+        return "weitoutiao", work_id
     if detected_platform != requested_platform:
         raise ValueError(
             f"media_name '{media_name}' does not match URL platform '{detected_platform}'"
@@ -122,9 +147,66 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
     host = parsed.netloc.lower().split(":", 1)[0]
     path = parsed.path
     query = parse_qs(parsed.query)
+    if host in {"k.sina.cn", "k.sina.com.cn"}:
+        match = re.search(r"/article_(\d+)_([0-9a-z]+)\.html", path)
+        return "sina", f"{match[1]}-{match[2]}" if match else ""
+    if host in {"cj.sina.com.cn", "cj.sina.cn", "t.cj.sina.com.cn", "t.cj.sina.cn", "finance.sina.com.cn", "finance.sina.cn"}:
+        match = re.search(r"/articles/view/(\d+)/([0-9a-z]+)", path)
+        if match:
+            return "sina_finance", f"{match[1]}-{match[2]}"
+        if path == "/article/norm_detail" and query.get("url"):
+            nested_platform, nested_id = identify_url(query["url"][0])
+            if nested_platform != "sina_finance":
+                raise ValueError("新浪财经分享链接目标域名不匹配")
+            return nested_platform, nested_id
+        detail = re.search(r"(?:detail-|doc-)i([0-9a-z]+)\.(?:d\.)?s?html", path)
+        return "sina_finance", ("comos-" + detail[1]) if detail else query.get("id", [""])[0]
+    if host in {"baijiahao.baidu.com", "mbd.baidu.com"}:
+        nid = query.get("nid", query.get("id", [""]))[0]
+        if not nid and query.get("context"):
+            try:
+                nid = str(json.loads(query["context"][0]).get("nid") or "")
+            except (ValueError, TypeError):
+                pass
+        return "baijiahao", nid
+    if host in {"www.yoojia.com", "yoojia.com", "youjia.baidu.com"}:
+        match = re.search(r"/(?:article|video)/(\d+)\.html", path)
+        return "yoojia", match[1] if match else query.get("id", query.get("nid", [""]))[0]
+    if host in {"www.sohu.com", "m.sohu.com", "3g.k.sohu.com"}:
+        match = re.search(r"/a/(\d+)(?:_\d+)?|/t/n(\d+)", path)
+        return "sohu", next(v for v in match.groups() if v) if match else ""
+    if host in {"www.dongchedi.com", "m.dongchedi.com", "dcd.zjbyte.cn"}:
+        match = re.search(r"/(?:article/|video/|i)(\d+)", path)
+        return "dongchedi", match[1] if match else ""
+    if host in {"www.163.com", "m.163.com", "c.m.163.com", "dy.163.com"}:
+        video = re.search(r"/(V[A-Z0-9]{8,10})\.html", path, re.I)
+        if video:
+            return "netease", "video:" + video[1].upper()
+        match = re.search(r"/([A-Z0-9]{16})\.html", path, re.I)
+        return "netease", match[1].upper() if match else ""
+    if host in {"xueqiu.com", "www.xueqiu.com"}:
+        match = re.fullmatch(r"/\d+/(\d+)/?", path)
+        return "xueqiu", match[1] if match else ""
+    if host == "autohome.com.cn" or host.endswith(".autohome.com.cn"):
+        match = re.search(r"/(?:share/)?info/(\d+)|/(\d+)\.html", path)
+        if host == "car.autohome.com.cn":
+            return "autohome", ""
+        return "autohome", next(v for v in match.groups() if v) if match else ""
+    if host in {"www.ixigua.com", "m.ixigua.com", "ixigua.com"}:
+        match = re.fullmatch(r"/i?(\d+)/?", path)
+        return "ixigua", match[1] if match else ""
+    if host == "gu.qq.com":
+        fragment_query = parse_qs(parsed.fragment.partition("?")[2])
+        if path == "/community/comment/index.html":
+            nid = (fragment_query.get("nid") or query.get("nid") or [""])[0]
+            return "qq_stock", "community:" + nid if re.fullmatch(r"\d{24}", nid) else ""
+        return "qq_stock", (fragment_query.get("id") or query.get("id") or query.get("comment_id") or [""])[0]
     if "bilibili.com" in host:
         if host == "live.bilibili.com":
             return "bilibili", ""
+        if host == "t.bilibili.com":
+            dynamic_match = re.fullmatch(r"/(\d+)/?", path)
+            return "bilibili", f"opus:{dynamic_match[1]}" if dynamic_match else ""
         article_match = re.search(r"/read/cv(\d+)(?:/|$)", path, re.I)
         if article_match:
             return "bilibili", f"article:{article_match.group(1)}"
@@ -160,6 +242,9 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
         match = re.search(r"/(?:video|share/video)/(\d+)", path)
         return "douyin", match.group(1) if match else ""
     if "toutiao.com" in host:
+        micro = re.fullmatch(r"/w/(\d+)/?", path)
+        if micro:
+            return "weitoutiao", micro[1]
         match = re.search(r"/(?:article|video)/(\d+)|/i(\d+)(?:/|$)", path)
         return "toutiao", next((value for value in match.groups() if value), "") if match else ""
     if "kuaishou.com" in host:

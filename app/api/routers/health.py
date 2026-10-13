@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.core.config import get_settings
+from app.crawlers.platforms import PLATFORM_HANDLERS
 
 
 router = APIRouter(tags=["health"])
@@ -13,6 +14,8 @@ async def health() -> dict[str, object]:
     settings = get_settings()
     return {
         "status": "ok",
+        "status_alerts_enabled": settings.feishu_status_alerts_enabled,
+        "engagement_platforms": list(PLATFORM_HANDLERS),
         "author_content_enabled": True,
         "author_pipeline_version": 7,
         "author_guest_only": settings.author_guest_only,
@@ -33,6 +36,8 @@ async def health() -> dict[str, object]:
         "api_sync_timeout_seconds": settings.api_sync_timeout_seconds,
         "api_sync_max_items": settings.api_sync_max_items,
         "proxy_mode": settings.proxy_mode,
+        "xiaohongshu_proxy_mode": "direct",
+        "xiaohongshu_request_interval_seconds": settings.xiaohongshu_request_interval_seconds,
         "proxy_configured": bool(settings.proxy_51_api_url.strip()),
         "reliability_mode": settings.reliability_mode,
         "protocol_max_attempts": (

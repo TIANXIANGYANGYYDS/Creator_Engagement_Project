@@ -50,6 +50,7 @@ class PlatformCrawlerContext(Protocol):
         include_cookies: bool = False,
         force_direct: bool = False,
         discard_cookies: bool = False,
+        allow_statuses: set[int] | None = None,
     ) -> Any: ...
 
     def _platform_cookie(self, platform: EngagementPlatform) -> str: ...

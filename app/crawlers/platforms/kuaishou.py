@@ -181,10 +181,10 @@ async def fetch(
         result.retryable_partial = retryable_partial
         return result
     except PlatformBlockedError as exc:
-        return result_error("kuaishou", url, work_id, "blocked", str(exc))
+        return result_error("kuaishou", url, work_id, "blocked", exc)
     except Exception as exc:
         coverage: EngagementCoverage = "blocked" if is_challenge_text(str(exc)) else "failed"
-        return result_error("kuaishou", url, work_id, coverage, str(exc))
+        return result_error("kuaishou", url, work_id, coverage, exc)
 
 
 async def fetch_detail_stats(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from time import monotonic, time
 
 import pytest
@@ -58,6 +59,37 @@ class FakeCrawler:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def test_xhs_service_scopes_url_recovery_and_collection_to_direct_egress():
+    events = []
+    class Client:
+        @asynccontextmanager
+        async def account_direct_scope(self):
+            events.append('direct_enter')
+            try:
+                yield
+            finally:
+                events.append('direct_exit')
+    class Provider:
+        @asynccontextmanager
+        async def affinity_scope(self, name):
+            raise AssertionError('XHS must not reserve a rotating proxy')
+            yield
+    class Crawler(FakeCrawler):
+        client = Client()
+        async def fetch_interactions(self, url, media_name):
+            assert events[-1] == 'direct_enter'
+            return await super().fetch_interactions(url, media_name)
+        async def fetch_comments(self, url, media_name, page):
+            assert events[-1] == 'direct_enter'
+            return await super().fetch_comments(url, media_name, page)
+    service = EngagementService(Crawler(), proxy_provider=Provider())
+    async def run():
+        await service.fetch_interactions('https://www.xiaohongshu.com/explore/1', '小红书')
+        await service.fetch_comments('https://www.xiaohongshu.com/explore/1', '小红书', 1)
+    asyncio.run(run())
+    assert events == ['direct_enter', 'direct_exit'] * 2
 
 
 def test_fetch_many_preserves_input_order() -> None:
@@ -360,16 +392,25 @@ def test_strict_mode_allows_only_explicit_xiaohongshu_cookie(tmp_path) -> None:
 
 
 def test_stored_xiaohongshu_session_is_reloaded_and_scoped(tmp_path) -> None:
+    source = tmp_path / "production.json"
+    note = "6aca578d000000001c01e62a"
+    author = "5d2b14c9000000001603aa54"
+    source.write_text(json.dumps([{"rawData": {
+        "url": f"https://www.xiaohongshu.com/discovery/item/{note}",
+        "board_url": f"https://www.xiaohongshu.com/user/profile/{author}",
+    }}]))
     settings = Settings(
         _env_file=None,
         strict_anonymous_mode=True,
         xiaohongshu_session_mode="stored",
         browser_fallback_enabled=False,
         platform_session_dir=str(tmp_path / "sessions"),
+        xiaohongshu_source_path=str(source),
         proxy_51_api_url="https://proxy-provider.example/api",
     )
     service = EngagementService.from_settings(settings)
     store = service.crawler.xiaohongshu_session_store
+    assert service.crawler.xiaohongshu_url_resolver.authors[note] == author
     assert store is not None
     assert service.crawler._platform_cookie("xiaohongshu") == ""
     assert service.crawler._platform_cookie("wechat") == ""

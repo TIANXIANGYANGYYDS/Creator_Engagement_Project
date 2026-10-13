@@ -20,6 +20,7 @@ from app.models.author import (
 from app.crawlers.authors.common import AuthorSessionError, decode_cursor
 from app.crawlers.authors.identity import AuthorIdentityError
 from app.crawlers.http_client import PlatformCrawlerError
+from app.services.status_alerts import StatusAlerts
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class AuthorJobManager:
         self.detail_workers = detail_workers
         self.repository = repository
         self.service = service
+        self.status_alerts = getattr(service, "status_alerts", None) or StatusAlerts()
         self.retention_seconds = retention_seconds
         self.timeout_seconds = timeout_seconds
         self.retry_base_seconds = retry_base_seconds
@@ -256,6 +258,7 @@ class AuthorJobManager:
             return await self.status(job_id)
 
     async def _run(self, job_id):
+        job = None
         try:
             while True:
                 job = await self.repository.get(job_id)
@@ -290,6 +293,10 @@ class AuthorJobManager:
             # Shutdown keeps the checkpoint active so start() resumes it.
             raise
         except Exception as exc:
+            # List/detail status errors are already observed by AuthorService.
+            # Here also catch failures in the background worker/persistence.
+            if not isinstance(exc, PlatformCrawlerError):
+                self.status_alerts.record((job or {}).get("media_name", "api"), "author_job", exc)
             error = (
                 "作者任务超过执行时限，可续跑"
                 if isinstance(exc, TimeoutError)
@@ -311,7 +318,8 @@ class AuthorJobManager:
                     next_retry_at=None,
                     error=error[:500],
                 )
-            except Exception:
+            except Exception as persistence_error:
+                self.status_alerts.record("api", "author_job_storage", persistence_error)
                 logger.exception("author_job_persistence_failed job_id=%s", job_id)
         finally:
             self._tasks.pop(job_id, None)

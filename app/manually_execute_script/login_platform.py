@@ -69,8 +69,29 @@ async def run(
     if check_only and (platform != "xiaohongshu" or not headless):
         raise ValueError("--check-only 只支持 xiaohongshu --headless")
     settings = get_settings()
+    if platform == "xiaohongshu" and settings.xiaohongshu_session_socket:
+        import httpx
+
+        if not check_only:
+            raise RuntimeError("小红书已启用单一浏览器会话，请使用 serve_xiaohongshu_session --login 生成二维码")
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.AsyncHTTPTransport(uds=settings.xiaohongshu_session_socket),
+                base_url="http://xhs-owner", timeout=10, trust_env=False,
+            ) as client:
+                status = (await client.get("/status")).json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError("小红书常驻浏览器不可用；不另启浏览器") from exc
+        if status.get("status") != "ready":
+            raise RuntimeError("小红书会话暂停：" + str(status.get("status")))
+        return Path(settings.xiaohongshu_session_dir) / "xiaohongshu.json"
     profile_dir = Path(settings.browser_profile_dir) / platform
     store = PlatformSessionStore(Path(settings.platform_session_dir))
+    if platform == "xiaohongshu":
+        if settings.xiaohongshu_browser_profile_dir:
+            profile_dir = Path(settings.xiaohongshu_browser_profile_dir)
+        if settings.xiaohongshu_session_dir:
+            store = PlatformSessionStore(Path(settings.xiaohongshu_session_dir))
     profile_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(profile_dir, 0o700)
     login_url = resolve_login_url(platform, target_url)
@@ -89,6 +110,7 @@ async def run(
         block_webrtc=True,
         persistent_context=True,
         user_data_dir=str(profile_dir),
+        firefox_user_prefs={"network.proxy.type": 0} if platform == "xiaohongshu" else {},
         exclude_addons=[DefaultAddons.UBO],
         enable_cache=True,
     ) as context:

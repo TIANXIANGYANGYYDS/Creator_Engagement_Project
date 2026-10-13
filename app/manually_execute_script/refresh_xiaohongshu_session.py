@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 
 from app.core.config import PROJECT_ROOT
 from app.manually_execute_script.login_platform import run
@@ -30,7 +29,9 @@ def main() -> None:
     try:
         asyncio.run(run("xiaohongshu", headless=True, check_only=True))
     except Exception as exc:
-        status = "reauthorization_required" if "登录态已失效" in str(exc) else "check_failed"
+        status = "reauthorization_required" if any(
+            marker in str(exc) for marker in ("登录态已失效", "reauthorization_required")
+        ) else "check_failed"
         write_status(status)
         raise SystemExit(2) from None
     write_status("valid")

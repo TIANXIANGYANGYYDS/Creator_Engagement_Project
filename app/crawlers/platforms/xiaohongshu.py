@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import json
 import re
 from typing import Any
@@ -20,6 +19,13 @@ from app.crawlers.platforms.common import (
     to_int,
 )
 from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
+
+
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 "
+    "Mobile/15E148 Safari/604.1"
+)
 
 
 async def fetch(
@@ -45,6 +51,8 @@ async def fetch(
         comment_page_returned = False
         next_cursor: str | None = None
         sources: list[str] = []
+        comments_complete = True
+        comment_error = ""
 
         if include_stats:
             # A direct note-page visit embeds the target note and its public
@@ -61,6 +69,8 @@ async def fetch(
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "User-Agent": DESKTOP_USER_AGENT,
             }
+            if cookie:
+                page_headers["Cookie"] = cookie
             response = await crawler._get_response(
                 request_url,
                 headers=page_headers,
@@ -69,7 +79,31 @@ async def fetch(
             stats = parse_stats(str(getattr(response, "text", "")), work_id)
             if _has_stats(stats):
                 sources.append("note SSR noteDetailMap")
-            elif not token:
+            target_exists = bool(_target_note(str(getattr(response, "text", "")), work_id))
+            if not _has_stats(stats) and target_exists and token:
+                # The mobile share page has a separate, numeric comment total.
+                # Its explicit zero is usable even when interactInfo is blank.
+                mobile_url = urlparse(request_url)._replace(
+                    path=f"/discovery/item/{work_id}",
+                ).geturl()
+                mobile = await crawler._get_response(
+                    mobile_url,
+                    headers={**page_headers, "User-Agent": MOBILE_USER_AGENT},
+                    force_direct=True,
+                )
+                stats = parse_mobile_stats(str(getattr(mobile, "text", "")), work_id)
+                if _has_stats(stats):
+                    sources.append("mobile SSR noteData + commentData")
+            if not _has_stats(stats) and target_exists:
+                if not include_comments:
+                    result = result_error(
+                        "xiaohongshu", url, work_id, "unsupported",
+                        "目标笔记可访问，但平台未返回有效互动数值；空字段不视为零，也不代表登录失效",
+                    )
+                    result.retryable = False
+                    return result
+                # Missing counters must not prevent collecting valid comments.
+            elif not _has_stats(stats) and not token:
                 return result_error(
                     "xiaohongshu",
                     url,
@@ -77,7 +111,7 @@ async def fetch(
                     "unsupported",
                     "小红书网页未返回目标笔记，原始 URL 不含 xsec_token；当前网页采集路径未取得互动数据",
                 )
-            else:
+            elif not _has_stats(stats):
                 return result_error(
                     "xiaohongshu",
                     url,
@@ -149,6 +183,12 @@ async def fetch(
                 raw_comments = comment_payload.get("comments")
                 if not isinstance(raw_comments, list):
                     raise PlatformCrawlerError("小红书评论响应缺少有效的 comments 列表")
+                has_more = comment_payload.get("has_more")
+                if not isinstance(has_more, bool):
+                    raise PlatformCrawlerError("小红书评论响应缺少有效分页标记")
+                following = str(comment_payload.get("cursor") or "")
+                if has_more and (not raw_comments or not following or following == cursor):
+                    raise PlatformCrawlerError("小红书评论分页未前进，不能将空页或重复游标当成末页")
                 comments = parse_comments(comment_payload)
                 if raw_comments and not comments:
                     raise PlatformCrawlerError("小红书评论列表未包含可识别的评论数据")
@@ -162,11 +202,14 @@ async def fetch(
                     )
                 )
                 next_cursor = (
-                    str(comment_payload.get("cursor"))
-                    if comment_payload.get("has_more") and comment_payload.get("cursor")
+                    following
+                    if has_more
                     else None
                 )
                 if current_page == page:
+                    comments, comments_complete, comment_error = await _expand_replies(
+                        crawler, raw_comments, work_id, token, cookie, url,
+                    )
                     break
                 if next_cursor is None:
                     comments = []
@@ -196,6 +239,7 @@ async def fetch(
             work_id=work_id,
             coverage="partial",
             reason=(
+                comment_error if not comments_complete else
                 "小红书会话和动态签名已生效；评论仅返回指定公开页"
                 if include_comments
                 else "小红书互动量来自公开笔记页 SSR"
@@ -204,9 +248,15 @@ async def fetch(
             stats=stats,
             comments=comments,
             next_cursor=next_cursor,
+            # A validated empty last page is a usable response, even when the
+            # platform omits its total. Repeating it cannot fill in that total.
+            retryable=False if comment_page_returned else None,
+            comments_complete=comments_complete,
         )
     except PlatformBlockedError as exc:
-        return result_error("xiaohongshu", url, work_id, "blocked", str(exc))
+        result = result_error("xiaohongshu", url, work_id, "blocked", exc)
+        result.retryable = False
+        return result
     except Exception as exc:
         if "登录已过期" in str(exc):
             result = result_error(
@@ -215,7 +265,7 @@ async def fetch(
             )
             result.retryable = False
             return result
-        return result_error("xiaohongshu", url, work_id, "failed", str(exc))
+        return result_error("xiaohongshu", url, work_id, "failed", exc)
 
 
 async def _get(
@@ -243,8 +293,10 @@ async def _get(
                 headers=headers,
             )
             return unwrap_data(payload)
-        except PlatformCrawlerError:
-            if sign_format == "xyw":
+        except PlatformCrawlerError as exc:
+            # Only the known signature-format rejection merits a second
+            # signature. Never overwrite a captcha/session failure with a retry.
+            if sign_format == "xyw" or "HTTP 406" not in str(exc):
                 raise
     raise AssertionError("unreachable")
 
@@ -310,6 +362,10 @@ def signed_headers(
 
 def unwrap_data(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("success") is False:
+        if payload.get("code") in {-100, -101}:
+            raise PlatformBlockedError("小红书登录态已失效，请重新扫码授权")
+        if payload.get("code") in {-104, -103, -13002, 461, 471}:
+            raise PlatformBlockedError("小红书请求被限制，业务码 " + str(payload.get("code")))
         raise PlatformCrawlerError(str(payload.get("msg") or "小红书 response failed"))
     if payload.get("success") is True:
         data = payload.get("data")
@@ -317,7 +373,7 @@ def unwrap_data(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
+def parse_comments(payload: dict[str, Any], *, parent_comment_id: str = "") -> list[EngagementComment]:
     result: list[EngagementComment] = []
     for item in payload.get("comments") or payload.get("comment_list") or []:
         if not isinstance(item, dict):
@@ -355,11 +411,121 @@ def parse_comments(payload: dict[str, Any]) -> list[EngagementComment]:
                 if reply_count is not None
                 else first_present(item_stats, "sub_comment_count")
             ),
+            **({"parent_comment_id": parent_comment_id} if parent_comment_id else {}),
         ))
     return result
 
 
+async def _expand_replies(crawler, roots, note_id, token, cookie, referer):
+    """Keep inline replies and follow each remaining reply cursor without writes."""
+    comments = parse_comments({"comments": roots})
+    seen = {c.comment_id for c in comments}
+
+    def append_replies(rows, parent):
+        if not isinstance(rows, list):
+            raise PlatformCrawlerError("小红书回复列表缺失")
+        if any(not isinstance(row, dict) or row.get("note_id", note_id) != note_id for row in rows):
+            raise PlatformCrawlerError("小红书回复笔记归属不匹配")
+        parsed = parse_comments({"comments": rows}, parent_comment_id=parent)
+        if len(parsed) != len(rows):
+            raise PlatformCrawlerError("小红书回复列表包含无法解析的正文")
+        added = 0
+        for comment in parsed:
+            if comment.comment_id not in seen:
+                seen.add(comment.comment_id)
+                comments.append(comment)
+                added += 1
+        return added
+
+    try:
+        # Preserve all already-received replies before making further requests.
+        if len(comments) != len(roots):
+            raise PlatformCrawlerError("小红书主评论列表包含无法解析的正文")
+        for root in roots:
+            append_replies(root.get("sub_comments") or [], str(root.get("id") or ""))
+        for root in roots:
+            parent = str(root.get("id") or "")
+            inline_count = len(root.get("sub_comments") or [])
+            expected = to_int(root.get("sub_comment_count"))
+            has_more = root.get("sub_comment_has_more") is True or (
+                expected is not None and expected > inline_count
+            )
+            cursor = str(root.get("sub_comment_cursor") or "")
+            visited = set()
+            while has_more:
+                if not parent or cursor in visited or len(visited) >= 100:
+                    raise PlatformCrawlerError("小红书回复分页游标异常或达到分页上限")
+                visited.add(cursor)
+                payload = await _get(crawler, "/api/sns/web/v2/comment/sub/page", {
+                    "note_id": note_id, "root_comment_id": parent, "num": "10",
+                    "cursor": cursor, "image_formats": "jpg,webp,avif",
+                    "top_comment_id": "", "xsec_token": token,
+                }, cookie, referer)
+                added = append_replies(payload.get("comments"), parent)
+                has_more = payload.get("has_more")
+                following = str(payload.get("cursor") or "")
+                if not isinstance(has_more, bool) or (has_more and (
+                    not added or not following or following in visited
+                )):
+                    raise PlatformCrawlerError("小红书回复分页未推进")
+                cursor = following
+    except PlatformCrawlerError as exc:
+        return comments, False, "已保留主评论和已获取回复；楼中楼未完成：" + str(exc)
+    return comments, True, ""
+
+
 def parse_stats(text: str, work_id: str) -> EngagementStats:
+    values = _target_note(text, work_id).get("interactInfo")
+    if isinstance(values, dict):
+        return _stats({key: to_int(value) for key, value in values.items()})
+    return EngagementStats()
+
+
+def parse_mobile_stats(text: str, work_id: str) -> EngagementStats:
+    """Read the exact H5 note; never infer counters from blank display strings."""
+    match = re.search(r"window\.__SETUP_SERVER_STATE__\s*=\s*", text)
+    if not match:
+        return EngagementStats()
+    raw = re.sub(
+        r'("(?:\\.|[^"\\])*"|\bundefined\b)',
+        lambda item: "null" if item[0] == "undefined" else item[0],
+        text[match.end():],
+    )
+    try:
+        state, _ = json.JSONDecoder().raw_decode(raw)
+    except (ValueError, RecursionError):
+        return EngagementStats()
+    data = state.get("LAUNCHER_SSR_STORE_PAGE_DATA") if isinstance(state, dict) else None
+    note = data.get("noteData") if isinstance(data, dict) else None
+    if not isinstance(note, dict) or note.get("noteId") != work_id:
+        return EngagementStats()
+    info = note.get("interactInfo")
+    stats = _stats({key: to_int(value) for key, value in info.items()}) if isinstance(info, dict) else EngagementStats()
+    comments = data.get("commentData")
+    if stats.comments is not None or not isinstance(comments, dict):
+        return stats
+    total = comments.get("commentCount")
+    roots_total = comments.get("commentCountL1")
+    rows = comments.get("comments")
+    has_more = comments.get("hasMore")
+    fetched_at = comments.get("time")
+    # The official H5 loader returns null on failure. Validate the populated
+    # endpoint result, not a missing field or a desktop placeholder list.
+    if (
+        type(total) is int and total >= 0
+        and type(roots_total) is int and 0 <= roots_total <= total
+        and type(fetched_at) is int and fetched_at > 0
+        and isinstance(rows, list) and len(rows) <= roots_total
+        and all(isinstance(row, dict) and row.get("noteId") == work_id for row in rows)
+        and isinstance(has_more, bool)
+        and (not has_more or (rows and comments.get("cursor")))
+        and (total != 0 or (not rows and not has_more))
+    ):
+        stats.comments = total
+    return stats
+
+
+def _target_note(text: str, work_id: str) -> dict:
     # Proximity in a script is not an identity check: neighbouring recommended
     # notes have their own counters. Decode the map and bind both key and ID.
     for match in re.finditer(r'"noteDetailMap"\s*:\s*', text):
@@ -377,10 +543,8 @@ def parse_stats(text: str, work_id: str) -> EngagementStats:
         note = entry.get("note") if isinstance(entry, dict) else None
         if not isinstance(note, dict) or note.get("noteId") != work_id:
             continue
-        values = note.get("interactInfo")
-        if isinstance(values, dict):
-            return _stats({key: to_int(value) for key, value in values.items()})
-    return EngagementStats()
+        return note
+    return {}
 
 
 def _stats(values: dict[str, int | None]) -> EngagementStats:

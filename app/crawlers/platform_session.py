@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -109,9 +110,15 @@ class PlatformSessionStore:
     async def save_context(self, platform: EngagementPlatform, context: Any) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.state_path(platform)
-        await context.storage_state(path=str(path))
+        state = await context.storage_state()
+        fd, temporary = tempfile.mkstemp(dir=self.root, prefix=f".{platform}-")
         try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(state, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
         return path

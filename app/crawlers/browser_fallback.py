@@ -111,16 +111,17 @@ class BrowserFallback:
         proxy_mapping = None
         lease_ok = False
         try:
-            if self.proxy_required and self.proxy_provider is None:
+            account_direct = platform == "xiaohongshu"
+            if self.proxy_required and self.proxy_provider is None and not account_direct:
                 raise ProxyUnavailableError(
                     "浏览器代理为 required，但没有配置代理提供器"
                 )
-            if self.proxy_provider is not None:
+            if self.proxy_provider is not None and not account_direct:
                 proxy_mapping = await self.proxy_provider.get_requests_proxies()
-            if self.proxy_required and not proxy_mapping:
+            if self.proxy_required and not proxy_mapping and not account_direct:
                 raise ProxyUnavailableError("未获取到浏览器代理，禁止本机直连请求")
             proxy = _playwright_proxy(proxy_mapping)
-            if self.proxy_required and not proxy:
+            if self.proxy_required and not proxy and not account_direct:
                 raise ProxyUnavailableError(
                     "浏览器代理映射缺少 http/https 地址，禁止本机直连请求"
                 )
@@ -146,6 +147,7 @@ class BrowserFallback:
                 exclude_addons=[DefaultAddons.UBO],
                 enable_cache=False,
                 firefox_user_prefs={
+                    **({"network.proxy.type": 0} if account_direct else {}),
                     "browser.cache.disk.enable": False,
                     "browser.cache.disk_cache_ssl": False,
                 },
@@ -474,6 +476,17 @@ class BrowserFallback:
         include_stats: bool,
         include_comments: bool,
     ) -> EngagementResult:
+        if platform in {"weitoutiao", "xueqiu", "sohu"}:
+            from app.crawlers.platforms import PLATFORM_HANDLERS
+            from app.crawlers.platforms.browser_page_context import BrowserPageContext
+            target = _browser_target_url(url, platform, work_id)
+            result = await PLATFORM_HANDLERS[platform](
+                BrowserPageContext(page_obj, target), url, work_id, limit,
+                page=page, comment_cursor=None, include_stats=include_stats,
+                include_comments=include_comments,
+            )
+            result.source = "browser: " + result.source
+            return result
         stats = EngagementStats()
         comments: list[EngagementComment] = []
         total_comments: int | None = None
@@ -639,6 +652,10 @@ def _browser_target_url(
         return f"https://www.kuaishou.com/short-video/{work_id}"
     if platform == "toutiao":
         return f"https://www.toutiao.com/article/{work_id}/"
+    if platform == "xueqiu":
+        return url.replace("https://xueqiu.com/", "https://www.xueqiu.com/").replace("http://xueqiu.com/", "https://www.xueqiu.com/")
+    if platform == "weitoutiao":
+        return f"https://www.toutiao.com/w/{work_id}/"
     if platform == "weibo":
         return f"https://m.weibo.cn/detail/{work_id}"
     if platform == "xiaohongshu" and "xsec_token=" in url and "xsec_source=" not in url:

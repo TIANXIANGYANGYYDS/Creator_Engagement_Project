@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         job_repository = SQLiteJobRepository(Path(settings.job_db_path))
     job_manager = BatchJobManager(
+        status_alerts=service.status_alerts,
         retention_seconds=settings.job_result_ttl_seconds,
         max_concurrency=settings.job_max_concurrency,
         item_max_concurrency=settings.job_item_max_concurrency,

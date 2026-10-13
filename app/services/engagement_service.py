@@ -28,6 +28,7 @@ from app.models.engagement import (
     EngagementResult,
     InteractionResult,
 )
+from app.services.status_alerts import StatusAlerts
 
 
 CachedResult = InteractionResult | CommentPageResult
@@ -58,6 +59,13 @@ ENTERPRISE_PLATFORM_POLICIES: dict[EngagementPlatform, PlatformTrafficPolicy] = 
     ),
 }
 
+for _platform in ("sina", "sina_finance", "baijiahao", "yoojia", "sohu", "dongchedi",
+                  "weitoutiao", "netease", "xueqiu", "autohome", "ixigua", "qq_stock"):
+    ENTERPRISE_PLATFORM_POLICIES[_platform] = PlatformTrafficPolicy(
+        max_concurrency=1, min_interval_seconds=0.5,
+    )
+
+
 
 class EngagementService:
     """Application boundary for single and batch URL collection."""
@@ -77,6 +85,7 @@ class EngagementService:
         author_platform_cookies: dict[str, str] | None = None,
         author_session_store: PlatformSessionStore | None = None,
         author_guest_only: bool = True,
+        status_alerts: StatusAlerts | None = None,
     ) -> None:
         if collection_max_concurrency <= 0:
             raise ValueError("collection_max_concurrency must be greater than zero")
@@ -89,6 +98,7 @@ class EngagementService:
         if cache_max_bytes <= 0:
             raise ValueError("cache_max_bytes must be greater than zero")
         self.crawler = crawler
+        self.status_alerts = status_alerts or StatusAlerts()
         self.author_guest_only = author_guest_only
         self.author_douyin_cookie = author_douyin_cookie
         self.author_platform_cookies = author_platform_cookies or {}
@@ -160,7 +170,7 @@ class EngagementService:
                 raise ValueError("DOUYIN_AUTHOR_SESSION_MODE=cookie 需要配置 DOUYIN_AUTHOR_COOKIE")
         provider: AsyncProxyProvider | None = None
         if active_mode != "required":
-            raise ValueError("生产采集仅允许 PROXY_MODE=required，禁止本机直连")
+            raise ValueError("生产全局配置仅允许 PROXY_MODE=required；小红书使用独立直连策略")
         if not settings.proxy_51_api_url.strip():
             raise ValueError("PROXY_MODE=required 时必须配置 PROXY_51_API_URL")
         if active_mode != "direct" and settings.proxy_51_api_url.strip():
@@ -197,7 +207,7 @@ class EngagementService:
             profile_dir /= "anonymous"
         session_store = PlatformSessionStore(session_dir)
         xiaohongshu_session_store = (
-            PlatformSessionStore(Path(settings.platform_session_dir))
+            PlatformSessionStore(Path(settings.xiaohongshu_session_dir or settings.platform_session_dir))
             if settings.xiaohongshu_session_mode == "stored"
             else None
         )
@@ -253,7 +263,7 @@ class EngagementService:
             xiaohongshu_session_store=xiaohongshu_session_store,
             xiaohongshu_url_resolver=(
                 XiaohongshuUrlResolver(
-                    PROJECT_ROOT / ".local/top20_platform_data.json",
+                    PROJECT_ROOT / settings.xiaohongshu_source_path,
                     PROJECT_ROOT / ".local/xiaohongshu-url-cache.json",
                 )
                 if xiaohongshu_session_store is not None else None
@@ -283,6 +293,8 @@ class EngagementService:
             xiaohongshu_cookie_enabled=(
                 bool(xiaohongshu_cookie) or xiaohongshu_session_store is not None
             ),
+            xiaohongshu_request_interval_seconds=settings.xiaohongshu_request_interval_seconds,
+            xiaohongshu_session_socket=settings.xiaohongshu_session_socket,
             wechat_mp_app_id=("" if strict_anonymous else settings.wechat_mp_app_id),
             wechat_mp_app_secret=(
                 ""
@@ -314,6 +326,7 @@ class EngagementService:
         crawler.douyin_visitor_sessions = DouyinVisitorSessions(crawler.client)
         return cls(
             crawler,
+            status_alerts=StatusAlerts.from_settings(settings),
             author_guest_only=settings.author_guest_only,
             author_douyin_cookie=author_douyin_cookie,
             author_platform_cookies={} if settings.author_guest_only else {
@@ -347,6 +360,18 @@ class EngagementService:
         )
 
     async def fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
+        from app.crawlers.platforms.registry import identify_url
+
+        try:
+            platform, _ = identify_url(url)
+        except ValueError:
+            platform = "unknown"
+        with self.status_alerts.observe(platform, "engagement"):
+            result = await self._fetch(url, comment_limit=comment_limit)
+        self.status_alerts.result(result, "engagement")
+        return result
+
+    async def _fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         async with self._collection_semaphore:
             host = urlsplit(url).hostname or ""
             platform = "xiaohongshu" if (
@@ -357,6 +382,11 @@ class EngagementService:
 
     @asynccontextmanager
     async def _proxy_affinity(self, platform: str) -> AsyncIterator[None]:
+        direct = getattr(getattr(self.crawler, "client", None), "account_direct_scope", None)
+        if platform == "xiaohongshu" and callable(direct):
+            async with direct():
+                yield
+            return
         scope = getattr(self.proxy_provider, "affinity_scope", None)
         if platform == "xiaohongshu" and callable(scope):
             async with scope("xiaohongshu"):
@@ -520,6 +550,17 @@ class EngagementService:
         return result.model_copy(deep=True)
 
     async def _collect_cached(
+        self,
+        operation: str,
+        platform: str,
+        collect: Callable[[], Awaitable[CachedResult]],
+    ) -> CachedResult:
+        with self.status_alerts.observe(platform, operation):
+            result = await self._collect_with_budget(operation, platform, collect)
+        self.status_alerts.result(result, operation)
+        return result
+
+    async def _collect_with_budget(
         self,
         operation: str,
         platform: str,

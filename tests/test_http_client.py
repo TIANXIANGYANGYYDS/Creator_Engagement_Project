@@ -178,6 +178,31 @@ def test_direct_scope_respects_required_proxy_mode() -> None:
     assert provider.successes == [proxies]
 
 
+def test_account_direct_scope_covers_get_post_and_browser_without_leaking_to_other_tasks():
+    proxies = {"https": "http://127.0.0.1:8080"}
+    provider = CountingProxyProvider(proxies)
+    session = FakeSession()
+    client = CurlAsyncHttpClient(timeout_seconds=10, headers={}, proxy_mode="required",
+        proxy_provider=provider, session=session)
+    async def account():
+        async with client.account_direct_scope(), client.lease_scope():
+            assert await client.active_proxy_mapping() is None
+            await client.get('https://edith.xiaohongshu.com/test')
+            await asyncio.sleep(0)
+            await client.post('https://edith.xiaohongshu.com/test')
+    async def other():
+        await client.get('https://example.com/')
+    async def run():
+        await asyncio.gather(account(), other())
+        await other()
+    asyncio.run(run())
+    xhs = [c for c in session.calls if 'xiaohongshu.com' in c['url']]
+    others = [c for c in session.calls if 'example.com' in c['url']]
+    assert all(c['proxy'] is None and c['proxies'] == {'all': ''} for c in xhs)
+    assert all(c['proxy'] == proxies['https'] and 'proxies' not in c for c in others)
+    assert provider.acquisitions == 2
+
+
 def test_post_uses_and_releases_proxy_lease() -> None:
     proxies = {"https": "http://127.0.0.1:8080"}
     provider = FakeProxyProvider(proxies)
@@ -533,3 +558,23 @@ def test_resolved_retry_honors_discard_cookies(monkeypatch):
         finally:
             await client.aclose()
     asyncio.run(run())
+
+
+def test_account_direct_rate_limit_covers_each_upstream_request_only(monkeypatch):
+    clock = [100.0]
+    sleeps = []
+    async def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+    monkeypatch.setattr('app.crawlers.http_client.monotonic', lambda: clock[0])
+    monkeypatch.setattr('app.crawlers.http_client.asyncio.sleep', sleep)
+    client = CurlAsyncHttpClient(timeout_seconds=1, headers={}, session=FakeSession(),
+                                account_direct_min_interval_seconds=5)
+    async def run():
+        async with client.account_direct_scope():
+            await client.get('https://edith.xiaohongshu.com/api/sns/web/v1/user_posted')
+            await client.get('https://edith.xiaohongshu.com/api/sns/web/v2/comment/page')
+            await client.get('https://edith.xiaohongshu.com/api/sns/web/v2/comment/sub/page')
+        await client.get('https://example.com/')
+    asyncio.run(run())
+    assert sleeps == [5, 5]

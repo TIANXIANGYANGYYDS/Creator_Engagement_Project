@@ -181,17 +181,17 @@ async def fetch(
             result.retryable = False
         return result
     except WeiboUnavailableError as exc:
-        result = result_error("weibo", url, work_id, "unsupported", str(exc))
+        result = result_error("weibo", url, work_id, "unsupported", exc)
         result.retryable = False
         return result
     except PlatformBlockedError as exc:
         if public_target is not None:
             crawler._invalidate_weibo_visitor_session()
-        return result_error("weibo", url, work_id, "blocked", str(exc))
+        return result_error("weibo", url, work_id, "blocked", exc)
     except Exception as exc:
         if public_target is not None:
             crawler._invalidate_weibo_visitor_session()
-        return result_error("weibo", url, work_id, "failed", str(exc))
+        return result_error("weibo", url, work_id, "failed", exc)
 
 
 def public_protocol_target(url: str, work_id: str) -> tuple[str, str] | None:

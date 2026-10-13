@@ -53,6 +53,16 @@ COMMENT_CAPABILITIES: dict[EngagementPlatform, CommentCapabilities] = {
     ),
 }
 
+# These endpoints expose paginated public discussions. Deep-page access may be
+# restricted independently of the first page; do not promise a full archive.
+for _platform in ("sina", "sina_finance", "baijiahao", "yoojia", "sohu", "dongchedi",
+                  "weitoutiao", "netease", "xueqiu", "autohome", "ixigua", "qq_stock"):
+    COMMENT_CAPABILITIES[_platform] = CommentCapabilities(
+        root_comments="paged_until_blocked", anonymous=True,
+        note="公开评论接口分页读取；登录、验证、失效链接或分页异常会返回受限/失败，不能保证全部历史评论。",
+    )
+
+
 
 def comment_capabilities(
     platform: EngagementPlatform,
@@ -63,6 +73,6 @@ def comment_capabilities(
         return CommentCapabilities(
             root_comments="all_public_pages",
             anonymous=False,
-            note="使用调用方提供的小红书 Cookie 和动态签名，按 cursor 翻到会话可见末页。",
+            note="使用已保存的 Cookie 会话与动态签名，按 cursor 读取主评论和楼中楼正文；回复受限时保留已取得内容并标记未完成。",
         )
     return COMMENT_CAPABILITIES[platform].model_copy(deep=True)

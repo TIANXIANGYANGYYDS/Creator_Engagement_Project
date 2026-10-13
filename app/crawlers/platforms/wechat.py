@@ -313,9 +313,9 @@ async def fetch(
             next_cursor=str(page + 1) if has_more else None,
         )
     except PlatformBlockedError as exc:
-        return result_error("wechat", url, work_id, "blocked", str(exc))
+        return result_error("wechat", url, work_id, "blocked", exc)
     except Exception as exc:
-        return result_error("wechat", url, work_id, "failed", str(exc))
+        return result_error("wechat", url, work_id, "failed", exc)
 
 
 async def fetch_appmsgext(

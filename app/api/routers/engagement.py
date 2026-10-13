@@ -38,6 +38,18 @@ MEDIA_NAMES_ZH = {
     "kuaishou": "快手",
     "bilibili": "哔哩哔哩",
     "weibo": "微博",
+    "sina": "新浪看点",
+    "baijiahao": "百家号",
+    "yoojia": "有驾",
+    "sina_finance": "新浪财经头条号",
+    "sohu": "搜狐号",
+    "dongchedi": "懂车帝",
+    "weitoutiao": "今日头条微头条",
+    "netease": "网易号",
+    "xueqiu": "雪球",
+    "autohome": "汽车之家",
+    "ixigua": "西瓜视频",
+    "qq_stock": "腾讯自选股",
 }
 PROXY_IP_UNIT_COST_YUAN = 0.00084
 
@@ -189,7 +201,7 @@ async def _collect_item(
             media_name=MEDIA_NAMES_ZH[result.platform],
             type=item.type,
             status="success",
-            complete=True,
+            complete=getattr(result, "comments_complete", True),
             result=CollectResultData(
                 total_comments=result.total_comments,
                 comments=result.comments,
@@ -268,6 +280,9 @@ async def _fetch_all_comments_with_status(
             if comment.comment_id not in seen_comment_ids:
                 seen_comment_ids.add(comment.comment_id)
                 comments.append(comment)
+
+        if getattr(result, "comments_complete", True) is False:
+            return comments, total_comments, False
 
         if result.next_page is None:
             return (

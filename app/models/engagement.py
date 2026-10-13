@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 EngagementPlatform = Literal[
@@ -16,6 +16,18 @@ EngagementPlatform = Literal[
     "kuaishou",
     "bilibili",
     "weibo",
+    "sina",
+    "baijiahao",
+    "yoojia",
+    "sina_finance",
+    "sohu",
+    "dongchedi",
+    "weitoutiao",
+    "netease",
+    "xueqiu",
+    "autohome",
+    "ixigua",
+    "qq_stock",
 ]
 EngagementCoverage = Literal[
     "complete",
@@ -80,6 +92,8 @@ def unavailable_comment_capabilities() -> CommentCapabilities:
 class CollectionResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    _status_error: str | None = PrivateAttr(default=None)
+
     platform: EngagementPlatform
     canonical_url: str
     work_id: str
@@ -103,6 +117,7 @@ class CommentPageResult(CollectionResult):
     next_page: int | None = Field(default=None, ge=1)
     next_cursor: str | None = None
     total_comments: int | None = Field(default=None, ge=0)
+    comments_complete: bool = True
     capabilities: CommentCapabilities = Field(
         default_factory=unavailable_comment_capabilities
     )

@@ -55,7 +55,8 @@ def test_all_supported_platforms_have_independent_handlers() -> None:
         "haokan",
         "kuaishou",
         "bilibili",
-        "weibo",
+        "weibo", "sina", "sina_finance", "baijiahao", "yoojia", "sohu",
+        "dongchedi", "weitoutiao", "netease", "xueqiu", "autohome", "ixigua", "qq_stock",
     }
 
 
@@ -683,7 +684,11 @@ def test_bilibili_article_comments_use_type_12_without_detail_request() -> None:
     assert client.calls[1][1]["params"]["oid"] == "34832696"
 
 
-def test_bilibili_opus_uses_page_comment_target_and_stats() -> None:
+@pytest.mark.parametrize("url", [
+    "https://www.bilibili.com/opus/907932915033178114",
+    "https://t.bilibili.com/907932915033178114?tab=2",
+])
+def test_bilibili_opus_uses_page_comment_target_and_stats(url: str) -> None:
     initial_state = {
         "detail": {
             "id_str": "907932915033178114",
@@ -716,15 +721,29 @@ def test_bilibili_opus_uses_page_comment_target_and_stats() -> None:
     )
 
     result = asyncio.run(EngagementCrawler(client=client).fetch(
-        "https://www.bilibili.com/opus/907932915033178114"
+        url
     ))
 
     assert result.stats.likes == 3
     assert result.stats.comments == 2
     assert result.stats.favorites == 5
+    assert client.calls[0][0] == "https://www.bilibili.com/opus/907932915033178114"
     assert client.calls[0][1]["discard_cookies"] is True
     assert client.calls[2][1]["params"]["type"] == "12"
     assert client.calls[2][1]["params"]["oid"] == "33179525"
+
+
+@pytest.mark.parametrize("path", ["", "/", "/topic/123", "/123/456"])
+def test_bilibili_dynamic_non_content_paths_have_no_work_id(path: str) -> None:
+    assert identify_url("https://t.bilibili.com" + path) == ("bilibili", "")
+
+
+def test_bilibili_dynamic_page_cannot_substitute_another_work() -> None:
+    html = '<script>window.__INITIAL_STATE__={"detail":{"id_str":"456"}};</script>'
+    result = asyncio.run(EngagementCrawler(client=FakeClient(FakeResponse(text=html))).fetch_interactions(
+        "https://t.bilibili.com/123?tab=2", "B站"))
+    assert result.coverage == "failed" and "matching detail" in result.reason
+    assert result.stats.likes is None
 
 
 def test_bilibili_live_url_is_outside_content_scope() -> None:
@@ -1657,6 +1676,26 @@ def test_xhs_stats_missing_note_is_empty_not_fabricated() -> None:
     }
 
 
+@pytest.mark.parametrize('counts,coverage', [
+    ({'likedCount': '', 'commentCount': ''}, 'unsupported'),
+    ({'likedCount': '0', 'commentCount': '0'}, 'partial'),
+])
+def test_xhs_accessible_note_distinguishes_blank_counts_from_explicit_zero(counts, coverage):
+    note_id = '6aca578d000000001c01e62a'
+    text = json.dumps({'noteDetailMap': {note_id: {'note': {
+        'noteId': note_id, 'interactInfo': counts}}}})
+    result = asyncio.run(EngagementCrawler(client=FakeClient(
+        FakeResponse(text=text), FakeResponse(text='<html>no mobile counters</html>'),
+    )).fetch_interactions(
+        f'https://www.xiaohongshu.com/explore/{note_id}?xsec_token=token', '小红书'))
+    assert result.coverage == coverage
+    if coverage == 'unsupported':
+        assert '空字段不视为零' in result.reason
+        assert result.stats.likes is None
+    else:
+        assert result.stats.likes == result.stats.comments == 0
+
+
 def test_xiaohongshu_blocked_page_is_not_reported_as_partial_success() -> None:
     result = asyncio.run(EngagementCrawler(client=FakeClient(
         FakeResponse(text="challenge", status_code=403),
@@ -1666,6 +1705,49 @@ def test_xiaohongshu_blocked_page_is_not_reported_as_partial_success() -> None:
 
     assert result.coverage == "blocked"
     assert result.stats.likes is None
+
+
+@pytest.mark.parametrize('payload', [
+    {'comments': [], 'has_more': True, 'cursor': 'next'},
+    {'comments': [], 'has_more': False, 'cursor': ''},
+    {'comments': [{'id': '1', 'content': '正文'}], 'has_more': True, 'cursor': 'same'},
+    {'comments': [{'id': '1', 'content': '正文'}], 'has_more': True, 'cursor': 'next'},
+    {'comments': []},
+])
+def test_xhs_comment_cursor_contract(payload, monkeypatch):
+    async def get(*args, **kwargs):
+        return payload
+    monkeypatch.setattr('app.crawlers.platforms.xiaohongshu._get', get)
+    crawler = EngagementCrawler(client=FakeClient(), platform_cookies={'xiaohongshu': 'a1=a; web_session=b'})
+    result = asyncio.run(crawler.fetch_comments(
+        'https://www.xiaohongshu.com/explore/6aca578d000000001c01e62a?xsec_token=t',
+        '小红书', 2, cursor='same'))
+    valid = payload.get('has_more') is False or (payload.get('comments') and payload.get('cursor') == 'next')
+    assert (result.coverage == 'partial') == bool(valid)
+    if payload.get('cursor') == 'next' and payload.get('comments'):
+        assert result.next_cursor == 'next' and result.next_page == 3
+
+
+def test_xhs_valid_empty_comment_page_is_not_retried(monkeypatch):
+    calls = 0
+
+    async def get(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {'comments': [], 'has_more': False, 'cursor': ''}
+
+    monkeypatch.setattr('app.crawlers.platforms.xiaohongshu._get', get)
+    crawler = EngagementCrawler(
+        client=FakeClient(), max_protocol_attempts=3,
+        platform_cookies={'xiaohongshu': 'a1=a; web_session=b'},
+    )
+    result = asyncio.run(crawler.fetch_comments(
+        'https://www.xiaohongshu.com/explore/6aca578d000000001c01e62a?xsec_token=t',
+        '小红书', 1,
+    ))
+    assert result.coverage == 'partial' and result.comments == []
+    assert result.total_comments is None and result.next_page is None
+    assert result.protocol_attempts == calls == 1
 
 
 def test_douyin_anonymous_session_fetches_stats_and_comments() -> None:

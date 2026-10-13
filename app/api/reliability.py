@@ -60,6 +60,20 @@ class RequestLoggingMiddleware:
                 status = 499
             raise
         finally:
+            # Collection routes also use 502 for absent/deleted content. Their
+            # services classify actual status errors before returning, so do
+            # not turn every data-unavailable result into a second alert here.
+            collection_502 = status == 502 and scope["path"] in {
+                "/api/v1/interactions", "/api/v1/comments", "/api/v1/authors/works",
+            }
+            if status >= 500 and not collection_502:
+                app = scope.get("app")
+                service = getattr(getattr(app, "state", None), "engagement_service", None)
+                alerts = getattr(service, "status_alerts", None)
+                if alerts is not None:
+                    route = scope.get("route")
+                    alerts.record("api", getattr(route, "path", "/unknown"),
+                                  f"HTTP {status}", category="api_error", request_id=request_id)
             logger.info(
                 "request_finished request_id=%s method=%s path=%s status=%s response_complete=%s duration_ms=%s",
                 request_id,

@@ -98,9 +98,9 @@ async def fetch(
             next_cursor=str(offset) if has_more and offset is not None else None,
         )
     except PlatformBlockedError as exc:
-        return result_error("toutiao", url, work_id, "blocked", str(exc))
+        return result_error("toutiao", url, work_id, "blocked", exc)
     except Exception as exc:
-        return result_error("toutiao", url, work_id, "failed", str(exc))
+        return result_error("toutiao", url, work_id, "failed", exc)
 
 
 def parse_comments(items: list[Any]) -> list[EngagementComment]:

@@ -24,6 +24,7 @@ from app.crawlers.authors.common import decode_cursor, AuthorCursorError, Author
 from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
 from app.models.author import AuthorPage, AuthorRequest, AuthorWork
 from app.services.engagement_service import EngagementService
+from app.services.status_alerts import StatusAlerts
 
 logger = logging.getLogger(__name__)
 ADAPTERS = {
@@ -43,6 +44,7 @@ class AuthorService:
         identity_repository=None,
     ):
         self.service = service
+        self.status_alerts = getattr(service, "status_alerts", None) or StatusAlerts()
         self.page_timeout_seconds = page_timeout_seconds
         self.identity_repository = identity_repository
         # Reuse the existing global browser budget, including interaction crawling.
@@ -125,6 +127,12 @@ class AuthorService:
             return page
 
     async def fetch_detail(
+        self, request: AuthorRequest, work: AuthorWork
+    ) -> AuthorWork:
+        with self.status_alerts.observe(request.media_name, "author_detail"):
+            return await self._fetch_detail(request, work)
+
+    async def _fetch_detail(
         self, request: AuthorRequest, work: AuthorWork
     ) -> AuthorWork:
         if not work.detail_context:
@@ -242,6 +250,9 @@ class DiscoverySession:
         await self.stack.enter_async_context(
             self.service._slot(self.request.media_name)
         )
+        direct = getattr(client, "account_direct_scope", None)
+        if self.request.media_name == "xiaohongshu" and callable(direct):
+            await self.stack.enter_async_context(direct())
         await self.stack.enter_async_context(client.isolated_session_scope())
         await self.stack.enter_async_context(client.lease_scope())
         self.crawler = self.service._crawler()
@@ -274,6 +285,10 @@ class DiscoverySession:
             )
 
     async def fetch_page(self, request, cursor=None):
+        with self.service.status_alerts.observe(request.media_name, "author_list"):
+            return await self._fetch_page(request, cursor)
+
+    async def _fetch_page(self, request, cursor=None):
         state = decode_cursor(request, cursor)
         client = self.service.service.crawler.client
         async with asyncio.timeout(self.service.page_timeout_seconds):

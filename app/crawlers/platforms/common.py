@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.models.engagement import EngagementCoverage, EngagementPlatform, EngagementResult
+from app.core.status_errors import status_error
 
 
 COMMENT_PAGE_SIZE = 20
@@ -58,13 +59,15 @@ def result_error(
     url: str,
     work_id: str,
     coverage: EngagementCoverage,
-    reason: str,
+    reason: str | Exception,
 ) -> EngagementResult:
-    return EngagementResult(
+    result = EngagementResult(
         platform=platform,
         canonical_url=url,
         work_id=work_id,
         coverage=coverage,
-        reason=reason,
+        reason=str(reason),
         source="protocol",
     )
+    result._status_error = status_error(reason)
+    return result

@@ -113,6 +113,7 @@ class XiaohongshuUrlResolver:
         self.cache_path = cache_path
         self.max_pages = max_pages
         self._lock = asyncio.Lock()
+        self._not_found: dict[tuple[str, str], tuple[float, str]] = {}
         self.authors: dict[str, str] = {}
         self.names: dict[str, str] = {}
         conflicts: set[str] = set()
@@ -123,11 +124,30 @@ class XiaohongshuUrlResolver:
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict):
                 continue
+            if isinstance(row.get("rawData"), dict):
+                row = row["rawData"]
             parsed = urlsplit(str(row.get("url") or ""))
             note_id = parsed.path.rsplit("/", 1)[-1]
             account = str(row.get("author_id") or "").strip()
             if parsed.hostname not in {"www.xiaohongshu.com", "xiaohongshu.com"} or not NOTE_ID.fullmatch(note_id):
                 continue
+            # Production exports include the exact profile URL as well as a
+            # numeric red ID. Prefer the profile UID to avoid account search.
+            info = row.get("author_full_info") or {}
+            profiles = set()
+            for value in [row.get("board_url"), info.get("profile_url") if isinstance(info, dict) else None]:
+                profile = urlsplit(str(value or ""))
+                match = re.fullmatch(r"/user/profile/([0-9a-f]{24})/?", profile.path)
+                if profile.hostname in {"www.xiaohongshu.com", "xiaohongshu.com"} and match:
+                    profiles.add(match[1])
+            if len(profiles) > 1:
+                conflicts.add(note_id)
+                self.authors.pop(note_id, None)
+                self.names.pop(note_id, None)
+            if note_id in conflicts:
+                continue
+            if profiles:
+                account = next(iter(profiles))
             if not account:
                 name = str(row.get("author_name") or "").strip()
                 if name:
@@ -136,6 +156,7 @@ class XiaohongshuUrlResolver:
             if account:
                 if note_id in self.authors and self.authors[note_id] != account:
                     self.authors.pop(note_id)
+                    self.names.pop(note_id, None)
                     conflicts.add(note_id)
                 elif note_id not in conflicts:
                     self.authors[note_id] = account
@@ -157,6 +178,13 @@ class XiaohongshuUrlResolver:
             )
         identity = account or f"name:{name}"
         async with self._lock:
+            # A comments request should not repeat the interactions request's
+            # unsuccessful author scan moments later. Do not cache auth errors.
+            now = time.monotonic()
+            self._not_found = {key: value for key, value in self._not_found.items() if value[0] > now}
+            missing = self._not_found.get((identity, note_id))
+            if missing:
+                raise XiaohongshuUrlResolutionError(missing[1])
             entry = self.cache.get(note_id) or {}
             if (
                 entry.get("author") == identity
@@ -165,12 +193,17 @@ class XiaohongshuUrlResolver:
                 and parse_qs(urlsplit(str(entry.get("url") or "")).query).get("xsec_token")
             ):
                 return entry["url"]
-            found = (
-                await recover_author(crawler, account, {note_id}, self.max_pages)
-                if account else await recover_named_author(crawler, name, note_id, self.max_pages)
-            )
-            if note_id not in found:
-                raise XiaohongshuUrlResolutionError("已核对作者列表，目标笔记当前不可见")
+            try:
+                found = (
+                    await recover_author(crawler, account, {note_id}, self.max_pages)
+                    if account else await recover_named_author(crawler, name, note_id, self.max_pages)
+                )
+                if note_id not in found:
+                    raise XiaohongshuUrlResolutionError("已核对作者列表，目标笔记当前不可见")
+            except XiaohongshuUrlResolutionError as exc:
+                if str(exc) in {"达到作者分页上限，目标笔记未找到", "已核对作者列表，目标笔记当前不可见"}:
+                    self._not_found[(identity, note_id)] = (time.monotonic() + 120, str(exc))
+                raise
             self.cache[note_id] = {"author": identity, "url": found[note_id], "saved_at": time.time()}
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.cache_path.with_name(self.cache_path.name + ".tmp")
