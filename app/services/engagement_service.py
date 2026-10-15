@@ -16,6 +16,7 @@ from app.crawlers.douyin_visitor import DouyinVisitorSessions
 from app.crawlers.platform_session import PlatformSessionStore
 from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolver
 from app.crawlers.platforms.registry import normalize_media_name
+from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES
 from app.crawlers.proxy_provider import (
     AsyncDailiProxyPool,
     AsyncProxyProvider,
@@ -65,6 +66,12 @@ for _platform in ("sina", "sina_finance", "baijiahao", "yoojia", "sohu", "dongch
         max_concurrency=1, min_interval_seconds=0.5,
     )
 
+
+
+for _platform in EXTENDED_SOURCES:
+    ENTERPRISE_PLATFORM_POLICIES[_platform] = PlatformTrafficPolicy(
+        max_concurrency=1, min_interval_seconds=0.5,
+    )
 
 
 class EngagementService:

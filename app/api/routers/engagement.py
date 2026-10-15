@@ -10,6 +10,7 @@ from app.api.dependencies import get_engagement_service
 from app.api.reliability import SyncCollectionRoute
 from app.core.config import get_settings
 from app.crawlers.platforms.registry import normalize_media_name
+from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES
 from app.models.engagement import (
     CommentDataResponse,
     CommentPageResult,
@@ -52,6 +53,7 @@ MEDIA_NAMES_ZH = {
     "qq_stock": "腾讯自选股",
 }
 PROXY_IP_UNIT_COST_YUAN = 0.00084
+MEDIA_NAMES_ZH.update({key: value[0] for key, value in EXTENDED_SOURCES.items()})
 
 
 @router.get("/interactions", response_model=InteractionDataResponse)

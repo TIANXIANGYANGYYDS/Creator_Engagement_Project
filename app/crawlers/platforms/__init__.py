@@ -14,7 +14,9 @@ from app.crawlers.platforms import (
     wechat_channels,
     weibo,
     xiaohongshu,
+    extended_publishers,
 )
+from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES
 from app.crawlers.platforms.base import PlatformFetchHandler
 from app.models.engagement import EngagementPlatform
 
@@ -42,5 +44,10 @@ PLATFORM_HANDLERS: dict[EngagementPlatform, PlatformFetchHandler] = {
     "autohome": autohome.fetch,
     "qq_stock": qq_stock.fetch,
 }
+
+PLATFORM_HANDLERS.update({
+    platform: partial(extended_publishers.fetch, platform=platform)
+    for platform in EXTENDED_SOURCES
+})
 
 __all__ = ["PLATFORM_HANDLERS"]

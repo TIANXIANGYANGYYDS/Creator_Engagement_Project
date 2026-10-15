@@ -7,6 +7,7 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 from app.models.engagement import EngagementPlatform
+from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES, source_id
 
 
 WEIBO_BASE62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -69,6 +70,10 @@ MEDIA_ALIASES: dict[str, EngagementPlatform] = {
     "腾讯自选股": "qq_stock",
 }
 
+for _key, (_name, _hosts) in EXTENDED_SOURCES.items():
+    MEDIA_ALIASES[_key] = _key
+    MEDIA_ALIASES[_name.casefold()] = _key
+
 
 def normalize_media_name(media_name: str) -> EngagementPlatform:
     normalized = re.sub(r"\s+", "", media_name.strip().casefold())
@@ -81,6 +86,8 @@ def normalize_media_name(media_name: str) -> EngagementPlatform:
 
 def validate_media_url(url: str, media_name: str) -> tuple[EngagementPlatform, str]:
     requested_platform = normalize_media_name(media_name)
+    if requested_platform in EXTENDED_SOURCES:
+        return requested_platform, source_id(requested_platform, url)
     detected_platform, work_id = identify_url(url)
     # Legacy /i links are shared by articles and micro-posts. The caller's
     # media name disambiguates them; /w and /article remain unambiguous.
@@ -273,4 +280,7 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
             or query.get("sn", [""])[0]
             or (path_match.group(1) if path_match else "")
         )
+    for platform, (_, hosts) in EXTENDED_SOURCES.items():
+        if host in hosts:
+            return platform, source_id(platform, url)
     raise ValueError("unsupported content URL host")

@@ -35,7 +35,10 @@ async def fetch(crawler, url, work_id, limit, *, page, comment_cursor,
                     raise PlatformCrawlerError("新浪页面没有公开评论标识")
                 channel, newsid = match[1], nid[1]
             if work_id.startswith("comos-") and newsid != work_id:
-                raise PlatformCrawlerError("新浪页面评论标识不是目标文章")
+                # Syndicated mobile articles explicitly map a Comos page ID to
+                # an MP comment thread. Both sides must come from this config.
+                if config.get("product") != "comos" or config.get("index") != work_id[6:]:
+                    raise PlatformCrawlerError("新浪页面评论标识不是目标文章")
         size = min(limit, COMMENT_PAGE_SIZE)
         payload = await get_jsonp(crawler, COMMENT_URL, params={
             "format": "json", "channel": channel, "newsid": newsid,

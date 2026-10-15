@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.models.engagement import CommentCapabilities, EngagementPlatform
+from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES
 
 
 COMMENT_CAPABILITIES: dict[EngagementPlatform, CommentCapabilities] = {
@@ -62,6 +63,18 @@ for _platform in ("sina", "sina_finance", "baijiahao", "yoojia", "sohu", "dongch
         note="公开评论接口分页读取；登录、验证、失效链接或分页异常会返回受限/失败，不能保证全部历史评论。",
     )
 
+
+
+for _platform in EXTENDED_SOURCES:
+    COMMENT_CAPABILITIES[_platform] = CommentCapabilities(
+        root_comments="paged_until_blocked", anonymous=True,
+        note="按目标页面的公开评论协议获取；部分来源不公开评论或需要登录，接口会明确返回失败。首屏成功不代表历史全集完整。",
+    )
+
+COMMENT_CAPABILITIES["qctt"] = CommentCapabilities(
+    root_comments="first_public_page", anonymous=True,
+    note="汽车头条仅返回页面公开的首批一级评论；不提供后续分页。",
+)
 
 
 def comment_capabilities(

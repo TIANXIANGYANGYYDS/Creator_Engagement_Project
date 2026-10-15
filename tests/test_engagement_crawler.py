@@ -46,18 +46,9 @@ class FakeResponse:
 
 
 def test_all_supported_platforms_have_independent_handlers() -> None:
-    assert set(PLATFORM_HANDLERS) == {
-        "douyin",
-        "toutiao",
-        "wechat",
-        "wechat_channels",
-        "xiaohongshu",
-        "haokan",
-        "kuaishou",
-        "bilibili",
-        "weibo", "sina", "sina_finance", "baijiahao", "yoojia", "sohu",
-        "dongchedi", "weitoutiao", "netease", "xueqiu", "autohome", "ixigua", "qq_stock",
-    }
+    from typing import get_args
+    from app.models.engagement import EngagementPlatform
+    assert set(PLATFORM_HANDLERS) == set(get_args(EngagementPlatform))
 
 
 class FakeClient:
