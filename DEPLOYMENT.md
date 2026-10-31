@@ -2,6 +2,14 @@
 
 项目使用 `MyAgent` Conda 环境，已验证 Python 3.13.12。
 
+## 2026-11-01 当前发布
+
+北京时间 03:37 已将代码提交 `5a16989` 发布到 8200，包含微博/B站评论修复和 24 个来源扩展，注册来源共 85 个。全量测试 919 passed、22 skipped；公网地址健康检查及微博、B站、澎湃、AcFun 评论抽查通过，不表示所有来源、所有历史评论均可采集。
+
+API 从 `.local/releases/20261101-033649-all-85-platforms/source` 的提交快照运行，保持单 worker；该目录的 `.local` 链接到主项目运行数据目录，沿用原配置、日志和会话。修改开发工作区不会自动更新运行实例，后续发布应准备新快照后切换。当前发布及重启证据位于 `.local/analysis/comments-release-20261101/`。
+
+重启前后 6 个已完成任务、6,755 条输入和结果数量一致，无活动任务；小红书 `xhs-session-owner` 保持原进程。代理池参数仍为 8 个 IP、单 IP 并发 1，临期租约问题留待后续修复。
+
 ## 2026-10-31 当前部署参数
 
 保留 `COLLECTION_MAX_CONCURRENCY=8`、`PROXY_POOL_SIZE=8`、`PROXY_MAX_CONCURRENCY=1`、`BROWSER_MAX_CONCURRENCY=3`、`JOB_ITEM_MAX_CONCURRENCY=16`。新增 `PUBLIC_PLATFORM_MAX_CONCURRENCY=1`（可设 1–4），它只控制普通发布方，同协议的多个来源共享配额。当前实测不支持提高单 IP/发布方并发，比较结果见 [本轮验收](docs/PLATFORM_EXPANSION_2026-10-31.md)。

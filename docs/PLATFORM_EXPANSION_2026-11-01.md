@@ -65,4 +65,4 @@
 - 顶端柘城公共 Web 签名对 3 组真实请求头精确对拍一致。运行时读取当前官网公开配置，不提交固定签名密钥或登录态。
 - 私有证据目录：`.local/analysis/coverage-20261101/`。页面预探查 164 个来源，146 个 HTTP 200 仅作为发现入口；最终验收使用上述业务结果。
 - 回放结果：`collector-replay-results.json`、`collector-final-results.json`、`collector-extra-results.json`、`collector-yzwb-results.json`、`collector-alias-results.json`；额外非空评论样本见 `collector-live-second.json`。
-- 当前为工作区实现和独立进程验证；未将注册数或本地验证描述成线上部署结果。
+- 上述 164 次操作为上线前的独立进程验证。北京时间 2026-11-01 03:37，提交 `5a16989` 已发布到 8200，健康接口确认注册 85 个来源；通过服务器访问公网地址抽查澎湃、AcFun 评论均取得非空结果。该抽查不是另一台客户端的外部网络验证，也不替代逐来源能力限制；部署方式见 [部署说明](../DEPLOYMENT.md)。
