@@ -85,6 +85,35 @@ COMMENT_CAPABILITIES["csdn"] = CommentCapabilities(
     note="已验证目标文章公开互动计数；评论接口访问挑战尚未通过实网验收。",
 )
 
+for _platform in ("jike", "chemm", "jianshu", "dingnews", "ofweek", "growthhk", "ql1d", "ichaoqi", "yzwb"):
+    COMMENT_CAPABILITIES[_platform] = CommentCapabilities(
+        root_comments="unavailable", anonymous=True,
+        note="仅在目标文章明确显示评论数为 0 时确认空列表；非空评论正文/分页尚未完成实网验收。",
+    )
+for _platform in ("tidenews", "tonghuashun", "icswb", "donews", "how42", "guanhai"):
+    COMMENT_CAPABILITIES[_platform] = CommentCapabilities(
+        root_comments="unavailable", anonymous=True,
+        note="已接入目标文章公开互动字段；未取得可验证的评论正文，不能将未知评论当作零条。",
+    )
+for _platform in ("acfun", "sina_community", "thepaper", "d1ev"):
+    COMMENT_CAPABILITIES[_platform] = CommentCapabilities(
+        root_comments="paged_until_blocked", anonymous=True,
+        note="非空一级评论已实测；按官方页码/结束标记分页，回复正文不返回；失效、登录或分页异常会明确报错。",
+    )
+COMMENT_CAPABILITIES["mydigit"] = CommentCapabilities(
+    root_comments="paged_until_blocked", anonymous=True,
+    note="公开帖子计数可用；回帖正文可能仅登录可见，此时返回受限，不把登录提示当成正文。",
+)
+COMMENT_CAPABILITIES["zhihu"] = CommentCapabilities(
+    root_comments="paged_until_blocked", anonymous=True,
+    note="专栏/回答按目标实体取值，匿名浏览器通过现有代理兜底；挑战或登录限制会明确报错。",
+)
+for _platform in ("ijiwei", "geekpark", "shobserver"):
+    COMMENT_CAPABILITIES[_platform] = CommentCapabilities(
+        root_comments="paged_until_blocked", anonymous=True,
+        note="按官网公开接口读取一级评论；空列表已实测，非空及深页仍需更多实网样本，不能承诺历史全集。",
+    )
+
 
 def comment_capabilities(
     platform: EngagementPlatform,

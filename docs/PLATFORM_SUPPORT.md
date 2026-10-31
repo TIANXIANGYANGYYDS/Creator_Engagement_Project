@@ -1,6 +1,6 @@
 # 平台与采集器清单
 
-更新：2026-10-31。当前代码注册 **61 个规范来源名称**（原 50 + 新增 11），包含共享协议和仅支持部分字段的来源。**61 不是 61 个平台全字段、全评论均可用**。原 20,000 条导出的前 80 名及未接入项逐条见 [覆盖与待办](PLATFORM_BACKLOG.md)，本轮实测见 [扩展验收](PLATFORM_EXPANSION_2026-10-31.md)。
+更新：2026-11-01。当前代码注册 **85 个规范来源名称**（原 61 + 本轮新增 24），包含共享协议、仅支持部分字段和评论受限的来源。原前 80 名中 **63 个可路由，17 个仍未接入**，不能等同全字段/全评论可用。详见 [覆盖与待办](PLATFORM_BACKLOG.md)、[本轮验收](PLATFORM_EXPANSION_2026-11-01.md) 和 [联合来源 CSV](PLATFORM_COVERAGE_2026-11-01.csv)。
 
 调用方继续提供 `url + media_name`；小红书无需额外提交作者或访问参数。内部恢复访问链接仍取决于已有会话、可核验线索及作品可见性，登录不保证任意裸链接都能恢复。
 
@@ -8,6 +8,30 @@
 
 | 规范媒体名 | 标识 | 实现文件 | 互动字段范围 | 评论及限制 |
 |---|---|---|---|---|
+| 知乎 | `zhihu` | [zhihu.py](../app/crawlers/platforms/zhihu.py) | 赞/评论/收藏；阅读为 null | 专栏零评论已实测；回答样本重定向到要求登录的安全验证页；非空及深页未通过实网验收 |
+| 同花顺 | `tonghuashun` | [tonghuashun.py](../app/crawlers/platforms/tonghuashun.py) | 同顺号阅读；普通财经新闻未取得可靠计数 | 评论未接通；查询 hotKey，不发送 inc=1；两类内容不能混用 |
+| 即刻 | `jike` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 赞/评论/分享/转发 | 仅可确认目标明确为 0 的评论；非空正文未接通 |
+| 玩车教授 | `chemm` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 页面显示阅读/赞/评论 | 阅读 1.4w 对应约 14000，不能使用 post_hits_real；62871 样本缺少有效目标状态；仅零评论 |
+| 爱集微 | `ijiwei` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论/收藏 | newlist 一级评论协议已接入；零评论已实测，非空/深页待实测；首屏省略 after_id |
+| 简书 | `jianshu` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论 | 首轮成功，复测部分响应缺少目标状态；仅能确认明确零评论 |
+| 极客公园 | `geekpark` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论 | 官网评论列表协议已接入；零评论已实测，非空待实测 |
+| 潮新闻 | `tidenews` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/分享/收藏 | 评论未接通；不能把前端默认空列表当零评论 |
+| AcFun | `acfun` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论/分享/收藏 | 非空根评论已实测；57 总评论含回复，返回 45 个根评论；分页协议已实现 |
+| 上观 | `shobserver` | [regional_news.py](../app/crawlers/platforms/regional_news.py) | 阅读/赞/评论/收藏 | 上观/jfdaily 官方别名统一；零评论已实测，非空与深页待实测 |
+| 顶端柘城 | `dingnews` | [regional_news.py](../app/crawlers/platforms/regional_news.py) | 阅读/赞/评论 | 顶端柘城公共 Web 签名，3 组字节对拍一致；仅零评论；不代表顶端新闻主站可用 |
+| 澎湃新闻 | `thepaper` | [regional_news.py](../app/crawlers/platforms/regional_news.py) | 赞/评论；阅读为 null | 非空一级评论及第 2 页已实测；foldNum 和回复预览不是回复总数 |
+| 新浪新闻 | `sina_community` | [sina_community.py](../app/crawlers/platforms/sina_community.py) | 赞/评论；阅读为 null | 目标页关联 qcmnt/ds 线程；非空与第 2 页已实测，过滤回复正文 |
+| OFweek维科网 | `ofweek` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 评论数；阅读为 null | 校验 DetailID；只确认明确零评论，非空正文待验收 |
+| 长沙晚报网 | `icswb` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 赞；阅读/评论未知 | 长沙晚报/掌上长沙统一；评论端返回空字符串，不能视作 0 |
+| DoNews | `donews` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 目标页面阅读 | 评论未接通；不调用阅读量更新接口 |
+| 增长黑客 | `growthhk` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 阅读/赞/评论 | 只取文章徽标，不取作者累计评论；仅零评论 |
+| 第一电动网 | `d1ev` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 赞/评论；阅读为 null | 非空一级评论已实测，支持官网分页 HTML；深页待实测，过滤回复正文 |
+| 数码之家 | `mydigit` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 帖子查看/赞/回复/收藏 | 零回复可确认；非空样本正文要求登录，明确返回 blocked |
+| 42号车库 | `how42` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞 | 只解析目标 Nuxt articleInfo，不执行页面脚本；评论未接通 |
+| 齐鲁壹点 | `ql1d` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论 | 只解析目标 Nuxt newsData；仅明确零评论 |
+| 潮起网 | `ichaoqi` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 显示阅读/评论 | 2.8w 是显示约数；只取文章元信息，排除热门侧栏；仅零评论 |
+| 观海新闻 | `guanhai` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 赞；阅读/评论未知 | 只使用官网显示的 digg；不把未展示 pv=0 当真实阅读；评论请求未通过 |
+| 紫牛新闻 | `yzwb` | [regional_news.py](../app/crawlers/platforms/regional_news.py) | 阅读/赞/评论 | 紫牛新闻 getDetail 校验 news_id；仅明确零评论；扬子晚报网旧门户为另一协议 |
 | 抖音 | `douyin` | [douyin.py](../app/crawlers/platforms/douyin.py) | 赞、评论、分享、收藏；未公开播放数为 null | 公开一级评论分页；可能受登录/删除/风控限制 |
 | 今日头条 | `toutiao` | [toutiao.py](../app/crawlers/platforms/toutiao.py) | 评论数；SSR 有效时补充点赞/分享等 | 公开一级评论分页；可能受登录/删除/风控限制 |
 | 微信公众号 | `wechat` | [wechat.py](../app/crawlers/platforms/wechat.py) | 页面明确公开的赞/推荐/精选评论数；阅读量不保证 | 匿名正文不可用 |

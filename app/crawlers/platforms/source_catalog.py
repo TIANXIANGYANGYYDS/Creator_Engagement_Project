@@ -6,6 +6,30 @@ import re
 
 # Shared publishers remain separate source names in the public API.
 EXTENDED_SOURCES = {
+    'yzwb': ('紫牛新闻', ('wap.yzwb.net', 'm.yangtse.com', 'm.yzwb.net')),
+    'guanhai': ('观海新闻', ('m.guanhai.com.cn', 'www.guanhai.com.cn')),
+    'ichaoqi': ('潮起网', ('www.ichaoqi.com',)),
+    'how42': ('42号车库', ('www.42how.com',)),
+    'ql1d': ('齐鲁壹点', ('www.ql1d.com', 'm.ql1d.com')),
+    'mydigit': ('数码之家', ('www.mydigit.cn',)),
+    'sina_community': ('新浪新闻', ('super.sina.cn',)),
+    'ofweek': ('OFweek维科网', ('www.ofweek.com', 'cloud.ofweek.com', 'auto.ofweek.com', 'ee.ofweek.com', 'iot.ofweek.com', 'ai.ofweek.com', 'robot.ofweek.com', 'chuneng.ofweek.com')),
+    'icswb': ('长沙晚报网', ('www.icswb.com',)),
+    'donews': ('DoNews', ('www.donews.com',)),
+    'growthhk': ('增长黑客', ('www.growthhk.cn',)),
+    'd1ev': ('第一电动网', ('www.d1ev.com',)),
+    'tonghuashun': ('同花顺', ('t.10jqka.com.cn', 'stock.10jqka.com.cn', 'news.10jqka.com.cn', 'm.10jqka.com.cn', 'field.10jqka.com.cn')),
+    'thepaper': ('澎湃新闻', ('www.thepaper.cn', 'm.thepaper.cn')),
+    'zhihu': ('知乎', ('zhuanlan.zhihu.com', 'www.zhihu.com')),
+    'jike': ('即刻', ('m.okjike.com',)),
+    'chemm': ('玩车教授', ('www.chemm.com',)),
+    'ijiwei': ('爱集微', ('ijiwei.com', 'www.ijiwei.com', 'www.laoyaoba.com')),
+    'jianshu': ('简书', ('www.jianshu.com',)),
+    'geekpark': ('极客公园', ('www.geekpark.net',)),
+    'tidenews': ('潮新闻', ('tidenews.com.cn',)),
+    'acfun': ('AcFun', ('www.acfun.cn',)),
+    'shobserver': ('上观', ('www.shobserver.cn', 'www.shobserver.com', 'www.jfdaily.com', 'www.jfdaily.com.cn')),
+    'dingnews': ('顶端柘城', ('zc.dingxinwen.cn',)),
     'csdn': ('CSDN', ('blog.csdn.net',)),
     'kuai': ('快资讯', ('www.360kuai.com',)),
     'kr36': ('36氪', ('www.36kr.com', '36kr.com')),
@@ -68,6 +92,61 @@ def source_id(platform: str, url: str) -> str:
         raise ValueError("media_name 与内容 URL 的平台不匹配")
     query = parse_qs(parsed.query)
     query.update(parse_qs(parsed.fragment.partition("?")[2]))
+    if platform == "yzwb" and parsed.path == "/news_details.html":
+        value = (query.get("id") or [""])[0]
+        return value if value.isdigit() else ""
+    if platform == "ijiwei" and parsed.hostname == "www.laoyaoba.com":
+        value = (query.get("news_id") or [""])[0]
+        return value if parsed.path == "/html/share/news" and value.isdigit() else ""
+    extra_patterns = {
+        "yzwb": r"/wap/news/(\d+)\.html",
+        "guanhai": r"/p/(\d+)\.html",
+        "ichaoqi": r"/[a-z]+/\d{4}/\d{4}/(\d+)\.html",
+        "how42": r"/article/(\d+)",
+        "ql1d": r"/(?:new/)?general/(\d+)(?:\.html)?",
+        "mydigit": r"/thread-(\d+)-\d+-1\.html",
+        "sina_community": r"/shequn/post/detail_(\d+)\.html",
+        "ofweek": r"/(?:[a-z]+/)?\d{4}-\d{2}/ART-\d+-\d+-(\d+)\.html",
+        "icswb": r"/h/\d+/\d{8}/(\d+)(?:_m)?\.html",
+        "donews": r"/news/detail/\d+/(\d+)\.html",
+        "growthhk": r"/(?:[a-z]+/)+(\d+)\.html",
+        "d1ev": r"/news/[a-z]+/(\d+)",
+    }
+    if platform in extra_patterns:
+        match = re.fullmatch(extra_patterns[platform], parsed.path)
+        return match[1] if match else ""
+    if platform == "thepaper":
+        match = re.fullmatch(r"/newsDetail_forward_(\d+)", parsed.path)
+        return match[1] if match else ""
+    if platform == "tonghuashun":
+        if parsed.hostname == "t.10jqka.com.cn":
+            match = re.fullmatch(r"/(?:m/zhibo/)?pid_(\d+)\.shtml", parsed.path)
+            value = match[1] if match else ((query.get("pid") or [""])[0]
+                if parsed.path in {"/m/post/articleShare/articleshare.html", "/lgt/article_detail/index.html"} else "")
+            return "post:" + value if value.isdigit() else ""
+        match = re.fullmatch(r"/(?:[a-z]+/)?(?:\d{8}/c|m)(\d+)(?:\.shtml|/)", parsed.path)
+        return "news:" + match[1] if match else ""
+    if platform == "zhihu":
+        for kind, pattern in (("article", r"/p/(\d+)"),
+                              ("answer", r"/(?:question/\d+/)?answer/(\d+)")):
+            match = re.fullmatch(pattern, parsed.path)
+            if match:
+                return kind + ":" + match[1]
+        return ""
+    patterns = {
+        "jike": r"/originalPosts/([0-9a-f]{24})",
+        "ijiwei": r"/n/(\d+)", "jianshu": r"/p/([0-9a-f]{12})",
+        "geekpark": r"/news/(\d+)", "acfun": r"/a/ac(\d+)",
+    }
+    if platform in patterns:
+        match = re.fullmatch(patterns[platform], parsed.path)
+        return match[1] if match else ""
+    if platform in {"chemm", "tidenews", "shobserver", "dingnews"}:
+        path, key = {"chemm": ("/newsDetail", "article_id"), "tidenews": ("/news.html", "id"),
+            "shobserver": ("/staticsg/res/html/web/newsDetail.html", "id"),
+            "dingnews": ("/nm-sharepage/index.html", "id")}[platform]
+        value = (query.get(key) or [""])[0]
+        return value if parsed.path == path and value.isdigit() else ""
     if platform == "csdn":
         match = re.fullmatch(r"/[^/]+/article/details/(\d+)", parsed.path)
         return match[1] if match else ""

@@ -15,6 +15,18 @@ WECHAT_CHANNELS_MOBILE_PATH = "/mobile/commonFinderJsApi.html"
 
 
 MEDIA_ALIASES: dict[str, EngagementPlatform] = {
+    "观海": "guanhai",
+    "壹点": "ql1d",
+    "ofweek": "ofweek",
+    "掌上长沙": "icswb",
+    "长沙晚报": "icswb",
+    "donews": "donews",
+    "第一电动": "d1ev",
+    "知乎专栏": "zhihu",
+    "知乎回答": "zhihu",
+    "同顺号": "tonghuashun",
+    "同花顺财经": "tonghuashun",
+    "同花顺投顾平台": "tonghuashun",
     "douyin": "douyin",
     "抖音": "douyin",
     "toutiao": "toutiao",

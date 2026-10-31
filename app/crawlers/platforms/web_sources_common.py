@@ -24,6 +24,50 @@ def assigned_json(text: str, name: str) -> dict:
         return {}
 
 
+def nuxt_literal_state(html: str) -> dict:
+    """Decode Nuxt's literal-only IIFE serialization without executing JavaScript.
+
+    Only JSON arguments, object keys and references to those arguments are
+    accepted. Calls, expressions and arbitrary page scripts are rejected.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    script = next((node.string for node in soup.select("script")
+        if node.string and node.string.strip().startswith("window.__NUXT__=")), "")
+    if len(script) > 3_000_000:
+        raise PlatformCrawlerError("Nuxt 状态超过解析大小限制")
+    match = re.fullmatch(r"window\.__NUXT__=\(function\(([^)]*)\)\{return (.*)\}\((.*)\)\);?", script.strip(), re.S)
+    if not match:
+        raise PlatformCrawlerError("页面未提供可解码的 Nuxt 字面量状态")
+    try:
+        names = match[1].split(",")
+        values = json.loads("[" + match[3] + "]")
+        if len(names) != len(values) or len(set(names)) != len(names):
+            raise ValueError
+        bindings = dict(zip(names, values))
+        token = re.compile(r'"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[A-Za-z_$][\w$]*|[{}\[\],:]')
+        colon = re.compile(r"\s*:")
+        source, output, end = match[2], [], 0
+        for item in token.finditer(source):
+            if source[end:item.start()].strip():
+                raise ValueError
+            value = item[0]
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", value):
+                if colon.match(source, item.end()):
+                    value = json.dumps(value)
+                elif value not in {"true", "false", "null"}:
+                    value = json.dumps(bindings[value], ensure_ascii=False)
+            output.append(value)
+            end = item.end()
+        if source[end:].strip():
+            raise ValueError
+        state = json.loads("".join(output))
+        if not isinstance(state, dict):
+            raise ValueError
+        return state
+    except (KeyError, ValueError, TypeError):
+        raise PlatformCrawlerError("Nuxt 状态含非字面量表达式或无效引用") from None
+
+
 def json_or_jsonp(text: str) -> dict:
     text = text.strip()
     try:
