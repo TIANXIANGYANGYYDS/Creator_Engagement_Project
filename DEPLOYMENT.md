@@ -2,6 +2,14 @@
 
 项目使用 `MyAgent` Conda 环境，已验证 Python 3.13.12。
 
+## 2026-10-31 当前部署参数
+
+保留 `COLLECTION_MAX_CONCURRENCY=8`、`PROXY_POOL_SIZE=8`、`PROXY_MAX_CONCURRENCY=1`、`BROWSER_MAX_CONCURRENCY=3`、`JOB_ITEM_MAX_CONCURRENCY=16`。新增 `PUBLIC_PLATFORM_MAX_CONCURRENCY=1`（可设 1–4），它只控制普通发布方，同协议的多个来源共享配额。当前实测不支持提高单 IP/发布方并发，比较结果见 [本轮验收](docs/PLATFORM_EXPANSION_2026-10-31.md)。
+
+小红书保持 `XIAOHONGSHU_SESSION_MODE=stored`、`XIAOHONGSHU_REQUEST_INTERVAL_SECONDS=15`，已有专用会话进程通过本机 IP 请求，不使用代理池。API 更新不得重新登录、替换 Profile 或重启 `xhs-session-owner`。账号的每次上游请求受独立串行及间隔约束。
+
+批任务现按上游分组调度，限速等待不占全局槽位；每条执行超时从取得必要容量后计算。更新前检查活动任务和 `job_requests` 完整性，保留已写入结果；关闭/重启中断的任务启动后自动恢复，主动取消的任务不会自动恢复。保持单个 API worker，不能同时运行两个连接同一任务库的生产实例。
+
 ## 配置
 
 ```bash
@@ -22,6 +30,7 @@ JOB_MAX_ITEMS=0
 JOB_RESULT_MAX_BYTES=8388608
 JOB_TIMEOUT_SECONDS=1800
 JOB_TIMEOUT_BATCH_SIZE=500
+JOB_XIAOHONGSHU_ITEM_TIMEOUT_SECONDS=300
 REQUEST_CONNECT_TIMEOUT_SECONDS=5
 DOUYIN_PROTOCOL_MAX_ATTEMPTS=8
 ```
@@ -49,13 +58,13 @@ conda run -n MyAgent python -m app.manually_execute_script.migrate_jobs_to_mongo
 升级前已经生成的 `cache2` 是可重建数据；如需回收其磁盘空间，应先停止服务并单独备份或清理
 这些缓存目录，不要删除整个 Profile。
 
-生产默认资源上限为 4 个采集、2 个浏览器、2 个代理 IP。低于约 2 GB 可用内存时建议：
+以下是历史低内存示例，并非当前生产参数。低于约 2 GB 可用内存时，可评估：
 
 ```dotenv
 BROWSER_MAX_CONCURRENCY=1
 COLLECTION_MAX_CONCURRENCY=4
 PROXY_POOL_SIZE=2
-PROXY_MAX_CONCURRENCY=2
+PROXY_MAX_CONCURRENCY=1
 ENGAGEMENT_CACHE_TTL_SECONDS=120
 ENGAGEMENT_CACHE_MAX_ENTRIES=1000
 ENGAGEMENT_CACHE_MAX_BYTES=67108864
@@ -64,11 +73,7 @@ ENGAGEMENT_CACHE_MAX_BYTES=67108864
 Uvicorn 建议只启动 1 个 worker；每增加一个 worker 都会复制浏览器并发槽位、缓存和代理池，
 不能靠多 worker 提高本项目吞吐。容量和成本估算见 `docs/COST_AND_CAPACITY.md`。
 
-代理模式由 `PROXY_MODE` 控制：
-
-- `direct`：本机直连；
-- `prefer`：有 51 代理配置时使用代理池，否则直连；
-- `required`：必须取得代理，获取失败直接报错。
+生产服务仅接受 `PROXY_MODE=required`，普通平台没有可用代理即明确失败。小红书通过专用账号策略本机直连；不能为了它把全局代理模式改为 `direct` 或 `prefer`。底层客户端保留其他模式用于隔离测试，不能作为生产配置建议。
 
 应用诊断日志写入 `.local/logs/api.log`，每个文件 10 MiB，保留 3 个轮转备份。
 日志记录请求阶段、异常类型、curl 错误码、耗时和批次完成计数，不记录签名查询参数或 Cookie。
@@ -85,6 +90,14 @@ HTTP 请求的开始、结束、响应状态、耗时和 `X-Request-ID` 也写�
 MongoDB 单次操作配置 10 秒客户端总时限，避免任务提交和查询无限等待数据库响应。
 
 ## API
+
+小红书原始 URL 的内部访问链接恢复支持当前来源查询：配置
+`XIAOHONGSHU_SOURCE_MONGO_DATABASE`、`XIAOHONGSHU_SOURCE_MONGO_COLLECTION`，
+服务通过现有 `MONGO_URI` 只读查询 URL 与作者标识，不读取来源互动计数。
+支持平铺、`rawData` 和日报 `raw` 记录。来源更新后，新 URL 不需要重新导出文件或重启服务。
+来源库不可用时会明确失败；部署账号需具有所选集合的读取权限。
+小红书异步单条预算默认 300 秒，包含账号限速、恢复链接和分页，其他平台仍使用原有预算。
+同步接口仍为 120 秒；小红书批量或长分页使用异步任务。
 
 ```bash
 conda run -n MyAgent uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8200

@@ -16,7 +16,7 @@ from app.crawlers.douyin_visitor import DouyinVisitorSessions
 from app.crawlers.platform_session import PlatformSessionStore
 from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolver
 from app.crawlers.platforms.registry import normalize_media_name
-from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES
+from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES, traffic_platform
 from app.crawlers.proxy_provider import (
     AsyncDailiProxyPool,
     AsyncProxyProvider,
@@ -33,7 +33,7 @@ from app.services.status_alerts import StatusAlerts
 
 
 CachedResult = InteractionResult | CommentPageResult
-CacheKey = tuple[str, str, str, int]
+CacheKey = tuple[str, str, str, int, str | None]
 
 
 @dataclass(frozen=True)
@@ -60,20 +60,12 @@ ENTERPRISE_PLATFORM_POLICIES: dict[EngagementPlatform, PlatformTrafficPolicy] = 
     ),
 }
 
-for _platform in ("sina", "sina_finance", "baijiahao", "yoojia", "sohu", "dongchedi",
-                  "weitoutiao", "netease", "xueqiu", "autohome", "ixigua", "qq_stock"):
+PUBLIC_PLATFORMS = {"sina", "sina_finance", "baijiahao", "yoojia", "sohu", "dongchedi",
+                   "weitoutiao", "netease", "xueqiu", "autohome", "ixigua", "qq_stock", *EXTENDED_SOURCES}
+for _platform in PUBLIC_PLATFORMS:
     ENTERPRISE_PLATFORM_POLICIES[_platform] = PlatformTrafficPolicy(
         max_concurrency=1, min_interval_seconds=0.5,
     )
-
-
-
-for _platform in EXTENDED_SOURCES:
-    ENTERPRISE_PLATFORM_POLICIES[_platform] = PlatformTrafficPolicy(
-        max_concurrency=1, min_interval_seconds=0.5,
-    )
-
-
 class EngagementService:
     """Application boundary for single and batch URL collection."""
 
@@ -115,6 +107,9 @@ class EngagementService:
         self._reserved_platform: ContextVar[str | None] = ContextVar(
             "reserved_collection_platform", default=None,
         )
+        self._reserved_operation: ContextVar[str | None] = ContextVar(
+            "reserved_collection_operation", default=None,
+        )
         self._cache_ttl_seconds = cache_ttl_seconds
         self._failure_cache_ttl_seconds = failure_cache_ttl_seconds
         self._cache_max_entries = cache_max_entries
@@ -140,11 +135,17 @@ class EngagementService:
                 )
             ):
                 raise ValueError("operation min interval must not be negative")
+        family_limits: dict[str, int] = {}
+        for platform, policy in policies.items():
+            family = traffic_platform(platform)
+            family_limits[family] = min(family_limits.get(family, policy.max_concurrency), policy.max_concurrency)
+        family_semaphores = {family: asyncio.Semaphore(limit) for family, limit in family_limits.items()}
         self._platform_semaphores = {
-            platform: asyncio.Semaphore(policy.max_concurrency)
-            for platform, policy in policies.items()
+            platform: family_semaphores[traffic_platform(platform)] for platform in policies
         }
+        self.platform_concurrency = family_limits
         self._platform_rate_limiters = {}
+        family_intervals = {}
         for platform, policy in policies.items():
             intervals = {
                 "interactions": (
@@ -159,10 +160,15 @@ class EngagementService:
                 ),
             }
             for operation, interval in intervals.items():
-                if interval > 0:
-                    self._platform_rate_limiters[(platform, operation)] = (
-                        AsyncRequestRateLimiter(1 / interval)
-                    )
+                key = (traffic_platform(platform), operation)
+                family_intervals[key] = max(family_intervals.get(key, 0), interval)
+        family_limiters = {key: AsyncRequestRateLimiter(1 / interval)
+                           for key, interval in family_intervals.items() if interval > 0}
+        for platform in policies:
+            for operation in ("interactions", "comments"):
+                limiter = family_limiters.get((traffic_platform(platform), operation))
+                if limiter is not None:
+                    self._platform_rate_limiters[(platform, operation)] = limiter
 
     @classmethod
     def from_settings(
@@ -241,6 +247,22 @@ class EngagementService:
                     else settings.creator_engagement_cookie.get_secret_value()
                 ),
             )
+        xiaohongshu_url_resolver = None
+        if xiaohongshu_session_store is not None or xiaohongshu_cookie:
+            source_client = None
+            source_collection = None
+            if settings.xiaohongshu_source_mongo_database or settings.xiaohongshu_source_mongo_collection:
+                if not (settings.xiaohongshu_source_mongo_database and settings.xiaohongshu_source_mongo_collection):
+                    raise ValueError("小红书实时来源必须同时配置 Mongo database 和 collection")
+                from pymongo import MongoClient
+
+                source_client = MongoClient(settings.mongo_uri, serverSelectionTimeoutMS=3000, timeoutMS=5000)
+                source_collection = source_client[settings.xiaohongshu_source_mongo_database][settings.xiaohongshu_source_mongo_collection]
+            xiaohongshu_url_resolver = XiaohongshuUrlResolver(
+                PROJECT_ROOT / settings.xiaohongshu_source_path,
+                PROJECT_ROOT / ".local/xiaohongshu-url-cache.json",
+                source_collection=source_collection, source_client=source_client,
+            )
         crawler = EngagementCrawler(
             timeout_seconds=settings.request_timeout_seconds,
             connect_timeout_seconds=settings.request_connect_timeout_seconds,
@@ -268,13 +290,7 @@ class EngagementService:
             browser_fallback=browser_fallback,
             session_store=session_store,
             xiaohongshu_session_store=xiaohongshu_session_store,
-            xiaohongshu_url_resolver=(
-                XiaohongshuUrlResolver(
-                    PROJECT_ROOT / settings.xiaohongshu_source_path,
-                    PROJECT_ROOT / ".local/xiaohongshu-url-cache.json",
-                )
-                if xiaohongshu_session_store is not None else None
-            ),
+            xiaohongshu_url_resolver=xiaohongshu_url_resolver,
             max_protocol_attempts=(
                 settings.protocol_max_attempts
                 if settings.reliability_mode == "enterprise"
@@ -356,6 +372,9 @@ class EngagementService:
             platform_policies=(
                 {
                     **ENTERPRISE_PLATFORM_POLICIES,
+                    **{platform: replace(ENTERPRISE_PLATFORM_POLICIES[platform],
+                                         max_concurrency=settings.public_platform_max_concurrency)
+                       for platform in PUBLIC_PLATFORMS},
                     "douyin": replace(
                         ENTERPRISE_PLATFORM_POLICIES["douyin"],
                         max_concurrency=settings.douyin_max_concurrency,
@@ -417,19 +436,30 @@ class EngagementService:
         await self.crawler._wait_for_circuit_cooldown(platform)
 
     @asynccontextmanager
-    async def collection_slot(self, media_name: str) -> AsyncIterator[None]:
+    async def collection_slot(self, media_name: str, operation: str | None = None) -> AsyncIterator[None]:
         """Reserve capacity before a batch item's execution deadline starts."""
-        platform = normalize_media_name(media_name)
+        try:
+            platform = normalize_media_name(media_name)
+        except ValueError:
+            # Let the collector produce the same invalid-media response as
+            # synchronous collection; no network capacity is needed for it.
+            yield
+            return
         await self.wait_for_platform_ready(media_name)
         async with AsyncExitStack() as stack:
             semaphore = self._platform_semaphores.get(platform)
             if semaphore is not None:
                 await stack.enter_async_context(semaphore)
+            limiter = self._platform_rate_limiters.get((platform, operation))
+            if limiter is not None:
+                await limiter.acquire()
             await stack.enter_async_context(self._collection_semaphore)
             token = self._reserved_platform.set(platform)
+            operation_token = self._reserved_operation.set(operation)
             try:
                 yield
             finally:
+                self._reserved_operation.reset(operation_token)
                 self._reserved_platform.reset(token)
 
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
@@ -440,7 +470,7 @@ class EngagementService:
                 return await self.crawler.fetch_interactions(url, media_name)
 
         result = await self._fetch_cached(
-            ("interactions", platform, url, 0),
+            ("interactions", platform, url, 0, None),
             collect,
         )
         assert isinstance(result, InteractionResult)
@@ -465,7 +495,7 @@ class EngagementService:
                 return await self.crawler.fetch_comments(url, media_name, page, cursor=cursor)
 
         result = await self._fetch_cached(
-            ("comments", platform, url, page),
+            ("comments", platform, url, page, cursor),
             collect,
         )
         assert isinstance(result, CommentPageResult)
@@ -575,7 +605,7 @@ class EngagementService:
     ) -> CachedResult:
         if self._reserved_platform.get() == platform:
             limiter = self._platform_rate_limiters.get((platform, operation))
-            if limiter is not None:
+            if limiter is not None and self._reserved_operation.get() != operation:
                 await limiter.acquire()
             return await collect()
         platform_semaphore = self._platform_semaphores.get(platform)

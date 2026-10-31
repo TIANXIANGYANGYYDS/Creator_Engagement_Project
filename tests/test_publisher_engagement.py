@@ -23,8 +23,11 @@ URLS = [
     ('sina_finance', 'https://t.cj.sina.com.cn/articles/view/2131593523/7f0d893302001pch2', '2131593523-7f0d893302001pch2'),
     ('baijiahao', 'https://mbd.baidu.com/newspage/data/landingsuper?nid=news_9744266576771526728', 'news_9744266576771526728'),
     ('yoojia', 'https://www.yoojia.com/video/9843529770280862640.html', '9843529770280862640'),
+    ('yoojia', 'https://yoojia.baidu.com/app/tuwen/index?nid=9814848033388955511', '9814848033388955511'),
+    ('yoojia', 'https://yoojia.baidu.com/app/video-detail/index?nid=3281174837786734277', '3281174837786734277'),
     ('sohu', 'https://3g.k.sohu.com/t/n1066170357?serialId=a', '1066170357'),
     ('dongchedi', 'https://dcd.zjbyte.cn/i7695033858807546430', '7695033858807546430'),
+    ('dongchedi', 'https://m.dcdapp.com/motor/m/feed/detail?group_id=7702367378660082200', '7702367378660082200'),
     ('weitoutiao', 'https://www.toutiao.com/i1878634969430020/', '1878634969430020'),
     ('netease', 'https://c.m.163.com/news/v/VN80AO19S.html', 'video:VN80AO19S'),
     ('xueqiu', 'https://xueqiu.com/2107441426/411727508', '411727508'),
@@ -49,6 +52,39 @@ def test_legacy_micro_url_does_not_reclassify_normal_toutiao():
         validate_media_url('https://www.toutiao.com/article/1234567890/', '今日头条微头条')
 
 
+@pytest.mark.parametrize('media', ['今日头条', '今日头条微头条'])
+def test_micro_share_links_use_redirect_resolution(media):
+    assert validate_media_url('https://weitoutiao.zjurl.cn/ugc/share/wap/comment/7702060721122607900/', media) == ('toutiao', '7702060721122607900')
+    assert validate_media_url('https://www.toutiao.com/w/7702060721122607900/', media) == ('weitoutiao', '7702060721122607900')
+    with pytest.raises(ValueError):
+        validate_media_url('https://weitoutiao.zjurl.cn.evil.test/ugc/share/wap/comment/123/', media)
+
+
+@pytest.mark.parametrize('path', ['LAAEM08Q0527BUUE/128974662.html', 'LAAEM08Q0527BUUE.html'])
+def test_netease_comment_share_resolves_article_not_comment_id(path):
+    assert validate_media_url('https://comment.tie.163.com/' + path, '网易号') == ('netease', 'LAAEM08Q0527BUUE')
+
+
+@pytest.mark.parametrize('target,accepted', [
+    ('https://www.toutiao.com/article/7701228101228921373/', True),
+    ('https://www.toutiao.com.evil.test/article/7701228101228921373/', False),
+    ('https://www.toutiao.com/', False),
+])
+def test_toutiao_share_resolves_official_redirect_before_reading_counters(target, accepted):
+    share = 'https://weitoutiao.zjurl.cn/ugc/share/wap/comment/7702060721122607900/'
+    response = Response(text='<script id="RENDER_DATA" type="application/json">%7B%22data%22%3A%20%7B%22groupId%22%3A%20%227701228101228921373%22%2C%20%22itemCell%22%3A%20%7B%22itemCounter%22%3A%20%7B%22commentCount%22%3A%2026%2C%20%22diggCount%22%3A%2029%7D%7D%7D%7D</script>')
+    response.url = target
+    client = Client(response)
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(share, '今日头条'))
+    assert (result.coverage == 'partial') is accepted
+    if accepted:
+        assert result.work_id == '7701228101228921373'
+        assert result.stats.comments == 26 and result.stats.likes == 29
+    else:
+        assert result.stats.comments is None
+    assert len(client.calls) == 1 and client.calls[0][0] == share
+
+
 def test_sina_nested_target_host_and_article_identity():
     url = 'https://cj.sina.cn/article/norm_detail?url=' + quote('https://finance.sina.com.cn/roll/2026-10-10/doc-iniuufia0591948.shtml', safe='')
     assert validate_media_url(url, '新浪财经头条号')[1] == 'comos-niuufia0591948'
@@ -60,8 +96,35 @@ def test_sina_nested_target_host_and_article_identity():
 
 def test_non_content_urls_are_not_assigned_fake_work_ids():
     for url, media in [('https://3g.k.sohu.com/h5apps/t/feed?uid=123', '搜狐号'),
-                       ('https://car.autohome.com.cn/price/series-123-0-3.html', '汽车之家')]:
+                       ('https://car.autohome.com.cn/price/series-123-0-3.html', '汽车之家'),
+                       ('https://yoojia.baidu.com/app/tuwen/index?nid=bad', '有驾'),
+                       ('https://yoojia.baidu.com/user?nid=123', '有驾'),
+                       ('https://m.dcdapp.com/user?group_id=123', '懂车帝'),
+                       ('https://m.dcdapp.com/motor/m/feed/detail?group_id=bad', '懂车帝')]:
         assert validate_media_url(url, media)[1] == ''
+
+
+@pytest.mark.parametrize('host,path,media', [
+    ('yoojia.baidu.com', '/app/tuwen/index?nid=123', '有驾'),
+    ('m.dcdapp.com', '/motor/m/feed/detail?group_id=123', '懂车帝'),
+])
+def test_mobile_share_hosts_are_exact(host, path, media):
+    with pytest.raises(ValueError):
+        validate_media_url('https://' + host + '.evil.test' + path, media)
+
+
+@pytest.mark.parametrize('path,kind', [('tuwen', 'article'), ('video-detail', 'video')])
+def test_yoojia_app_link_fetches_verified_article_and_comment_thread(path, kind):
+    state = {'route': {'params': {'nid': '123'}}, 'articleDetail': {
+        'article': {'title': 'target', 'comment_thread_id': 'target-thread'}}}
+    client = Client(Response(text='window.__INITIAL_STATE__=' + json.dumps(state)),
+                    Response({'errno': 0, 'ret': {'thread_id': 'target-thread',
+                             'comment_count': 0, 'list': [], 'is_over': True}}))
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        f'https://yoojia.baidu.com/app/{path}/index?nid=123', '有驾'))
+    assert result.coverage == 'partial' and result.stats.comments == 0
+    assert client.calls[0][0] == f'https://www.yoojia.com/{kind}/123.html'
+    assert client.calls[1][1]['params']['thread_id'] == 'target-thread'
 
 
 def test_baidu_counts_are_target_owned_and_missing_is_not_zero():

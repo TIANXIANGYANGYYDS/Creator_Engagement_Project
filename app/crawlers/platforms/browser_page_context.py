@@ -6,13 +6,15 @@ from app.crawlers.platforms.web_sources_common import json_or_jsonp
 
 
 class BrowserPageContext:
-    def __init__(self, page, target_url):
+    def __init__(self, page, target_url, target_html=None):
         self.page = page
         self.target_url = target_url
+        self.target_html = target_html
 
     async def _get_response(self, url, *, params=None, headers=None, **kwargs):
         if url.split("?", 1)[0].rstrip("/") == self.target_url.split("?", 1)[0].rstrip("/") and not params:
-            return SimpleNamespace(text=await self.page.content(), status_code=200)
+            text = self.target_html if self.target_html is not None else await self.page.content()
+            return SimpleNamespace(text=text, status_code=200, url=self.page.url)
         request_url = url + (("&" if "?" in url else "?") + urlencode(params) if params else "")
         if urlsplit(url).netloc == urlsplit(self.page.url).netloc:
             data = await self.page.evaluate("""async (url) => {

@@ -109,25 +109,54 @@ async def recover_named_author(crawler, name: str, note_id: str, max_pages: int)
 
 
 class XiaohongshuUrlResolver:
-    def __init__(self, source_path: Path, cache_path: Path, *, max_pages: int = 20) -> None:
+    def __init__(self, source_path: Path, cache_path: Path, *, max_pages: int = 20,
+                 source_collection=None, source_client=None) -> None:
+        self.source_path = source_path
+        self._source_version: tuple[int, int] | None = None
         self.cache_path = cache_path
         self.max_pages = max_pages
+        self.source_collection = source_collection
+        self.source_client = source_client
         self._lock = asyncio.Lock()
         self._not_found: dict[tuple[str, str], tuple[float, str]] = {}
         self.authors: dict[str, str] = {}
         self.names: dict[str, str] = {}
-        conflicts: set[str] = set()
+        self.conflicts: set[str] = set()
+        rows, self._source_version = self._read_updated_source()
+        self._load_rows(rows)
         try:
-            rows = json.loads(source_path.read_text(encoding="utf-8"))
+            self.cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            if not isinstance(self.cache, dict):
+                self.cache = {}
         except (OSError, ValueError):
-            rows = []
+            self.cache = {}
+
+    def _read_updated_source(self) -> tuple[list[dict], tuple[int, int] | None]:
+        try:
+            stat = self.source_path.stat()
+            version = (stat.st_mtime_ns, stat.st_size)
+            if version == self._source_version:
+                return [], version
+            rows = json.loads(self.source_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # A writer can restore the same size/mtime after a partial write.
+            # Invalidate the stamp so the next request must retry the read.
+            return [], None
+        if not isinstance(rows, list):
+            return [], None
+        return rows, version
+
+    def _load_rows(self, rows) -> None:
+        conflicts = self.conflicts
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict):
                 continue
             if isinstance(row.get("rawData"), dict):
                 row = row["rawData"]
+            elif isinstance(row.get("raw"), dict):
+                row = row["raw"]
             parsed = urlsplit(str(row.get("url") or ""))
-            note_id = parsed.path.rsplit("/", 1)[-1]
+            note_id = parsed.path.rstrip("/").rsplit("/", 1)[-1]
             account = str(row.get("author_id") or "").strip()
             if parsed.hostname not in {"www.xiaohongshu.com", "xiaohongshu.com"} or not NOTE_ID.fullmatch(note_id):
                 continue
@@ -135,7 +164,8 @@ class XiaohongshuUrlResolver:
             # numeric red ID. Prefer the profile UID to avoid account search.
             info = row.get("author_full_info") or {}
             profiles = set()
-            for value in [row.get("board_url"), info.get("profile_url") if isinstance(info, dict) else None]:
+            for value in [row.get("board_url"), row.get("author_profile_url"),
+                          info.get("profile_url") if isinstance(info, dict) else None]:
                 profile = urlsplit(str(value or ""))
                 match = re.fullmatch(r"/user/profile/([0-9a-f]{24})/?", profile.path)
                 if profile.hostname in {"www.xiaohongshu.com", "xiaohongshu.com"} and match:
@@ -160,24 +190,51 @@ class XiaohongshuUrlResolver:
                     conflicts.add(note_id)
                 elif note_id not in conflicts:
                     self.authors[note_id] = account
+
+    def _lookup_current_source(self, url: str, note_id: str) -> list[dict]:
+        urls = {url}
+        for host in ("www.xiaohongshu.com", "xiaohongshu.com"):
+            for path in ("explore", "discovery/item"):
+                for suffix in ("", "/"):
+                    urls.add(f"https://{host}/{path}/{note_id}{suffix}")
         try:
-            self.cache = json.loads(cache_path.read_text(encoding="utf-8"))
-            if not isinstance(self.cache, dict):
-                self.cache = {}
-        except (OSError, ValueError):
-            self.cache = {}
+            rows = list(self.source_collection.find(
+                {"$or": [{"url": {"$in": list(urls)}}, {"raw.url": {"$in": list(urls)}},
+                         {"rawData.url": {"$in": list(urls)}}]},
+                {"_id": 0, **{prefix + key: 1 for prefix in ("", "raw.", "rawData.")
+                    for key in ("url", "author_id", "author_name", "board_url",
+                                "author_profile_url", "author_full_info.profile_url")}},
+            ).max_time_ms(3000).limit(101))
+        except Exception as exc:
+            raise XiaohongshuUrlResolutionError("小红书当前来源查询暂不可用，请稍后重试") from exc
+        if len(rows) > 100:
+            raise XiaohongshuUrlResolutionError("小红书目标来源记录过多，无法唯一核验")
+        return rows
+
+    async def aclose(self) -> None:
+        if self.source_client is not None:
+            await asyncio.to_thread(self.source_client.close)
 
     async def resolve(self, crawler, url: str, note_id: str) -> str:
         if parse_qs(urlsplit(url).query).get("xsec_token"):
             return url
-        account = self.authors.get(note_id)
-        name = self.names.get(note_id)
-        if not account and not name:
-            raise XiaohongshuUrlResolutionError(
-                "原始链接缺少 xsec_token，且来源数据没有可核对的作者信息"
-            )
-        identity = account or f"name:{name}"
         async with self._lock:
+            if note_id not in self.authors and note_id not in self.names and note_id not in self.conflicts:
+                # New batches can publish their internal lookup metadata after
+                # this worker starts. Keep the public request URL-only.
+                rows, version = await asyncio.to_thread(self._read_updated_source)
+                self._load_rows(rows)
+                self._source_version = version
+            if (note_id not in self.authors and note_id not in self.names
+                    and note_id not in self.conflicts and self.source_collection is not None):
+                self._load_rows(await asyncio.to_thread(self._lookup_current_source, url, note_id))
+            account = self.authors.get(note_id)
+            name = self.names.get(note_id)
+            if not account and not name:
+                raise XiaohongshuUrlResolutionError(
+                    "小红书服务端尚未取得该笔记的有效访问上下文；调用方无需补充作者或 token"
+                )
+            identity = account or f"name:{name}"
             # A comments request should not repeat the interactions request's
             # unsuccessful author scan moments later. Do not cache auth errors.
             now = time.monotonic()

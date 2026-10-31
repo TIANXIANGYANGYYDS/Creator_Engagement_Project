@@ -59,7 +59,7 @@ async def create_job(
             request,
             collector=job_collector(service),
             proxy_usage_scope=service.proxy_usage_scope,
-            collection_scope=lambda item: service.collection_slot(item.media_name),
+            collection_scope=lambda item: service.collection_slot(item.media_name, item.type),
             idempotency_key=idempotency_key,
         )
         logger.info(
@@ -126,7 +126,7 @@ async def resume_job(
         result = await manager.resume(
             job_id, collector=job_collector(service),
             proxy_usage_scope=service.proxy_usage_scope,
-            collection_scope=lambda item: service.collection_slot(item.media_name),
+            collection_scope=lambda item: service.collection_slot(item.media_name, item.type),
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

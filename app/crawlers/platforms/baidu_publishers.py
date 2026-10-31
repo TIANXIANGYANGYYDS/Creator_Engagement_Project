@@ -63,8 +63,9 @@ async def fetch(crawler, url, work_id, limit, *, page, comment_cursor,
                 include_stats, include_comments, platform="baijiahao"):
     try:
         target_url = url.replace("http://", "https://", 1)
-        if platform == "yoojia" and urlparse(url).hostname == "youjia.baidu.com":
-            target_url = f"https://www.yoojia.com/article/{work_id}.html"
+        if platform == "yoojia" and urlparse(url).hostname in {"youjia.baidu.com", "yoojia.baidu.com"}:
+            kind = "video" if urlparse(url).path == "/app/video-detail/index" else "article"
+            target_url = f"https://www.yoojia.com/{kind}/{work_id}.html"
         response = await crawler._get_response(target_url,
             **({"allow_statuses": {404, 500}} if platform == "yoojia" else {}))
         if platform == "yoojia" and response.status_code == 500:

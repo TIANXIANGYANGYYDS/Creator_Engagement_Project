@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from app.crawlers.http_client import PlatformBlockedError
 from app.crawlers.platforms import autohome, eastmoney, netease, sina, sohu, public_news
-from app.crawlers.platforms import car_news, yiche
+from app.crawlers.platforms import car_news, more_car_news, yiche, qq_news, zol, ithome, smzdm, xcar, kr36, csdn, kuai
 from app.crawlers.platforms.common import result_error
 from app.models.engagement import EngagementResult
 
@@ -26,8 +26,14 @@ async def fetch(crawler, url, work_id, limit, *, page, comment_cursor,
         elif platform == "yiche_hao":
             stats, comments, cursor, source = await yiche.collect(
                 crawler, url, work_id, limit, page, comment_cursor, include_comments)
+        elif platform in {"qq_news", "zol", "ithome", "smzdm", "xcar", "kr36", "csdn", "kuai"}:
+            module = {"qq_news": qq_news, "zol": zol, "ithome": ithome, "smzdm": smzdm,
+                      "xcar": xcar, "kr36": kr36, "csdn": csdn, "kuai": kuai}[platform]
+            stats, comments, cursor, source = await module.collect(
+                crawler, url, work_id, limit, page, comment_cursor, include_comments)
         else:
-            collector = car_news.COLLECTORS.get(platform) or public_news.COLLECTORS[platform]
+            collector = (car_news.COLLECTORS.get(platform) or more_car_news.COLLECTORS.get(platform)
+                         or public_news.COLLECTORS[platform])
             stats, comments, cursor, source = await collector(
                 crawler, url, work_id, limit, page, comment_cursor, include_comments)
         return EngagementResult(platform=platform, canonical_url=url, work_id=work_id,

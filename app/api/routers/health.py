@@ -38,6 +38,9 @@ async def health() -> dict[str, object]:
         "proxy_mode": settings.proxy_mode,
         "xiaohongshu_proxy_mode": "direct",
         "xiaohongshu_request_interval_seconds": settings.xiaohongshu_request_interval_seconds,
+        "xiaohongshu_current_source_enabled": bool(
+            settings.xiaohongshu_source_mongo_database and settings.xiaohongshu_source_mongo_collection
+        ),
         "proxy_configured": bool(settings.proxy_51_api_url.strip()),
         "reliability_mode": settings.reliability_mode,
         "protocol_max_attempts": (
@@ -48,9 +51,11 @@ async def health() -> dict[str, object]:
         "proxy_pool_size": settings.proxy_pool_size,
         "proxy_max_concurrency": settings.proxy_max_concurrency,
         "collection_max_concurrency": settings.collection_max_concurrency,
+        "public_platform_max_concurrency": settings.public_platform_max_concurrency,
         "douyin_max_concurrency": settings.douyin_max_concurrency,
         "job_item_max_concurrency": settings.job_item_max_concurrency,
         "job_item_timeout_seconds": settings.job_item_timeout_seconds,
+        "job_xiaohongshu_item_timeout_seconds": settings.job_xiaohongshu_item_timeout_seconds,
         "job_timeout_seconds": settings.job_timeout_seconds,
         "job_timeout_batch_size": settings.job_timeout_batch_size,
         "request_connect_timeout_seconds": settings.request_connect_timeout_seconds,

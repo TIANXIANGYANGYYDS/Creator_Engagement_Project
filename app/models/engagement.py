@@ -57,6 +57,17 @@ EngagementPlatform = Literal[
     "ximalaya",
     "ifeng",
     "news18",
+    "qq_news",
+    "zol",
+    "ithome",
+    "smzdm",
+    "xcar",
+    "chooseauto",
+    "qcwp",
+    "buycar",
+    "kr36",
+    "csdn",
+    "kuai",
 ]
 EngagementCoverage = Literal[
     "complete",

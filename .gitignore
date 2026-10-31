@@ -4,3 +4,9 @@ __pycache__/
 *.egg-info/
 .env
 .local/
+
+# Local coding-agent instructions and skills are not application sources.
+/.agents/
+/.codex/
+/AGENTS.md
+/docs/CRAWLING_SKILLS.md

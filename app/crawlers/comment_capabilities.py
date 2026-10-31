@@ -76,6 +76,15 @@ COMMENT_CAPABILITIES["qctt"] = CommentCapabilities(
     note="汽车头条仅返回页面公开的首批一级评论；不提供后续分页。",
 )
 
+COMMENT_CAPABILITIES["kr36"] = CommentCapabilities(
+    root_comments="unavailable", anonymous=True,
+    note="仅已验证公开互动计数；签名评论接口尚未通过实网业务验收。",
+)
+COMMENT_CAPABILITIES["csdn"] = CommentCapabilities(
+    root_comments="unavailable", anonymous=True,
+    note="已验证目标文章公开互动计数；评论接口访问挑战尚未通过实网验收。",
+)
+
 
 def comment_capabilities(
     platform: EngagementPlatform,
@@ -86,6 +95,6 @@ def comment_capabilities(
         return CommentCapabilities(
             root_comments="all_public_pages",
             anonymous=False,
-            note="使用已保存的 Cookie 会话与动态签名，按 cursor 读取主评论和楼中楼正文；回复受限时保留已取得内容并标记未完成。",
+            note="使用现有账号 Cookie 会话，独立限速并按 cursor 读取一级评论；回复仅保留数量。访问或分页受限时保留已取得内容并标记未完成。",
         )
     return COMMENT_CAPABILITIES[platform].model_copy(deep=True)

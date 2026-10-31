@@ -12,7 +12,10 @@ async def fetch(crawler, url, work_id, limit, *, page, comment_cursor, include_s
         data = await crawler._get_json("https://www.xueqiu.com/statuses/show.json", params={"id":work_id}, headers={"Referer":url})
         if str(data.get("id")) != work_id:
             raise PlatformBlockedError("雪球未返回目标帖子，游客会话可能受限或需要验证")
-        stats = EngagementStats(views=to_int(data.get("view_count")), likes=to_int(data.get("like_count")), comments=to_int(data.get("reply_count")),
+        # The public status API returns a zero placeholder even for read posts;
+        # the website does not expose a corresponding public reading counter.
+        views = to_int(data.get("view_count"))
+        stats = EngagementStats(views=views if views is not None and views > 0 else None, likes=to_int(data.get("like_count")), comments=to_int(data.get("reply_count")),
             reposts=to_int(data.get("retweet_count")), favorites=to_int(data.get("fav_count")))
         comments, following = [], None
         if include_comments:
@@ -31,7 +34,7 @@ async def fetch(crawler, url, work_id, limit, *, page, comment_cursor, include_s
             following = str(page + 1) if more else None
         return EngagementResult(platform="xueqiu", canonical_url=url, work_id=work_id,
             coverage="partial", stats=stats, comments=comments, next_cursor=following,
-            source="xueqiu statuses/show.json + statuses/comments.json", reason="雪球会话可见数据；游客可能被验证或登录限制")
+            source="xueqiu statuses/show.json + statuses/comments.json", reason="雪球会话可见数据；阅读量的零值无法确认，保留 null；游客可能被验证或登录限制")
     except PlatformBlockedError as exc:
         return result_error("xueqiu", url, work_id, "blocked", exc)
     except Exception as exc:

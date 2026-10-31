@@ -93,7 +93,8 @@ def test_unknown_author_reports_unavailable_without_guessing(tmp_path: Path) -> 
     crawler = EngagementCrawler(client=object(), xiaohongshu_url_resolver=resolver)
     result = asyncio.run(crawler.fetch_interactions(RAW, "xiaohongshu"))
     assert result.coverage == "unsupported"
-    assert "作者信息" in result.reason
+    assert "尚未取得该笔记的有效访问上下文" in result.reason
+    assert "调用方无需补充" in result.reason
 
 
 def test_named_author_requires_note_membership(tmp_path: Path, monkeypatch) -> None:
@@ -159,4 +160,160 @@ def test_negative_author_scan_is_shared_briefly_then_expires(tmp_path, monkeypat
         with pytest.raises(XiaohongshuUrlResolutionError):
             await resolver.resolve(object(), RAW, NOTE)
         assert len(calls) == 2
+    asyncio.run(run())
+
+
+class SourceCollection:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def find(self, query, projection):
+        self.calls.append((query, projection))
+        return self
+
+    def max_time_ms(self, value):
+        assert value == 3000
+        return self
+
+    def limit(self, value):
+        return self.rows[:value]
+
+
+def test_new_raw_url_uses_current_source_without_caller_author_or_token(tmp_path, monkeypatch):
+    uid = '607f092b000000000100b5bc'
+    collection = SourceCollection([{'raw': {'url': RAW,
+        'author_profile_url': f'https://www.xiaohongshu.com/user/profile/{uid}'}}])
+    resolver = XiaohongshuUrlResolver(tmp_path / 'absent.json', tmp_path / 'cache.json',
+                                     source_collection=collection)
+    calls = []
+    async def recover(crawler, account, targets, pages):
+        calls.append(account)
+        return {NOTE: RAW + '?xsec_token=verified'}
+    monkeypatch.setattr('app.crawlers.xiaohongshu_url_resolver.recover_author', recover)
+    async def run():
+        for _ in range(2):
+            assert await resolver.resolve(object(), RAW, NOTE) == RAW + '?xsec_token=verified'
+    asyncio.run(run())
+    assert calls == [uid] and len(collection.calls) == 1
+    query, projection = collection.calls[0]
+    assert RAW in query['$or'][0]['url']['$in']
+    assert not any('count' in key or 'content' in key for key in projection)
+
+
+def test_current_source_conflicts_cannot_fall_back_to_name(tmp_path, monkeypatch):
+    from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolutionError
+    collection = SourceCollection([{'raw': {'url': RAW, 'author_name': '同名',
+        'author_profile_url': f'https://www.xiaohongshu.com/user/profile/{uid}'}}
+        for uid in ['1' * 24, '2' * 24]])
+    resolver = XiaohongshuUrlResolver(tmp_path / 'absent.json', tmp_path / 'cache.json',
+                                     source_collection=collection)
+    with pytest.raises(XiaohongshuUrlResolutionError):
+        asyncio.run(resolver.resolve(object(), RAW, NOTE))
+    assert NOTE in resolver.conflicts
+    assert NOTE not in resolver.authors and NOTE not in resolver.names
+
+
+def test_current_source_failure_is_sanitized_and_not_negative_cached(tmp_path):
+    from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolutionError
+    class BrokenCollection(SourceCollection):
+        def find(self, *args):
+            self.calls.append(1)
+            raise RuntimeError('secret database address')
+    collection = BrokenCollection([])
+    resolver = XiaohongshuUrlResolver(tmp_path / 'absent.json', tmp_path / 'cache.json',
+                                     source_collection=collection)
+    async def run():
+        for _ in range(2):
+            with pytest.raises(XiaohongshuUrlResolutionError, match='来源查询暂不可用') as error:
+                await resolver.resolve(object(), RAW, NOTE)
+            assert 'secret' not in str(error.value)
+    asyncio.run(run())
+    assert len(collection.calls) == 2
+
+
+def test_new_batch_source_is_loaded_without_restarting_worker(tmp_path, monkeypatch):
+    from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolutionError
+    source = tmp_path / 'source.json'
+    source.write_text('[]')
+    resolver = XiaohongshuUrlResolver(source, tmp_path / 'cache.json')
+    calls = []
+
+    async def recover(crawler, name, note_id, pages):
+        calls.append((name, note_id))
+        return {NOTE: RAW + '?xsec_token=verified'}
+
+    monkeypatch.setattr('app.crawlers.xiaohongshu_url_resolver.recover_named_author', recover)
+
+    async def run():
+        with pytest.raises(XiaohongshuUrlResolutionError):
+            await resolver.resolve(object(), RAW, NOTE)
+        source.write_text(json.dumps([{'url': RAW, 'author_name': '新批次作者'}]))
+        assert await resolver.resolve(object(), RAW, NOTE) == RAW + '?xsec_token=verified'
+
+    asyncio.run(run())
+    assert calls == [('新批次作者', NOTE)]
+
+
+def test_partial_source_update_can_be_retried_and_retains_known_authors(tmp_path, monkeypatch):
+    import os
+    from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolutionError
+    source = tmp_path / 'source.json'
+    old_note = '1' * 24
+    source.write_text(json.dumps([{'url': RAW.replace(NOTE, old_note), 'author_id': 'old'}]))
+    resolver = XiaohongshuUrlResolver(source, tmp_path / 'cache.json')
+    original_stat = source.stat()
+
+    async def recover(crawler, account, targets, pages):
+        assert account == 'new' and targets == {NOTE}
+        return {NOTE: RAW + '?xsec_token=verified'}
+
+    monkeypatch.setattr('app.crawlers.xiaohongshu_url_resolver.recover_author', recover)
+
+    async def run():
+        source.write_text('[{')
+        with pytest.raises(XiaohongshuUrlResolutionError):
+            await resolver.resolve(object(), RAW, NOTE)
+        assert resolver.authors[old_note] == 'old'
+        source.write_text(json.dumps([{'url': RAW, 'author_id': 'new'}]))
+        os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        assert await resolver.resolve(object(), RAW, NOTE) == RAW + '?xsec_token=verified'
+
+    asyncio.run(run())
+
+
+def test_canceled_source_read_does_not_skip_update_on_next_request(tmp_path, monkeypatch):
+    import threading
+    source = tmp_path / 'source.json'
+    source.write_text('[]')
+    resolver = XiaohongshuUrlResolver(source, tmp_path / 'cache.json')
+    source.write_text(json.dumps([{'url': RAW, 'author_id': 'new'}]))
+    original_read = resolver._read_updated_source
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def delayed_read():
+        entered.set()
+        release.wait(timeout=2)
+        try:
+            return original_read()
+        finally:
+            finished.set()
+
+    async def recover(crawler, account, targets, pages):
+        return {NOTE: RAW + '?xsec_token=verified'}
+
+    monkeypatch.setattr(resolver, '_read_updated_source', delayed_read)
+    monkeypatch.setattr('app.crawlers.xiaohongshu_url_resolver.recover_author', recover)
+
+    async def run():
+        task = asyncio.create_task(resolver.resolve(object(), RAW, NOTE))
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 2)
+        monkeypatch.setattr(resolver, '_read_updated_source', original_read)
+        assert await resolver.resolve(object(), RAW, NOTE) == RAW + '?xsec_token=verified'
+
     asyncio.run(run())

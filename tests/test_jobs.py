@@ -23,7 +23,7 @@ from app.services.job_service import BatchJobManager
 
 class FakeJobService:
     @asynccontextmanager
-    async def collection_slot(self, media_name: str):
+    async def collection_slot(self, media_name: str, operation: str | None = None):
         yield
 
     @asynccontextmanager

@@ -7,11 +7,11 @@ from email.utils import parsedate_to_datetime
 import json
 import re
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from bs4 import BeautifulSoup
 
-from app.crawlers.http_client import PlatformBlockedError
+from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
 from app.crawlers.platforms.base import PlatformCrawlerContext
 from app.crawlers.platforms.common import result_error, to_int
 from app.models.engagement import (
@@ -76,10 +76,13 @@ async def fetch(
                 data = payload.get("data") or {}
                 sources.append("m.weibo.cn/statuses/show")
             stats = EngagementStats(
+                views=to_int(data.get("reads_count")),
                 likes=to_int(data.get("attitudes_count")),
                 comments=to_int(data.get("comments_count")),
                 reposts=to_int(data.get("reposts_count")),
             )
+            if not any(value is not None for value in stats.model_dump().values()):
+                raise PlatformCrawlerError("微博目标详情未返回有效互动数值")
         elif include_comments and public_target is not None:
             _, resolved_work_id, source = await fetch_public_stats(
                 crawler,
@@ -90,6 +93,9 @@ async def fetch(
             headers.update(crawler._weibo_visitor_headers())
             sources.append(source)
         if include_comments:
+            if public_target is not None and public_target[0] == "article":
+                await crawler._ensure_weibo_visitor_session(url, entry="miniblog")
+                headers.update(crawler._weibo_visitor_headers())
             # Weibo's cursor also depends on max_id_type. Keep replaying from
             # page 1 until both values are carried by the internal contract.
             request_cursor: str | None = None
@@ -170,7 +176,10 @@ async def fetch(
                     if cookie
                     else "微博访客评论接口可能折叠或限流，不能证明评论全集"
                 )
-                if include_comments else "微博访客详情接口提供当前公开互动量"
+                if include_comments else
+                "微博头条文章页提供公开阅读数；其他互动字段未公开"
+                if public_target is not None and public_target[0] == "article"
+                else "微博访客详情接口提供当前公开互动量"
             ),
             source=" + ".join(sources),
             stats=stats,
@@ -199,6 +208,10 @@ def public_protocol_target(url: str, work_id: str) -> tuple[str, str] | None:
 
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
+    article_id = parse_qs(parsed.query).get("id", [""])[0]
+    if (host in {"weibo.com", "www.weibo.com"} and parsed.path == "/ttarticle/p/show"
+            and re.fullmatch(r"230940\d+", article_id)):
+        return "article", article_id
     fid_match = VIDEO_FID_RE.search(f"?{parsed.query}")
     if host == "video.weibo.com" and fid_match:
         return "video", fid_match.group(1)
@@ -218,9 +231,67 @@ async def fetch_public_stats(
     target: tuple[str, str],
 ) -> tuple[dict[str, Any], str, str]:
     kind, public_id = target
+    if kind == "article":
+        return await fetch_article_stats(crawler, public_id)
     if kind == "video":
         return await fetch_video_stats(crawler, public_id)
     return await fetch_desktop_stats(crawler, original_url, public_id, work_id)
+
+
+async def fetch_article_stats(crawler: PlatformCrawlerContext, article_id: str):
+    """Bind the article's public read count and comment MID to its own page."""
+    url = f"https://weibo.com/ttarticle/p/show?id={article_id}"
+    response = await crawler._get_response(url)
+    soup = BeautifulSoup(response.text, "html.parser")
+    title = soup.select_one('[node-type="articleTitle"]')
+    if title is None:
+        error_text = soup.get_text(" ", strip=True)
+        if re.search(r"错误码\s*[:：]\s*(?:120003|110133)\b", error_text):
+            raise WeiboUnavailableError("微博头条文章当前无查看权限")
+        if re.search(r"错误码\s*[:：]\s*100008\b", error_text):
+            raise WeiboUnavailableError("微博头条文章已被删除")
+    bindings = set()
+    for node in soup.select('script[type="application/ld+json"]'):
+        try:
+            article = json.loads(node.get_text())
+        except ValueError:
+            continue
+        if not isinstance(article, dict) or article.get("@type") != "Article":
+            continue
+        target = urlparse(str(article.get("url") or ""))
+        if (target.hostname in {"weibo.com", "www.weibo.com"}
+                and target.path == "/ttarticle/p/show"
+                and article.get("headline")):
+            bindings.update(parse_qs(target.query).get("id", []))
+    # Some official templates omit JSON-LD, but bind their follow action to
+    # this article explicitly. Ignore recommendation links elsewhere on page.
+    for node in soup.select('.WB_artical a[action-type="follow"], .WB_artical a[action-type="maskFollow"]'):
+        flag = parse_qs(str(node.get("action-data") or "")).get("refer_flag", [""])[0]
+        match = re.fullmatch(r"230940000[23]_(230940\d+)", flag)
+        if match:
+            bindings.add(match[1])
+    if bindings != {article_id} or title is None or not title.get_text(strip=True):
+        raise PlatformCrawlerError("微博头条文章页面未返回目标文章")
+    # The article object ID is NOT a status MID. The official comment app
+    # receives the associated MID explicitly; never derive it by truncation.
+    mids = set()
+    for script in soup.find_all("script"):
+        match = re.search(
+            r'window\.createApp\(\s*[\"\']#commonts_container[\"\']\s*,\s*'
+            r'\{\s*config\s*:\s*\{[^{}]*\bmid\s*:\s*[\"\'](\d+)[\"\']',
+            script.get_text(),
+        )
+        if match:
+            mids.add(match[1])
+    if len(mids) != 1:
+        raise PlatformCrawlerError("微博头条文章未返回唯一评论 MID")
+    views = None
+    count = soup.select_one('.WB_artical .authorinfo .num')
+    if count is not None:
+        match = re.fullmatch(r"阅读数[：:]\s*(.+)", count.get_text(strip=True))
+        if match:
+            views = to_int(match[1])
+    return {"reads_count": views}, mids.pop(), "weibo.com/ttarticle/p/show"
 
 
 async def fetch_desktop_stats(

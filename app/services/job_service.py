@@ -58,7 +58,9 @@ class BatchJobManager:
         retention_seconds: int = 86_400,
         max_concurrency: int = 2,
         item_max_concurrency: int = 16,
+        platform_item_max_concurrency: dict[str, int] | None = None,
         item_timeout_seconds: float = 90,
+        platform_item_timeout_seconds: dict[str, float] | None = None,
         job_timeout_seconds: float = 1800,
         timeout_batch_size: int = 500,
         max_items: int = 0,
@@ -86,7 +88,13 @@ class BatchJobManager:
         self.retention_seconds = retention_seconds
         self.status_alerts = status_alerts or StatusAlerts()
         self.item_max_concurrency = item_max_concurrency
+        self.platform_item_max_concurrency = platform_item_max_concurrency or {}
+        if any(value <= 0 for value in self.platform_item_max_concurrency.values()):
+            raise ValueError("platform item concurrency must be greater than zero")
         self.item_timeout_seconds = item_timeout_seconds
+        self.platform_item_timeout_seconds = platform_item_timeout_seconds or {}
+        if any(value < 0 for value in self.platform_item_timeout_seconds.values()):
+            raise ValueError("platform item timeout must not be negative")
         self.job_timeout_seconds = job_timeout_seconds
         if timeout_batch_size <= 0:
             raise ValueError("timeout_batch_size must be greater than zero")
@@ -397,11 +405,24 @@ class BatchJobManager:
         try:
             async with proxy_usage_scope() as active_proxy_usage:
                 proxy_usage = active_proxy_usage
-                queue: asyncio.Queue[JobItemRequest] = asyncio.Queue()
-                for item in active.request.items:
-                    queue.put_nowait(item)
+                # Waiting for one account/platform must not occupy every worker
+                # in a mixed batch. Keep bounded queues per normalized platform;
+                # the shared semaphore bounds actual execution across all queues.
+                from app.crawlers.platforms.registry import normalize_media_name
+                from app.crawlers.platforms.source_catalog import traffic_platform
 
-                async def worker() -> None:
+                queues: dict[str, asyncio.Queue[JobItemRequest]] = {}
+                for item in active.request.items:
+                    platform = "all"
+                    if collection_scope is not None:
+                        try:
+                            platform = traffic_platform(normalize_media_name(item.media_name))
+                        except ValueError:
+                            platform = "unsupported"
+                    queues.setdefault(platform, asyncio.Queue()).put_nowait(item)
+                execution_slots = asyncio.Semaphore(self.item_max_concurrency)
+
+                async def worker(queue: asyncio.Queue[JobItemRequest]) -> None:
                     nonlocal douyin_argus_failures
                     while True:
                         if douyin_unavailable.is_set():
@@ -415,6 +436,7 @@ class BatchJobManager:
                             collector,
                             before_collect,
                             collection_scope,
+                            execution_slots,
                         )
                         result = self._bounded_result(result)
                         if result.media_name in {"douyin", "抖音"}:
@@ -443,10 +465,13 @@ class BatchJobManager:
                             raise
 
                 tasks = [
-                    asyncio.create_task(worker())
-                    for _ in range(
-                        min(self.item_max_concurrency, len(active.request.items))
-                    )
+                    asyncio.create_task(worker(queue))
+                    for platform, queue in queues.items()
+                    for _ in range(min(
+                        self.item_max_concurrency,
+                        self.platform_item_max_concurrency.get(platform, self.item_max_concurrency),
+                        queue.qsize(),
+                    ))
                 ]
                 try:
                     await asyncio.gather(*tasks)
@@ -486,15 +511,27 @@ class BatchJobManager:
         collector: CollectJobItem,
         before_collect: BeforeCollectItem | None,
         collection_scope: CollectionScope | None = None,
+        execution_slots: asyncio.Semaphore | None = None,
     ) -> JobItemResponse:
         started = monotonic()
+        timeout = self.item_timeout_seconds
+        if timeout and self.platform_item_timeout_seconds:
+            from app.crawlers.platforms.registry import normalize_media_name
+
+            try:
+                platform = normalize_media_name(item.media_name)
+            except ValueError:
+                pass  # The collector returns the normal invalid-media response.
+            else:
+                timeout = self.platform_item_timeout_seconds.get(platform, timeout)
         try:
             if before_collect is not None:
                 await before_collect(item)
             scope = collection_scope(item) if collection_scope is not None else nullcontext()
             async with scope:
-                async with asyncio.timeout(self.item_timeout_seconds or None):
-                    result = await collector(item)
+                async with execution_slots if execution_slots is not None else nullcontext():
+                    async with asyncio.timeout(timeout or None):
+                        result = await collector(item)
         except TimeoutError as exc:
             self.status_alerts.record(item.media_name, item.type, exc)
             result = JobItemResponse(
@@ -505,7 +542,7 @@ class BatchJobManager:
                 status="failed",
                 complete=False,
                 result={},
-                error=f"单条采集超过 {self.item_timeout_seconds:g} 秒",
+                error=f"单条采集超过 {timeout:g} 秒",
             )
         except Exception as exc:
             self.status_alerts.record(item.media_name, item.type, exc)

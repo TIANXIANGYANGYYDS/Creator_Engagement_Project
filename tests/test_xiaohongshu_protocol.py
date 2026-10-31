@@ -17,37 +17,32 @@ def comment(cid, **extra):
     return {'id': cid, 'content': '正文 ' + cid, 'note_id': NOTE, **extra}
 
 
-def test_replies_keep_inline_then_fetch_remaining_pages_and_deduplicate(monkeypatch):
-    root = comment('root', sub_comment_count='3', sub_comments=[comment('a')],
-                   sub_comment_has_more=True, sub_comment_cursor='c1')
-    get = AsyncMock(side_effect=[
-        {'comments': [comment('a'), comment('b')], 'has_more': True, 'cursor': 'c2'},
-        {'comments': [comment('c')], 'has_more': False, 'cursor': ''},
-    ])
+def test_only_root_comments_returned_without_reply_requests(monkeypatch):
+    root = comment('root', sub_comment_count='3', sub_comments=[comment('reply')],
+                   sub_comment_has_more=True, sub_comment_cursor='reply-next')
+    get = AsyncMock(return_value={'comments': [root], 'has_more': True, 'cursor': 'root-next'})
     monkeypatch.setattr(xhs, '_get', get)
-    comments, complete, reason = asyncio.run(xhs._expand_replies(None, [root], NOTE, 'token', 'cookie', URL))
-    assert complete and not reason
-    assert [x.comment_id for x in comments] == ['root', 'a', 'b', 'c']
-    assert [get.await_args_list[i].args[2]['cursor'] for i in range(2)] == ['c1', 'c2']
-    assert all(x.parent_comment_id == 'root' for x in comments[1:])
-
-
-@pytest.mark.parametrize('failure', [
-    PlatformBlockedError('HTTP 461'),
-    {'comments': [], 'has_more': True, 'cursor': 'c2'},
-    {'comments': [comment('b')], 'has_more': True, 'cursor': 'c1'},
-    {'comments': [comment('b', note_id='wrong')], 'has_more': False},
-    {'comments': [comment('b')], 'cursor': ''},
-])
-def test_reply_failures_preserve_received_content_and_report_incomplete(monkeypatch, failure):
-    roots = [comment('root', sub_comments=[comment('a')], sub_comment_count='2',
-                     sub_comment_cursor='c1', sub_comment_has_more=True)]
-    get = AsyncMock(side_effect=failure) if isinstance(failure, Exception) else AsyncMock(return_value=failure)
-    monkeypatch.setattr(xhs, '_get', get)
-    rows, complete, reason = asyncio.run(xhs._expand_replies(None, roots, NOTE, 't', 'c', URL))
-    assert not complete and '未完成' in reason
-    assert {x.comment_id for x in rows} >= {'root', 'a'}
+    crawler = EngagementCrawler(client=object(),
+                                platform_cookies={'xiaohongshu': 'a1=a; web_session=b'})
+    result = asyncio.run(crawler.fetch_comments(URL, '小红书', 1))
+    assert result.coverage == 'partial' and result.comments_complete
+    assert [c.comment_id for c in result.comments] == ['root']
+    assert result.comments[0].replies == 3
+    assert result.next_cursor == 'root-next'
     assert get.await_count == 1
+    assert get.await_args.args[1] == '/api/sns/web/v2/comment/page'
+
+
+@pytest.mark.parametrize('bad_comment', [comment('wrong', note_id='other'),
+                                         comment('missing', content=''), None])
+def test_invalid_root_comments_do_not_report_complete_page(monkeypatch, bad_comment):
+    get = AsyncMock(return_value={'comments': [bad_comment], 'has_more': False})
+    monkeypatch.setattr(xhs, '_get', get)
+    crawler = EngagementCrawler(client=object(),
+                                platform_cookies={'xiaohongshu': 'a1=a; web_session=b'})
+    result = asyncio.run(crawler.fetch_comments(URL, '小红书', 1))
+    assert result.coverage == 'failed'
+    assert result.comments == []
 
 
 @pytest.mark.parametrize('status,attempts', [(461, 1), (429, 1), (403, 1), (406, 2)])

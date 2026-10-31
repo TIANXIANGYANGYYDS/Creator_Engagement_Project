@@ -29,6 +29,7 @@ from app.crawlers.platforms.registry import (
     identify_url,
     validate_media_url,
 )
+from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES
 from app.models.engagement import (
     CommentPageResult,
     EngagementPlatform,
@@ -169,6 +170,8 @@ class EngagementCrawler:
             self._owns_wechat_channels_bridge_client = True
 
     async def aclose(self) -> None:
+        if self.xiaohongshu_url_resolver is not None:
+            await self.xiaohongshu_url_resolver.aclose()
         if self._owns_client:
             await self.client.aclose()  # type: ignore[attr-defined]
         if self._owns_wechat_session_bridge_client:
@@ -520,6 +523,10 @@ class EngagementCrawler:
         include_stats: bool,
         include_comments: bool,
     ) -> bool:
+        if result.platform in EXTENDED_SOURCES:
+            # The generic browser has no parser for these source names. Keep
+            # the protocol error instead of spending the item budget on it.
+            return False
         if result.platform in {"sina", "sina_finance", "baijiahao", "yoojia", "dongchedi", "netease", "autohome", "ixigua", "qq_stock"}:
             # These collectors already use the public page/API; the generic
             # browser parser has no additional path for their failed inputs.

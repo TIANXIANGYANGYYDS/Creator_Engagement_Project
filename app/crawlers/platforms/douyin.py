@@ -292,14 +292,4 @@ def public_view_count(statistics: dict[str, Any]) -> int | None:
     """Treat Douyin's hidden zero play count as unavailable, not a real zero."""
 
     views = to_int(statistics.get("play_count"))
-    if views != 0:
-        return views
-    visible_engagement = (
-        "digg_count",
-        "comment_count",
-        "share_count",
-        "collect_count",
-    )
-    if any((to_int(statistics.get(key)) or 0) > 0 for key in visible_engagement):
-        return None
-    return views
+    return views if views is not None and views > 0 else None

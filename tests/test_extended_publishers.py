@@ -52,6 +52,31 @@ def test_eastmoney_news_mapping_must_match_original_news():
     assert result.coverage == "failed" and result.stats.views is None
 
 
+@pytest.mark.parametrize("url_id,accepted", [("1789369938", True), ("20261029190855162877650", True), ("999", False)])
+def test_caifuhao_accepts_article_code_or_verified_post_id(url_id, accepted):
+    client = Client(Response(text='var accountInfo = {articleid:"20261029190855162877650", postId:"1789369938"};'),
+        Response(text='var post_article={"post":{"post_id":1789369938,"post_click_count":12,"post_comment_count":0}};'))
+    result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
+        f"https://caifuhao.eastmoney.com/news/{url_id}", "财富号"))
+    assert (result.coverage == "partial") is accepted
+    if accepted:
+        assert result.stats.views == 12 and result.stats.comments == 0
+        assert client.calls[1][0] == "https://guba.eastmoney.com/news,0,1789369938.html"
+    else:
+        assert len(client.calls) == 1
+
+
+def test_new_publisher_share_hosts_keep_exact_source_validation():
+    assert validate_media_url("https://pingce.ifeng.com/c/8xcfhMzAp48", "凤凰网") == ("ifeng", "8xcfhMzAp48")
+    assert validate_media_url("https://ishare.ifeng.com/c/s/8xcfhMzAp48", "凤凰网") == ("ifeng", "8xcfhMzAp48")
+    assert validate_media_url("http://choicemhw.eastmoney.com/choiceapp/wealth/wealth5.3.3/#/articleContent?artCode=20261029203942717937800", "财富号") == ("caifuhao", "20261029203942717937800")
+    assert validate_media_url("https://emcreative.eastmoney.com/app_fortune/article/index.html?artcode=20261029174131184966470", "财富号") == ("caifuhao", "20261029174131184966470")
+    for url, media in [("https://pingce.ifeng.com.evil.test/c/abc", "凤凰网"),
+                       ("https://choicemhw.eastmoney.com.evil.test/?artCode=123", "财富号")]:
+        with pytest.raises(ValueError):
+            validate_media_url(url, media)
+
+
 def test_extended_url_validation_and_family_identity():
     assert validate_media_url("https://www.sohu.com/a/1085903440_129720", "搜狐网") == ("sohu_news", "1085903440")
     assert validate_media_url("https://v.163.com/static/1/VK7UO1435.html", "网易视频")[1] == "video:VK7UO1435"

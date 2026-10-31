@@ -595,3 +595,25 @@ def test_platform_policy_serializes_and_spaces_request_starts() -> None:
 
     assert crawler.max_active == 1
     assert crawler.started[1] - crawler.started[0] >= 0.018
+
+
+def test_comment_cache_distinguishes_opaque_cursors():
+    from app.models.engagement import CommentPageResult, EngagementComment
+    async def scenario():
+        class CursorCrawler:
+            def __init__(self):self.calls=[]
+            async def fetch_comments(self,url,media,page,*,cursor=None):
+                self.calls.append(cursor)
+                return CommentPageResult(platform='douyin',canonical_url=url,work_id='123',
+                    coverage='partial',page=page,total_comments=3,
+                    comments=[EngagementComment(comment_id=cursor or 'first',text=cursor or 'first')])
+            async def aclose(self):pass
+        crawler=CursorCrawler()
+        service=EngagementService(crawler,cache_ttl_seconds=60)
+        try:
+            for cursor in ['a','b','a']:
+                result=await service.fetch_comments('https://www.douyin.com/video/123','抖音',2,cursor=cursor)
+                assert result.comments[0].comment_id==cursor
+            assert crawler.calls==['a','b']
+        finally:await service.aclose()
+    asyncio.run(scenario())

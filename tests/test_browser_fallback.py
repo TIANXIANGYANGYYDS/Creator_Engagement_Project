@@ -18,6 +18,29 @@ from app.crawlers.engagement import EngagementCrawler
 from app.models.engagement import EngagementComment, EngagementResult, EngagementStats
 
 
+def test_toutiao_share_browser_preserves_share_then_reads_resolved_article():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    share = 'https://weitoutiao.zjurl.cn/ugc/share/wap/comment/7702060721122607900/'
+    target = 'https://www.toutiao.com/article/7701228101228921373/'
+    page = SimpleNamespace(url=target, content=AsyncMock(return_value='<script id="RENDER_DATA" type="application/json">%7B%22data%22%3A%20%7B%22groupId%22%3A%20%227701228101228921373%22%2C%20%22itemCell%22%3A%20%7B%22itemCounter%22%3A%20%7B%22commentCount%22%3A%2026%7D%7D%7D%7D</script>'))
+    assert _browser_target_url(share, 'toutiao', '7702060721122607900') == share
+    result = asyncio.run(BrowserFallback()._parse_responses(
+        page, [], share, 'toutiao', '7702060721122607900',
+        page=1, limit=20, include_stats=True, include_comments=False))
+    assert result.work_id == '7701228101228921373'
+    assert result.canonical_url == target and result.stats.comments == 26
+
+
+def test_unsupported_extended_browser_parser_keeps_protocol_failure():
+    browser = FakeBrowserFallback()
+    result = asyncio.run(EngagementCrawler(client=FakeClient(), browser_fallback=browser).fetch_interactions(
+        'https://caifuhao.eastmoney.com/news/123', '财富号'))
+    assert result.coverage == 'failed' and '股吧映射' in result.reason
+    assert browser.calls == []
+
+
 class FakeClient:
     async def get(self, url, *, params=None, headers=None):
         class Response:
@@ -429,7 +452,7 @@ def test_browser_parser_does_not_treat_hidden_douyin_views_as_zero() -> None:
 def test_browser_toutiao_stats_ignore_unrelated_document_response() -> None:
     target_stats, comments, _, source = _parse_toutiao(
         "https://www.toutiao.com/article/7557632662635840036/",
-        'window.data={"itemCounter":{"readCount":3307,"commentCount":28}}',
+        '<script id="RENDER_DATA" type="application/json">%7B%22data%22%3A%20%7B%22groupId%22%3A%20%227557632662635840036%22%2C%20%22itemCell%22%3A%20%7B%22itemCounter%22%3A%20%7B%22readCount%22%3A%203307%2C%20%22commentCount%22%3A%2028%7D%7D%7D%7D</script>',
         None,
         "7557632662635840036",
         EngagementStats(),
@@ -437,7 +460,7 @@ def test_browser_toutiao_stats_ignore_unrelated_document_response() -> None:
     )
     stats, _, _, unrelated_source = _parse_toutiao(
         "https://www.toutiao.com/article/7000000000000000000/",
-        'window.data={"itemCounter":{"readCount":5,"commentCount":0}}',
+        '<script id="RENDER_DATA" type="application/json">%7B%22data%22%3A%20%7B%22groupId%22%3A%20%227000000000000000000%22%2C%20%22itemCell%22%3A%20%7B%22itemCounter%22%3A%20%7B%22readCount%22%3A%205%2C%20%22commentCount%22%3A%200%7D%7D%7D%7D</script>',
         None,
         "7557632662635840036",
         target_stats,

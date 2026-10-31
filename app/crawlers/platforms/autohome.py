@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
 from app.crawlers.platforms.common import COMMENT_PAGE_SIZE, result_error, to_int
 from app.crawlers.platforms.web_sources_common import comment, require_page, json_or_jsonp
+from app.crawlers.platforms.public_news import PublicDataUnavailable
 from app.models.engagement import EngagementResult, EngagementStats
 
 
@@ -43,6 +44,8 @@ def page_metadata(text, work_id, *, chejiahao=False):
 async def fetch(crawler, url, work_id, limit, *, page, comment_cursor, include_stats, include_comments):
     try:
         host = urlparse(url).hostname
+        if host == "club.autohome.com.cn":
+            return await fetch_forum(crawler, url, work_id, page, comment_cursor, include_comments)
         chejiahao = host in {"chejiahao.m.autohome.com.cn", "chejiahao.autohome.com.cn"}
         candidates = [url.replace("http://", "https://", 1)]
         if chejiahao:
@@ -100,7 +103,60 @@ async def fetch(crawler, url, work_id, limit, *, page, comment_cursor, include_s
             coverage="partial", stats=stats, comments=comments,
             next_cursor=cursor if more and include_comments else None,
             source="target-page + reply.autohome.com.cn", reason="公开内容的互动字段和一级评论；未公开字段保留 null")
+    except PublicDataUnavailable as exc:
+        return result_error("autohome", url, work_id, "unsupported", exc).model_copy(update={"retryable": False})
     except PlatformBlockedError as exc:
         return result_error("autohome", url, work_id, "blocked", exc)
     except Exception as exc:
         return result_error("autohome", url, work_id, "failed", exc)
+
+
+async def fetch_forum(crawler, url, wid, page, cursor, include_comments):
+    current = int(cursor) if cursor else (page if include_comments else 1)
+    target_url = re.sub(r"-\d+\.html(?:[?#].*)?$", f"-{current}.html", url)
+    response = await crawler._get_response(target_url)
+    match = re.search(r"window\[['\"]__TOPICINFO__['\"]\]\s*=\s*\{(.*?)\};", response.text, re.S)
+    config = match[1] if match else ""
+    def number(key):
+        found = re.search(r"\b" + re.escape(key) + r"\s*:\s*(\d+)", config)
+        return int(found[1]) if found else None
+    if str(number("topicId")) != wid or number("currentPageIdx") != current:
+        raise PlatformCrawlerError("汽车之家论坛未返回目标帖子或请求页码")
+    if number("topicDelete"):
+        raise PublicDataUnavailable("汽车之家论坛目标帖子已删除")
+    payload = await crawler._get_json("https://club.autohome.com.cn/frontapi/getclicksandreplys",
+        params={"topicids": wid}, headers={"Referer": target_url})
+    counts = next((x for x in payload.get("result", []) if str(x.get("topicid")) == wid), None)
+    if payload.get("returncode") != 0 or counts is None:
+        raise PlatformCrawlerError("汽车之家论坛未返回目标帖子计数")
+    stats = EngagementStats(views=to_int(counts.get("views")), comments=to_int(counts.get("allreplys")))
+    result, following = [], None
+    if include_comments:
+        soup = BeautifulSoup(response.text, "html.parser")
+        container = soup.select_one("#js-reply-list-container")
+        if container is None:
+            raise PlatformCrawlerError("汽车之家论坛一级回复容器缺失")
+        for root in container.select(":scope > li[data-reply-id][data-status]"):
+            # The official client reveals status 20 only to moderators, and
+            # status 22 only to moderators/the author. Do not expose their HTML.
+            if root["data-status"] in {"20", "22"}:
+                continue
+            body = root.select_one(".reply-main > .reply-detail")
+            if body is None:
+                raise PlatformCrawlerError("汽车之家论坛一级回复正文缺失")
+            for control in body.select(".reply-detail-oper-btn"):
+                control.decompose()
+            date = root.select_one(".reply-top .reply-static-text strong:last-child")
+            result.append(comment(root["data-reply-id"], "", body.get_text(" ", strip=True),
+                created=date.get_text(strip=True) if date else None))
+        if current == 1 and not result and stats.comments != 0:
+            raise PublicDataUnavailable("汽车之家论坛计数包含非公开回复，当前没有可访问的一级评论")
+        next_path = re.sub(r"-\d+\.html$", f"-{current + 1}.html", urlparse(target_url).path)
+        for link in soup.select('a[href]'):
+            if urlparse(link["href"]).path == next_path:
+                following = str(current + 1)
+                break
+    return EngagementResult(platform="autohome", canonical_url=url, work_id=wid,
+        coverage="partial", stats=stats, comments=result, next_cursor=following,
+        source="club.autohome.com.cn target topic + getclicksandreplys",
+        reason="论坛阅读/回复计数和公开一级回复；审核或仅作者可见的回复不返回正文，未公开字段保留 null")

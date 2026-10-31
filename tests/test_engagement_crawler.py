@@ -387,7 +387,7 @@ def test_zero_circuit_threshold_disables_platform_circuit(monkeypatch) -> None:
 def test_toutiao_ssr_probe_bypasses_preferred_proxy() -> None:
     class DirectAwareClient(FakeClient):
         def __init__(self) -> None:
-            super().__init__(FakeResponse(text="<html></html>"))
+            super().__init__(FakeResponse(text="<html></html>"), FakeResponse(payload={"err_no": 0, "group": {"group_id": "1234567890", "user_id": 123}, "data": [], "total_number": 0, "has_more": False, "offset": 20}))
             self.direct_scopes = 0
 
         @asynccontextmanager
@@ -1007,7 +1007,8 @@ def test_toutiao_comments_map_page_to_offset() -> None:
         "total_number": 61,
         "has_more": True,
         "offset": 60,
-        "data": [],
+        "group": {"group_id": "7557632662635840036", "user_id": 123},
+        "data": [{"comment": {"id_str": "c3", "text": "第三页评论"}}],
     }))
 
     result = asyncio.run(EngagementCrawler(client=client).fetch_comments(
@@ -1526,12 +1527,10 @@ def test_weibo_session_cookie_and_cursor_type_support_deep_pages() -> None:
 
 def test_toutiao_fetches_comment_count_and_comments_without_signature() -> None:
     client = FakeClient(
-        FakeResponse(text=(
-            '%22itemCounter%22%3A%7B%22commentCount%22%3A28%2C%22diggCount%22%3A74%2C'
-            '%22readCount%22%3A3297%2C%22shareCount%22%3A52%7D'
-        )),
+        FakeResponse(text='<script id="RENDER_DATA" type="application/json">%7B%22data%22%3A%20%7B%22groupId%22%3A%20%227557632662635840036%22%2C%20%22itemCell%22%3A%20%7B%22itemCounter%22%3A%20%7B%22commentCount%22%3A%2028%2C%20%22diggCount%22%3A%2074%2C%20%22readCount%22%3A%203297%2C%20%22shareCount%22%3A%2052%7D%7D%7D%7D</script>'),
         FakeResponse(payload={
             "message": "success",
+            "group": {"group_id": "7557632662635840036", "user_id": 123},
             "err_no": 0,
             "total_number": 28,
             "has_more": True,
@@ -1562,10 +1561,7 @@ def test_toutiao_fetches_comment_count_and_comments_without_signature() -> None:
 
 
 def test_toutiao_interactions_parse_ssr_counters_without_comment_request() -> None:
-    client = FakeClient(FakeResponse(text=(
-        '%22itemCounter%22%3A%7B%22commentCount%22%3A28%2C%22diggCount%22%3A74%2C'
-        '%22readCount%22%3A3297%2C%22shareCount%22%3A52%2C%22showCount%22%3A167624%7D'
-    )))
+    client = FakeClient(FakeResponse(text='<script id="RENDER_DATA" type="application/json">%7B%22data%22%3A%20%7B%22groupId%22%3A%20%227557632662635840036%22%2C%20%22itemCell%22%3A%20%7B%22itemCounter%22%3A%20%7B%22commentCount%22%3A%2028%2C%20%22diggCount%22%3A%2074%2C%20%22readCount%22%3A%203297%2C%20%22shareCount%22%3A%2052%2C%20%22showCount%22%3A%20167624%7D%7D%7D%7D</script>'))
     result = asyncio.run(EngagementCrawler(client=client).fetch_interactions(
         "https://www.toutiao.com/article/7557632662635840036/",
         "头条",
@@ -1578,9 +1574,9 @@ def test_toutiao_interactions_parse_ssr_counters_without_comment_request() -> No
     assert len(client.calls) == 1
 
 
-def test_toutiao_stats_parser_accepts_plain_item_counter() -> None:
+def test_toutiao_stats_parser_accepts_target_ssr_counter() -> None:
     stats = parse_toutiao_stats(
-        '{"itemCounter":{"commentCount":3,"diggCount":4,"readCount":5,"shareCount":6}}'
+        '<script id="RENDER_DATA" type="application/json">%7B%22data%22%3A%20%7B%22groupId%22%3A%20%22123%22%2C%20%22itemCell%22%3A%20%7B%22itemCounter%22%3A%20%7B%22commentCount%22%3A%203%2C%20%22diggCount%22%3A%204%2C%20%22readCount%22%3A%205%2C%20%22shareCount%22%3A%206%7D%7D%7D%7D</script>', "123"
     )
     assert stats.model_dump(exclude_none=True) == {
         "views": 5,

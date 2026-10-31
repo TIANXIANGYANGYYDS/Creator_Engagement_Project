@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from app.crawlers.proxy_provider import ProxyUnavailableError
 from app.crawlers.wechat_browser_resources import wechat_static_resources
@@ -476,12 +476,36 @@ class BrowserFallback:
         include_stats: bool,
         include_comments: bool,
     ) -> EngagementResult:
-        if platform in {"weitoutiao", "xueqiu", "sohu"}:
+        from app.crawlers.platforms.registry import is_toutiao_share_url, toutiao_share_target
+
+        shared_toutiao = platform in {"toutiao", "weitoutiao"} and is_toutiao_share_url(url)
+        if shared_toutiao:
+            try:
+                platform, work_id = toutiao_share_target(str(page_obj.url))
+            except ValueError as exc:
+                return EngagementResult(platform=platform, canonical_url=url, work_id=work_id,
+                    coverage="blocked", reason=str(exc))
+            url = str(page_obj.url)
+        if shared_toutiao or platform in {"weitoutiao", "xueqiu", "sohu"}:
             from app.crawlers.platforms import PLATFORM_HANDLERS
             from app.crawlers.platforms.browser_page_context import BrowserPageContext
             target = _browser_target_url(url, platform, work_id)
+            target_html = None
+            if platform in {"toutiao", "weitoutiao"}:
+                # Hydration removes RENDER_DATA from the live DOM. Preserve the
+                # original target document already captured by this browser.
+                for response in reversed(responses):
+                    if str(getattr(response, "url", "")).split("?", 1)[0].rstrip("/") != target.rstrip("/"):
+                        continue
+                    try:
+                        text = await response.text()
+                    except Exception:
+                        continue
+                    if 'RENDER_DATA' in text:
+                        target_html = text
+                        break
             result = await PLATFORM_HANDLERS[platform](
-                BrowserPageContext(page_obj, target), url, work_id, limit,
+                BrowserPageContext(page_obj, target, target_html), url, work_id, limit,
                 page=page, comment_cursor=None, include_stats=include_stats,
                 include_comments=include_comments,
             )
@@ -550,6 +574,8 @@ class BrowserFallback:
                     stats,
                     comments,
                 )
+                if source == "article/tab_comments":
+                    next_available = bool(payload["has_more"])
             elif platform == "xiaohongshu":
                 stats, comments, total_comments, source = _parse_xhs(response_url, text, payload, stats, comments)
                 if "comment/page" in response_url and isinstance(payload, dict):
@@ -648,6 +674,10 @@ def _browser_target_url(
 ) -> str:
     """Use the platform's full content page for share and desktop URL variants."""
 
+    from app.crawlers.platforms.registry import is_toutiao_share_url
+
+    if platform in {"toutiao", "weitoutiao"} and is_toutiao_share_url(url):
+        return url
     if platform == "kuaishou":
         return f"https://www.kuaishou.com/short-video/{work_id}"
     if platform == "toutiao":
@@ -788,21 +818,21 @@ def _parse_toutiao(
     comments: list[EngagementComment],
 ):
     if "tab_comments" in url and isinstance(payload, dict):
-        items = payload.get("data") or []
-        parsed = []
-        for item in items:
-            item = item.get("comment") if isinstance(item, dict) and isinstance(item.get("comment"), dict) else item
-            if isinstance(item, dict):
-                value = _comment(item)
-                if value:
-                    parsed.append(value)
-        return stats, parsed, _number(payload.get("total_number")), "article/tab_comments"
+        from app.crawlers.platforms.toutiao import parse_comment_page
+
+        try:
+            offset = int(parse_qs(urlparse(url).query).get("offset", ["0"])[0])
+            parsed, total, _ = parse_comment_page(payload, work_id, offset)
+        except (ValueError, TypeError, RuntimeError):
+            return stats, comments, stats.comments, ""
+        stats.comments = total
+        return stats, parsed, total, "article/tab_comments"
     if f"/article/{work_id}" not in url and f"/video/{work_id}" not in url:
         return stats, comments, stats.comments, ""
     try:
         from app.crawlers.platforms.toutiao import parse_stats
 
-        parsed_stats = parse_stats(text)
+        parsed_stats = parse_stats(text, work_id)
     except Exception:
         parsed_stats = EngagementStats()
     values = parsed_stats.model_dump()

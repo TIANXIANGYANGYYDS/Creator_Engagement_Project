@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     xiaohongshu_source_path: str = Field(
         default=".local/top20_platform_data.json", alias="XIAOHONGSHU_SOURCE_PATH",
     )
+    xiaohongshu_source_mongo_database: str = Field(
+        default="", alias="XIAOHONGSHU_SOURCE_MONGO_DATABASE",
+    )
+    xiaohongshu_source_mongo_collection: str = Field(
+        default="", alias="XIAOHONGSHU_SOURCE_MONGO_COLLECTION",
+    )
     xiaohongshu_session_dir: str = Field(default="", alias="XIAOHONGSHU_SESSION_DIR")
     xiaohongshu_browser_profile_dir: str = Field(default="", alias="XIAOHONGSHU_BROWSER_PROFILE_DIR")
     xiaohongshu_session_socket: str = Field(default="", alias="XIAOHONGSHU_SESSION_SOCKET")
@@ -137,6 +143,9 @@ class Settings(BaseSettings):
         ge=1,
         le=32,
     )
+    public_platform_max_concurrency: int = Field(
+        default=1, alias="PUBLIC_PLATFORM_MAX_CONCURRENCY", ge=1, le=4,
+    )
     job_max_concurrency: int = Field(
         default=2,
         alias="JOB_MAX_CONCURRENCY",
@@ -154,6 +163,9 @@ class Settings(BaseSettings):
         alias="JOB_ITEM_TIMEOUT_SECONDS",
         ge=0,
         le=600,
+    )
+    job_xiaohongshu_item_timeout_seconds: float = Field(
+        default=300, alias="JOB_XIAOHONGSHU_ITEM_TIMEOUT_SECONDS", ge=0, le=600,
     )
     job_timeout_seconds: float = Field(
         default=1800,

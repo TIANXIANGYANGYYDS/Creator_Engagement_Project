@@ -35,7 +35,9 @@ async def collect(crawler, url, work_id, limit, page, cursor, include_comments, 
         config = re.search(r"\baccountInfo\s*=\s*\{(.*?)\}", response.text, re.S)
         article = re.search(r'articleid\s*:\s*[\"\'](\d+)', config[1]) if config else None
         post = re.search(r'postId\s*:\s*[\"\'](\d+)', config[1]) if config else None
-        if not article or article[1] != artcode or not post:
+        # /news accepts both the long article code and its shorter post ID.
+        # Bind either form to the page's own mapping before reading counters.
+        if not article or not post or artcode not in {article[1], post[1]}:
             raise PlatformCrawlerError("财富号页面未返回目标文章的股吧映射")
         post_id = post[1]
     if post_id:

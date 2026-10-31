@@ -1,196 +1,47 @@
-# 九个平台独立执行流程
+# 采集执行流程
 
-本文对应 `app/crawlers/platforms/` 下的九个实现文件。微信公众号和微信视频号各有独立
-适配器、URL 路由与能力边界。公共 API 不包含平台条件分支；
-`EngagementCrawler` 根据 `media_name + URL` 选择一个处理器，协议结果不可用时再进入统一
-Camoufox 兜底。互动量和评论是两条独立接口，也分别执行上游请求：
+更新：2026-10-31。逐来源字段、文件和评论限制集中在 [平台清单](PLATFORM_SUPPORT.md)，不再维护第二份不同版本的平台表。
 
-```text
-GET /api/v1/interactions?url=...&media_name=...
-  -> include_stats=true, include_comments=false
+## 一次业务请求
 
-GET /api/v1/comments?url=...&media_name=...
-  -> include_stats=false, include_comments=true
+1. API 校验 URL、媒体名、页码；`registry.py` 和 `source_catalog.py` 校验域名并提取目标 ID。
+2. `EngagementService` 检查缓存/合并相同在途请求。缓存键包含操作、平台、URL、页码和不透明评论 cursor；同页不同 cursor 不再串页。
+3. 等待平台熔断冷却、取得共享平台槽位、完成该操作的限速，再取得全局采集槽位。等待限速不占用全局容量。
+4. `EngagementCrawler` 根据注册处理器执行协议。一次业务内部复用代理租约；临时错误可重试，确定删除/无权限等状态停止重试。普通平台无代理时不转服务器直连。
+5. 校验业务状态、目标 ID/线程、字段来源、评论层级和翻页进度；协议不可用且该平台有既存浏览器实现时才进入 Camoufox。
+6. 互动与评论分别返回、分别缓存。评论全量模式按游标遍历、去重、识别阻断；不获取楼中楼正文。
+
+```mermaid
+flowchart LR
+  API[URL 与媒体校验] --> CACHE[缓存与重复请求合并]
+  CACHE --> PLATFORM[平台共享并发与限速]
+  PLATFORM --> GLOBAL[全局容量]
+  GLOBAL --> ROUTE{来源}
+  ROUTE -->|普通平台| HTTP[代理租约与协议采集]
+  ROUTE -->|小红书| XHS[本机 IP 与账号独立限频]
+  XHS --> CHECK
+  HTTP --> CHECK[目标与业务数据核验]
+  CHECK --> RESULT[返回与缓存]
+  CHECK --> BROWSER[已有浏览器兜底]
+  BROWSER --> RESULT
 ```
 
-评论接口只返回一级评论正文，不会继续展开评论下的回复。不传 `page` 时自动翻到当前可见
-末页并合并数据；传 `page=N` 时只返回第 N 页。对外响应统一为 `{"data": ...}`，覆盖状态和
-分页能力保留在内部采集结果与日志中。
+## 批任务
 
-只有接口类型、媒体、URL 和页码都相同的重复请求才会合并任务并命中 120 秒缓存。两个外部
-接口不会互相冒充结果；但某个平台为补齐互动中的“评论总数”时，内部可以调用评论总数
-端点，其返回的评论正文不会写入互动响应。一个代理 IP 可以承载多次 HTTP 请求；共用代理
-租约不等于合并请求。
+`BatchJobManager` 按真实上游分组建立有界 worker 队列，各组并行推进；共享执行信号量继续约束每个任务的实际并发。小红书排队不再占满普通平台 worker。每条记录取得平台/全局/任务槽位后才开始执行超时，排队时长仍计入结果的总耗时。
 
-## 抖音
+结果按完成顺序持久化，调用方使用 `item_id` 对照输入。取消、服务重启恢复、任务总时限、幂等和结果 cursor 机制保持不变。MongoDB 的 `job_requests` 保存原始条目；没有原始输入的老任务不能自动补造输入。
 
-代码：`app/crawlers/platforms/douyin.py`
+## 共享上游与账号
 
-- 匿名会话：先打开目标页预热，再向第一方 `ttwid/union/register` 初始化访客标识；不使用
-  固定 Cookie，也不要求账号。
-- 签名：每个请求生成 107 字符 `msToken`，用纯 Python SM3/RC4 实现即时计算 `a_bogus`。
-- 互动量：请求 `/aweme/v1/web/aweme/detail/`，解析播放、点赞、评论、分享、收藏等字段。
-- 评论：从 cursor=0 开始请求 `/aweme/v1/web/comment/list/`，按公开 `page` 顺序遍历游标；
-  访客实测首屏 20 条、总数 2909。
-- 评论对象保留平台返回的回复数量，但不会请求回复正文。
-- 失败处理：HTTP 200 空包不算成功；标记 `blocked` 后进入目标作品页浏览器兜底。
-- 会话边界：访客 `ttwid` 只保留在当前请求/客户端生命周期；可选调用方 Cookie 仍只注入
-  抖音域，临时状态不会写入源码或日志。
+- 新浪多个来源共用 `sina`；财富号、股吧、基金/Choice/哈富等共用 `eastmoney`。
+- 搜狐号/搜狐网、网易号/网易视频、汽车之家/车家号、凤凰网/大风号分别共享同组容量。
+- 不同名称不会倍增同一出版方的并发。配置冲突时共享并发取较小值、限速间隔取较大值。
+- 小红书使用既有真实账号、本机出口 IP 和独立限速，不进入代理池；底层每次上游请求也受账号串行与间隔控制。不能仅限制 API 调用次数而忽略一次调用的多个详情/分页请求。
+- 腾讯新闻 `i.news.qq.com` 的代理 CONNECT 403 已实测可通过同一代理连接解析后的公网 IP 恢复。只对已验证域名/CONNECT 403 生效，保留 URL、Host、TLS SNI 和证书校验；不用于上游业务 403。
 
-## 今日头条
+## 新增采集器的位置
 
-代码：`app/crawlers/platforms/toutiao.py`
+扩展来源的名称、域名在 `source_catalog.py`，按既有协议复用对应模块；新协议放 `app/crawlers/platforms/`。`extended_publishers.py` 只分派处理器和统一错误，不堆页面解析。当前新增模块和全部旧模块均可从平台清单直达。
 
-- 互动量：读取文章 HTML 中的 SSR `itemCounter/likeData`。
-- 评论：请求 `/article/v4/tab_comments/`，公开页码转换为 `offset`。
-- 评论对象保留平台返回的回复数量，但不会请求回复正文。
-- 失败处理：SSR 没有计数时进入浏览器兜底；评论接口异常时返回明确失败原因。
-- 会话边界：当前评论路径无需账号，互动字段可能受页面 JSVM 挑战影响。
-
-## 微信公众号
-
-代码：`app/crawlers/platforms/wechat.py`
-
-当前生产硬约束禁止人工操作和真实账号，因此评论正文统一返回 `unsupported`；下列 Cookie/
-官方接口是历史兼容路径，不计入严格模式可用能力。
-
-- 任意公众号生产路径：调用方把完整文章 Cookie Header 写入本机
-  `WECHAT_ARTICLE_COOKIE`。适配器从 Cookie、URL 与 `window.cgiDataNew` 合并
-  `uin/key/pass_ticket/appmsg_token/wap_sid2` 等参数；整个业务调用复用同一个 Cookie 和
-  IP 租约，不启动浏览器、微信客户端或真实账号。
-- Cookie-only 互动量：先解析文章页 `appmsgstat/cgiDataNew`，缺计数时再 POST
-  `/mp/getappmsgext`；兼容 `appmsg_read_num/appmsg_like_num`、V2 字段和数值 `0`。
-- Cookie-only 评论：先解析 `preload_comment_list`，否则请求 `/mp/appmsg_comment`，按
-  `buffer/continue_flag` 顺序遍历并转换为外部 `page`；只返回公开精选评论，不承诺后台
-  全量留言。
-
-- 自有公众号互动量：配置 AppID/AppSecret 或 access token 后，通过官方 `stable_token`
-  获取并缓存令牌；按文章发布日期请求当前 `/datacube/getarticletotaldetail`，用 URL 的
-  `mid_idx` 匹配 `msgid`，返回阅读、点赞、在看、分享、留言和收藏。
-- 自有公众号评论：请求官方 `/cgi-bin/comment/list`，将外部页码转换为 `begin/count`。
-  该接口只对凭据所属公众号和已开通留言权限的文章生效。
-- 关闭评论判据：匿名页的 `show_comment=0` 只表示当前页面没有展示评论区；只有成功的
-  评论接口响应明确给出 `enabled=0`，才返回 `complete` 空结果并确认文章未开放评论。
-- 失败处理：缺会话字段或 `ret=-3/no session` 返回 `unsupported`，不会浪费 IP 轮换；
-  Verify HTML、频繁访问或 `/mp/wappoc_appmsgcaptcha` 返回 `blocked`，允许代理池更换出口。
-  Cookie/token 的值永不写入 reason 或日志。
-- 会话边界：官方凭据不能跨公众号读取第三方文章；IP 只能缓解验证码和频控，不能把弱
-  Cookie 提升成完整文章会话。旧桌面微信 sidecar 仅保留兼容代码，当前生产路径默认关闭；
-  Cookie-only 配置与边界见 [`WECHAT_COOKIE_PROTOCOL.md`](WECHAT_COOKIE_PROTOCOL.md)。
-
-## 微信视频号
-
-代码：`app/crawlers/platforms/wechat_channels.py`
-
-当前生产只启用匿名预览互动量；依赖真实微信客户端的评论侧车关闭，评论正文返回
-`unsupported`。下列侧车流程只作历史实现说明。
-
-- URL：独立识别 `weixin.qq.com/sph/{shortUri}`、公开预览 `pages/sph?id=...`，以及带
-  `eid/token` 的预览链接；不会再路由到微信公众号适配器。
-- 互动量：一次匿名 POST 请求腾讯公开预览端点
-  `/finder-preview/api/feed/get_feed_info`，返回页面展示的点赞、评论总数、转发和收藏。
-  `万/W/亿/+` 按公开显示值转换为整数；带 `+` 时仅代表可验证下限，因此标记 `partial`。
-- 评论：配置 `WECHAT_CHANNELS_BRIDGE_URL` 后，评论业务直接把分享 URL 交给授权 Windows
-  微信侧车；侧车调用页面内部 `finderGetCommentList`，按 `lastBuffer` 依次翻到外部页码，
-  返回一级评论正文、点赞数和回复数。分享详情缺 nonce 时，只接受标题和作者唯一精确匹配。
-  未配置或侧车不可用时，再请求公开预览并返回 `unsupported`、准确总数和原因，不把总数
-  伪装成评论行。
-- 失败处理：目标分享已失效或响应没有目标 feed 时明确返回 `unsupported`；默认
-  `direct/prefer` 绕过代理，不消耗采购 IP，也不启动 Camoufox；显式 `required` 仍尊重
-  运维要求使用代理。
-- 会话边界：评论正文依赖微信视频号客户端及其 `finderGetCommentList` 会话
-  （objectId、objectNonceId、lastBuffer），不是匿名网页请求。客户端账号状态保留在侧车，
-  主 API 只传公开 URL/页码；远程桥必须使用 HTTPS+token，或通过隧道映射到回环地址。详见
-  [`WECHAT_CHANNELS_BRIDGE.md`](WECHAT_CHANNELS_BRIDGE.md)。
-
-## 小红书
-
-代码：`app/crawlers/platforms/xiaohongshu.py`
-
-默认只启用匿名互动量。部署方显式配置 `XIAOHONGSHU_SESSION_MODE=cookie` 和包含非空
-`a1/web_session` 的 `XIAOHONGSHU_COOKIE` 后，评论能力切换为 `all_public_pages`；服务不会
-启动浏览器模拟登录或自动获取账号会话。
-
-- 互动量：使用 URL 中当前有效的 `xsec_token` 匿名直访笔记页，缺少时自动补
-  `xsec_source=pc_feed`，从 SSR `noteDetailMap` 解析点赞、收藏、评论和分享；严格不携带
-  评论 Cookie。真实百测为 1 GET/次、100/100 有数据。
-- 评论：使用 `xhshow` 为 `/api/sns/web/v2/comment/page` 动态生成完整签名头，按 cursor
-  遍历到指定页。旧 `XYS_` 被 HTTP 406 拒绝时自动重试 `XYW_`。
-- Cookie 隔离：评论 Cookie 只发送到 `edith.xiaohongshu.com`；互动 SSR 请求不带评论
-  Cookie。配置缺少 `a1` 或 `web_session` 时服务启动失败，错误只列字段名。
-- 失败处理：缺/过期 token 是 URL 本身的能力边界；匿名 SSR 无目标数据时直接返回明确状态，
-  不再启动高成本浏览器或把同一固定出口无意义重试三次。默认 `prefer` 模式绕过已实测不适合
-  此路径的代理；只有调用方明确指定 `required` 时才使用代理并按语义失败换出口。
-- 会话边界：互动量无需账号；评论需要调用方提供的有效 `web_session` 与 URL `xsec_token`。SSR HTML
-  没有评论正文，因此互动量和评论必须保持两个独立上游请求。
-
-## 好看视频
-
-代码：`app/crawlers/platforms/haokan.py`
-
-- 互动量：先访问首页建立匿名百度 Cookie，再请求目标页；从目标页 SSR 的 description 和
-  `ssr-icon-*` 读取精确播放、点赞、评论数，并校验 SSR URL 确实包含目标 `vid`。
-- 评论：同一接口用 `pn` 选择指定公开页，并解析一级评论。
-- 失败处理：限流或字段缺失时进入浏览器兜底。
-- 会话边界：当前路径纯协议匿名可用；收藏和分享没有公开数字时保持 `null`。
-
-## 快手
-
-代码：`app/crawlers/platforms/kuaishou.py`
-
-- 互动量：同一游客/自有会话请求 GraphQL `visionVideoDetail`，并强制校验返回
-  `photo.id == URL photoId`；详情传输或目标匹配异常时解析目标页 `__APOLLO_STATE__`。
-  评论总数由独立评论端点补齐，不能把两次 HTTP 请求写成一次。
-- 评论：优先请求 `/rest/v/photo/comment/list`，包括 REST 返回验证码时仍尝试 GraphQL
-  `commentListQuery`，按 `pcursor` 遍历指定页；置顶评论若在后续页重复，会按评论 ID 去重。
-- 失败处理：企业模式最多 3 次，每次使用独立代理租约；网络失败、Need captcha、HTTP 200
-  空包和缺少评论总数都会淘汰当前 IP。已取得播放/点赞时，后续评论总数失败不会再丢弃前者。
-- 作品状态：详情明确返回 `status=1040/photo=null` 时停止无意义详情重试，继续返回评论端点
-  仍能验证的评论总数，并在 `reason` 中标明字段不完整。
-- URL：同时接受 `www.kuaishou.com/short-video/{id}` 和 `c.kuaishou.com/fw/photo/{id}`；
-  分享链接在浏览器阶段自动规范化为同作品详情页。
-- 会话边界：公开作品首屏不要求账号；只返回一级评论，不混入推荐流。398 条真实
-  URL 企业实测互动/评论均为 398/398 有数据，全程零浏览器；互动中 34 条仅剩评论数。
-
-## B 站
-
-代码：`app/crawlers/platforms/bilibili.py`
-
-- 视频互动量：请求 `/x/web-interface/view`，解析播放、点赞、评论、分享、收藏、投币和弹幕。
-- 专栏/图文互动量：`/read/cv{id}` 使用 `/x/article/viewinfo`；新版 `/opus/{id}` 解析页面
-  `window.__INITIAL_STATE__` 的 `module_stat`。两种 URL 都只需要 1 个匿名 GET。
-- 评论：从 `/x/web-interface/nav` 动态提取 WBI key，签名请求
-  `/x/v2/reply/wbi/main`。视频使用 `type=1`；专栏使用页面或 URL 确认的 `type=12/oid`。
-  排序固定为 `mode=2`（最新评论），按 `pagination_reply.next_offset` 转换页码；旧 reply 接口
-  仅作 WBI 风控回退。
-- 请求数：视频评论是详情 + nav + WBI 共 3 GET；`cv` 评论已知 oid，只需 nav + WBI 共
-  2 GET；Opus 评论需先读页面映射 oid/type，再加 nav + WBI，共 3 GET。
-- 会话隔离：Opus 映射页只用于解析公开 SSR，其响应 Cookie 不写入共享协议会话；否则实测
-  老专栏一级评论会从 20 条收缩为 3 条并丢失 `next_offset`。
-- 失败处理：WBI key 轮换、接口限流或数据缺失时进入浏览器兜底。
-- 会话边界：当前公开路径无需账号，不保存 WBI 临时密钥。
-- 业务边界：只接受视频和专栏/图文 URL；`live.bilibili.com` 在上游请求前拒绝，不采集直播
-  在线人数或弹幕。
-
-## 微博
-
-代码：`app/crawlers/platforms/weibo.py`
-
-- 互动量：请求 `m.weibo.cn/statuses/show`，解析点赞、评论和转发。
-- URL：桌面端 `/用户ID/base62短ID` 会先本地转换为数值 MID，再复用移动端公开接口；不会
-  再把用户 ID 误判成作品 ID。
-- 评论：优先请求 `m.weibo.cn/comments/hotflow`，按 `max_id` 遍历；后续页返回登录跳转时，
-  改用 `m.weibo.cn/api/comments/show?id=...&page=N` 匿名页码接口。
-- 文本：把评论 HTML 中图片表情的 `alt` 文本保留下来，避免纯表情评论变成空字符串。
-- 失败处理：访客限流、折叠或空结果时进入浏览器兜底。
-- 会话边界：当前路径无需账号；匿名页码接口和热门流的排序、总数口径不同，均不能证明
-  评论全集。
-
-## 共享边界
-
-- `platforms/registry.py` 只负责媒体别名、URL 平台和作品 ID 识别，包括头条 `/i{id}`、
-  快手分享链接、微博 base62 短 ID、B 站专栏/Opus URL，以及视频号 sph/eid 分享 URL。
-- `platforms/common.py` 只包含无平台状态的数值、时间及失败结果转换。
-- `engagement.py` 只负责统一接口、路由、HTTP 客户端和是否进入浏览器兜底。
-- `browser_fallback.py` 只管理持久化浏览器、目标页操作和网络响应收集，不作为首选协议。
-- 任一平台新增字段或修复分页时，应在对应平台文件和测试中完成，不向总路由增加条件分支。
+调试材料留在 `.local/analysis/<case>/`。稳定结论进入带日期验收文档；当前能力表只保留一份。两个空的 `scheduler`/`workers` 占位包已移除，实际任务逻辑在 `services/`，不新增第二套后台框架。

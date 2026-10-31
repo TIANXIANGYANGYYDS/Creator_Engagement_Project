@@ -44,6 +44,10 @@ MEDIA_ALIASES: dict[str, EngagementPlatform] = {
     "weibo": "weibo",
     "微博": "weibo",
     "新浪微博": "weibo",
+    "微博头条": "weibo",
+    "爱卡汽车爱咖号": "xcar",
+    "腾讯网": "qq_news",
+    "腾讯新闻": "qq_news",
     "sina": "sina",
     "新浪看点": "sina",
     "baijiahao": "baijiahao",
@@ -89,6 +93,11 @@ def validate_media_url(url: str, media_name: str) -> tuple[EngagementPlatform, s
     if requested_platform in EXTENDED_SOURCES:
         return requested_platform, source_id(requested_platform, url)
     detected_platform, work_id = identify_url(url)
+    if requested_platform in {"toutiao", "weitoutiao"} and is_toutiao_share_url(url):
+        return detected_platform, work_id
+    # Toutiao exports micro-post share links under the parent channel name.
+    if requested_platform == "toutiao" and detected_platform == "weitoutiao":
+        return detected_platform, work_id
     # Legacy /i links are shared by articles and micro-posts. The caller's
     # media name disambiguates them; /w and /article remain unambiguous.
     if requested_platform == "weitoutiao" and detected_platform == "toutiao" and re.fullmatch(r"/i\d+/?", urlparse(url).path):
@@ -98,6 +107,29 @@ def validate_media_url(url: str, media_name: str) -> tuple[EngagementPlatform, s
             f"media_name '{media_name}' does not match URL platform '{detected_platform}'"
         )
     return detected_platform, work_id
+
+
+def is_toutiao_share_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname == "weitoutiao.zjurl.cn"
+        and not parsed.username and not parsed.password
+        and parsed.port in {None, 80, 443}
+        and re.fullmatch(r"/ugc/share/wap/(?:comment|thread)/\d+/?", parsed.path) is not None
+    )
+
+
+def toutiao_share_target(url: str) -> tuple[EngagementPlatform, str]:
+    parsed = urlparse(url)
+    if (parsed.scheme in {"http", "https"}
+            and parsed.hostname in {"www.toutiao.com", "m.toutiao.com", "toutiao.com"}
+            and not parsed.username and not parsed.password
+            and parsed.port in {None, 80, 443}):
+        match = re.fullmatch(r"/(article|video|w)/(\d+)/?", parsed.path)
+        if match:
+            return ("weitoutiao" if match[1] == "w" else "toutiao"), match[2]
+    raise ValueError("头条分享页尚未跳转到有效的官方详情页")
 
 
 def weibo_bid_to_mid(bid: str) -> str:
@@ -179,12 +211,21 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
     if host in {"www.yoojia.com", "yoojia.com", "youjia.baidu.com"}:
         match = re.search(r"/(?:article|video)/(\d+)\.html", path)
         return "yoojia", match[1] if match else query.get("id", query.get("nid", [""]))[0]
+    if host == "yoojia.baidu.com":
+        nid = query.get("nid", [""])[0]
+        return "yoojia", nid if path in {"/app/tuwen/index", "/app/video-detail/index"} and nid.isdigit() else ""
     if host in {"www.sohu.com", "m.sohu.com", "3g.k.sohu.com"}:
         match = re.search(r"/a/(\d+)(?:_\d+)?|/t/n(\d+)", path)
         return "sohu", next(v for v in match.groups() if v) if match else ""
     if host in {"www.dongchedi.com", "m.dongchedi.com", "dcd.zjbyte.cn"}:
         match = re.search(r"/(?:article/|video/|i)(\d+)", path)
         return "dongchedi", match[1] if match else ""
+    if host == "m.dcdapp.com":
+        group_id = query.get("group_id", [""])[0]
+        return "dongchedi", group_id if path == "/motor/m/feed/detail" and group_id.isdigit() else ""
+    if host == "comment.tie.163.com":
+        match = re.fullmatch(r"/([A-Z0-9]{16})(?:/\d+)?\.html", path, re.I)
+        return "netease", match[1].upper() if match else ""
     if host in {"www.163.com", "m.163.com", "c.m.163.com", "dy.163.com"}:
         video = re.search(r"/(V[A-Z0-9]{8,10})\.html", path, re.I)
         if video:
@@ -195,6 +236,9 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
         match = re.fullmatch(r"/\d+/(\d+)/?", path)
         return "xueqiu", match[1] if match else ""
     if host == "autohome.com.cn" or host.endswith(".autohome.com.cn"):
+        if host == "club.autohome.com.cn":
+            forum = re.fullmatch(r"/bbs/thread/[a-f0-9]+/(\d+)-\d+\.html", path)
+            return "autohome", forum[1] if forum else ""
         match = re.search(r"/(?:share/)?info/(\d+)|/(\d+)\.html", path)
         if host == "car.autohome.com.cn":
             return "autohome", ""
@@ -248,6 +292,10 @@ def identify_url(url: str) -> tuple[EngagementPlatform, str]:
     if "douyin.com" in host or "iesdouyin.com" in host:
         match = re.search(r"/(?:video|share/video)/(\d+)", path)
         return "douyin", match.group(1) if match else ""
+    if host == "weitoutiao.zjurl.cn":
+        # A shared comment ID can redirect to a different article/group ID.
+        # Resolve that official redirect before choosing the detail collector.
+        return "toutiao", path.rstrip("/").rsplit("/", 1)[-1] if is_toutiao_share_url(url) else ""
     if "toutiao.com" in host:
         micro = re.fullmatch(r"/w/(\d+)/?", path)
         if micro:

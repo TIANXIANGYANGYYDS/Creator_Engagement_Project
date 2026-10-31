@@ -43,7 +43,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         retention_seconds=settings.job_result_ttl_seconds,
         max_concurrency=settings.job_max_concurrency,
         item_max_concurrency=settings.job_item_max_concurrency,
+        platform_item_max_concurrency=service.platform_concurrency,
         item_timeout_seconds=settings.job_item_timeout_seconds,
+        platform_item_timeout_seconds={
+            "xiaohongshu": settings.job_xiaohongshu_item_timeout_seconds,
+        },
         job_timeout_seconds=settings.job_timeout_seconds,
         timeout_batch_size=settings.job_timeout_batch_size,
         max_items=settings.job_max_items,
@@ -71,7 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await job_manager.resume_interrupted(
                 collector=jobs.job_collector(service),
                 proxy_usage_scope=service.proxy_usage_scope,
-                collection_scope=lambda item: service.collection_slot(item.media_name),
+                collection_scope=lambda item: service.collection_slot(item.media_name, item.type),
             )
         if not app.dependency_overrides:
             await author_manager.start()

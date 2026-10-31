@@ -183,6 +183,9 @@ async def fetch(
                 raw_comments = comment_payload.get("comments")
                 if not isinstance(raw_comments, list):
                     raise PlatformCrawlerError("小红书评论响应缺少有效的 comments 列表")
+                if any(not isinstance(row, dict) or str(row.get("note_id", work_id)) != work_id
+                       for row in raw_comments):
+                    raise PlatformCrawlerError("小红书主评论笔记归属不匹配")
                 has_more = comment_payload.get("has_more")
                 if not isinstance(has_more, bool):
                     raise PlatformCrawlerError("小红书评论响应缺少有效分页标记")
@@ -190,8 +193,8 @@ async def fetch(
                 if has_more and (not raw_comments or not following or following == cursor):
                     raise PlatformCrawlerError("小红书评论分页未前进，不能将空页或重复游标当成末页")
                 comments = parse_comments(comment_payload)
-                if raw_comments and not comments:
-                    raise PlatformCrawlerError("小红书评论列表未包含可识别的评论数据")
+                if len(comments) != len(raw_comments):
+                    raise PlatformCrawlerError("小红书主评论列表包含无法解析的正文")
                 comment_page_returned = True
                 total = to_int(
                     first_present(
@@ -207,9 +210,6 @@ async def fetch(
                     else None
                 )
                 if current_page == page:
-                    comments, comments_complete, comment_error = await _expand_replies(
-                        crawler, raw_comments, work_id, token, cookie, url,
-                    )
                     break
                 if next_cursor is None:
                     comments = []
@@ -414,64 +414,6 @@ def parse_comments(payload: dict[str, Any], *, parent_comment_id: str = "") -> l
             **({"parent_comment_id": parent_comment_id} if parent_comment_id else {}),
         ))
     return result
-
-
-async def _expand_replies(crawler, roots, note_id, token, cookie, referer):
-    """Keep inline replies and follow each remaining reply cursor without writes."""
-    comments = parse_comments({"comments": roots})
-    seen = {c.comment_id for c in comments}
-
-    def append_replies(rows, parent):
-        if not isinstance(rows, list):
-            raise PlatformCrawlerError("小红书回复列表缺失")
-        if any(not isinstance(row, dict) or row.get("note_id", note_id) != note_id for row in rows):
-            raise PlatformCrawlerError("小红书回复笔记归属不匹配")
-        parsed = parse_comments({"comments": rows}, parent_comment_id=parent)
-        if len(parsed) != len(rows):
-            raise PlatformCrawlerError("小红书回复列表包含无法解析的正文")
-        added = 0
-        for comment in parsed:
-            if comment.comment_id not in seen:
-                seen.add(comment.comment_id)
-                comments.append(comment)
-                added += 1
-        return added
-
-    try:
-        # Preserve all already-received replies before making further requests.
-        if len(comments) != len(roots):
-            raise PlatformCrawlerError("小红书主评论列表包含无法解析的正文")
-        for root in roots:
-            append_replies(root.get("sub_comments") or [], str(root.get("id") or ""))
-        for root in roots:
-            parent = str(root.get("id") or "")
-            inline_count = len(root.get("sub_comments") or [])
-            expected = to_int(root.get("sub_comment_count"))
-            has_more = root.get("sub_comment_has_more") is True or (
-                expected is not None and expected > inline_count
-            )
-            cursor = str(root.get("sub_comment_cursor") or "")
-            visited = set()
-            while has_more:
-                if not parent or cursor in visited or len(visited) >= 100:
-                    raise PlatformCrawlerError("小红书回复分页游标异常或达到分页上限")
-                visited.add(cursor)
-                payload = await _get(crawler, "/api/sns/web/v2/comment/sub/page", {
-                    "note_id": note_id, "root_comment_id": parent, "num": "10",
-                    "cursor": cursor, "image_formats": "jpg,webp,avif",
-                    "top_comment_id": "", "xsec_token": token,
-                }, cookie, referer)
-                added = append_replies(payload.get("comments"), parent)
-                has_more = payload.get("has_more")
-                following = str(payload.get("cursor") or "")
-                if not isinstance(has_more, bool) or (has_more and (
-                    not added or not following or following in visited
-                )):
-                    raise PlatformCrawlerError("小红书回复分页未推进")
-                cursor = following
-    except PlatformCrawlerError as exc:
-        return comments, False, "已保留主评论和已获取回复；楼中楼未完成：" + str(exc)
-    return comments, True, ""
 
 
 def parse_stats(text: str, work_id: str) -> EngagementStats:

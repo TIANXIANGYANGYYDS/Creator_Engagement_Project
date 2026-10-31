@@ -71,6 +71,26 @@ def test_batch_deadline_scales_with_input_size() -> None:
     asyncio.run(scenario())
 
 
+def test_account_pacing_budget_is_specific_to_xiaohongshu_and_accepts_aliases():
+    from app.models.engagement import JobItemRequest
+    async def scenario():
+        manager = BatchJobManager(item_timeout_seconds=0.01,
+                                  platform_item_timeout_seconds={"xiaohongshu": 0.15})
+        async def collector(item):
+            await asyncio.sleep(0.03)
+            return successful(item)
+        try:
+            for media, expected in [("小红书", "success"), ("xhs", "success"), ("抖音", "failed")]:
+                item = JobItemRequest(item_id=media, url="https://example.com/1", media_name=media, type="interactions")
+                result = await manager._collect_one(item, collector, None)
+                assert result.status == expected
+                if expected == "failed":
+                    assert "0.01 秒" in result.error
+        finally:
+            await manager.aclose()
+    asyncio.run(scenario())
+
+
 class CapacityCrawler:
     def __init__(self):
         self.active = 0
@@ -100,6 +120,32 @@ class CapacityCrawler:
         pass
 
 
+def test_unknown_platform_in_mixed_batch_keeps_validation_error():
+    async def scenario():
+        crawler = CapacityCrawler()
+        service = EngagementService(crawler)
+        manager = BatchJobManager()
+        request = request_with_items(2)
+        request.items[0].media_name = "尚未接入的来源"
+        try:
+            submitted = await manager.submit(
+                request, collector=job_collector(service),
+                proxy_usage_scope=no_proxy_cost,
+                collection_scope=lambda item: service.collection_slot(item.media_name),
+            )
+            status = await finish(manager, submitted.job_id)
+            results = await manager.get_results(submitted.job_id, cursor=None, limit=10)
+            assert status.progress.success == status.progress.failed == 1
+            failed = next(item for item in results.data if item.status == "failed")
+            assert "unsupported media_name" in failed.error
+            assert failed.media_name == "尚未接入的来源"
+            assert crawler.calls == 1
+        finally:
+            await manager.aclose()
+            await service.aclose()
+    asyncio.run(scenario())
+
+
 def test_queued_batch_items_get_full_execution_budget_without_exceeding_capacity() -> (
     None
 ):
@@ -126,6 +172,53 @@ def test_queued_batch_items_get_full_execution_budget_without_exceeding_capacity
             await manager.aclose()
             await service.aclose()
 
+    asyncio.run(scenario())
+
+
+def test_account_backlog_does_not_starve_other_platforms():
+    async def scenario():
+        manager = BatchJobManager(item_max_concurrency=2, item_timeout_seconds=0.1,
+                                  platform_item_max_concurrency={"xiaohongshu": 1})
+        release_account = asyncio.Event()
+        other_finished = asyncio.Event()
+        active = peak = 0
+
+        @asynccontextmanager
+        async def scope(item):
+            if item.media_name in {"小红书", "xhs"}:
+                await release_account.wait()
+            yield
+
+        async def collector(item):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0)
+                if item.media_name == "抖音":
+                    other_finished.set()
+                return successful(item)
+            finally:
+                active -= 1
+
+        request = request_with_items(8)
+        for i, item in enumerate(request.items[:6]):
+            item.media_name = "小红书" if i % 2 else "xhs"
+        try:
+            submitted = await manager.submit(request, collector=collector,
+                proxy_usage_scope=no_proxy_cost, collection_scope=scope)
+            # Old FIFO workers both waited on the account and never reached Douyin.
+            await asyncio.wait_for(other_finished.wait(), 0.5)
+            assert not release_account.is_set()
+            release_account.set()
+            status = await finish(manager, submitted.job_id)
+            results = await manager.get_results(submitted.job_id, cursor=None, limit=20)
+            assert status.progress.success == 8
+            assert len({item.item_id for item in results.data}) == 8
+            assert peak <= 2
+        finally:
+            release_account.set()
+            await manager.aclose()
     asyncio.run(scenario())
 
 
@@ -286,4 +379,52 @@ def test_cancellation_finishes_inflight_result_write_before_restart() -> None:
         assert status.completed == 1
         assert len(await repository.get_results(submitted.job_id, 0, 10)) == 1
 
+    asyncio.run(scenario())
+
+
+def test_platform_pacing_wait_does_not_reserve_global_capacity():
+    async def scenario():
+        service = EngagementService(CapacityCrawler(), collection_max_concurrency=1,
+            platform_policies={'xiaohongshu':PlatformTrafficPolicy(1,1), 'douyin':PlatformTrafficPolicy(1,0)})
+        pacing_started = asyncio.Event()
+        release = asyncio.Event()
+        class Limiter:
+            async def acquire(self):
+                pacing_started.set()
+                await release.wait()
+        service._platform_rate_limiters[('xiaohongshu','comments')] = Limiter()
+        async def slow():
+            async with service.collection_slot('小红书','comments'):
+                pass
+        task = asyncio.create_task(slow())
+        try:
+            await pacing_started.wait()
+            async with asyncio.timeout(.5):
+                async with service.collection_slot('抖音','interactions'):
+                    assert not release.is_set()
+            release.set()
+            await task
+        finally:
+            release.set()
+            await task
+            await service.aclose()
+    asyncio.run(scenario())
+
+
+def test_publisher_aliases_share_concurrency_budget():
+    async def scenario():
+        service = EngagementService(CapacityCrawler(),collection_max_concurrency=8,
+            platform_policies={'sohu':PlatformTrafficPolicy(2,0),'sohu_news':PlatformTrafficPolicy(2,0)})
+        active = peak = 0
+        async def collect(media):
+            nonlocal active,peak
+            async with service.collection_slot(media,'interactions'):
+                active+=1
+                peak=max(peak,active)
+                await asyncio.sleep(.001)
+                active-=1
+        try:
+            await asyncio.gather(*(collect('搜狐号' if i%2 else '搜狐网') for i in range(12)))
+            assert peak==2
+        finally:await service.aclose()
     asyncio.run(scenario())

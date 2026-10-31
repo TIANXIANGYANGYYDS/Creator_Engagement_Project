@@ -130,19 +130,6 @@ python -m app.manually_execute_script.bootstrap_xiaohongshu_guest \
 - Frida 17.18.0 客户端和 Android server 的连接已验证，可以列举模拟器进程；未观察到稳定运行的小红书 App 进程，尚未抓取到原生详情/评论响应。
 - 当前限制属于本机动态分析环境，不是“小红书游客必须登录”的证据。后续应先解决原生 App 稳定运行，再比较客户端与协议请求。
 
-### 用户指定技能的安装与调用
-
-已安装用户指定的 [zhaoxuya520/reverse-skill](https://github.com/zhaoxuya520/reverse-skill)，固定源码提交 `7e2097fd90d25c2f976f6eba26d6c00aa88051df`。
-
-- Codex 入口：`/home/txy/.codex/skills/reverse-skill-router/SKILL.md`。
-- 完整仓库：`/home/txy/.codex/vendor/reverse-skill`。
-- 已在 `/home/txy/.codex/AGENTS.md` 写入 App 逆向时使用该技能的用户偏好，并提供完整仓库路径。
-- Codex `skills/list` 实测返回 `enabled: true`、`scope: user`，无发现错误。
-- 当前任务实际路由到 `skills/apk-reverse/SKILL.md`；仓库自带的 175 个路由用例和默认输出目录回归全部通过。
-- 已生成工具索引并加载 APK 工作流；此次安装没有额外注册 MCP 服务。
-
-技能安装记录位于 `.local/analysis/reverse-skill-install/installation.json`，任务范围记录位于 `.local/analysis/native-bootstrap-20260920/work/xhs-guest/scope.md`。技能可用与业务采集成功是两个独立验收项，后者仍未通过。
-
 ## 对之前结论的限定
 
 之前无 token 小红书链接失败、公众号验证码和视频号客户端跳转页不含统计，属于已测试网页及会话桥路径的结果，不能据此断言 App 游客也无法读取。

@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # accepting their DNS-resolved address. TLS still authenticates the URL host.
 RESOLVED_PROXY_HOSTS = frozenset({
     "edith.xiaohongshu.com", "res.wx.qq.com", "webapi.rednote.com",
+    "i.news.qq.com",
 })
 
 

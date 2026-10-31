@@ -1,466 +1,79 @@
-# Creator Engagement Project
+# Creator Engagement
 
-根据公开内容 URL 获取互动量和一级评论的独立项目。当前部署
-运行于 `MyAgent`（Python 3.13.12），采用协议优先、浏览器兜底、代理池复用和企业级重试。
+按内容 URL 采集公开互动量与一级评论。协议请求优先，必要时使用现有 Camoufox 兜底；未公开数据返回 `null`，不把访问失败或空页面伪装成零值。
 
-项目当前支持九个渠道：抖音、今日头条、微信（微信公众号）、微信视频号、小红书、好看视频、
-快手、哔哩哔哩和微博。微信公众号与微信视频号是两个不同的平台适配器。
+当前注册 **61 个规范媒体来源**，不同来源可能共享同一协议，也可能只支持部分字段。每一个采集器、字段和评论限制统一维护在 [平台清单](docs/PLATFORM_SUPPORT.md)。历史 20,000 条数据的前 80 名及最新批次长尾缺口见 [覆盖与待办](docs/PLATFORM_BACKLOG.md)，本轮修复、回放和并发实测见 [2026-10-31 验收](docs/PLATFORM_EXPANSION_2026-10-31.md)。
 
-## 当前业务边界
-
-默认配置为 `STRICT_ANONYMOUS_MODE=true`，生产流程遵守以下约束：
-
-- 服务本身不执行人工登录、扫码或验证码；小红书游客浏览器可读取首批公开评论，深分页需要
-  部署方显式提供已有账号 Cookie。
-- 不依赖其他项目或缓存型数据服务；无法从平台实时协议取得的数据会明确返回失败。
-- 历史账号 Cookie、公众号凭据、微信侧车和账号 Profile 均被忽略；只有显式启用的
-  `XIAOHONGSHU_SESSION_MODE=cookie|stored` 可以注入小红书专用账号会话。
-- 只获取一级评论正文，不获取评论下的回复正文。
-- 评论对象中的 `replies` 仅表示平台返回的回复数量，不会触发额外请求。
-- “全部评论”指当前会话能顺序访问的全部一级评论；小红书匿名游客通常只开放首批。结果不包含
-  删除、隐藏、审核折叠或其他不可见内容。
-
-当前一级评论能力：
-
-| 平台 | 互动量 | 一级评论正文 | 一级评论分页 |
-|---|---|---|---|
-| 抖音 | 匿名协议可用 | 可用 | 可翻到公开末游标 |
-| 今日头条 | 可用，部分文章受 SSR 挑战影响 | 可用 | 可按 offset 翻到公开末页 |
-| 微信（微信公众号） | 严格匿名模式不可稳定获取 | 不可用 | 不适用 |
-| 微信视频号 | `sph/eid` 匿名可用；客户端 `feedID` 需要授权侧车 | 无账号不可用；授权侧车可用 | 授权侧车按 `lastBuffer` 翻页 |
-| 小红书 | 带有效 `xsec_token` 的 URL 可匿名获取 | 匿名首批可用；Cookie 模式可深分页 | 匿名通常仅首批；Cookie 模式按 cursor 翻页 |
-| 好看视频 | 可用，未公开字段保持 `null` | 可用 | 可按页翻到公开末页 |
-| 快手 | 自动游客状态可用 | 可用 | 可按游标翻到公开末页 |
-| 哔哩哔哩 | 视频、专栏和 Opus 可用 | 可用 | 可翻到公开末页 |
-| 微博 | 访客公开字段可用 | 可用 | 可翻多页，但不能保证到底 |
-
-互动接口接受小红书 `/discovery/item/{id}` 原始链接，内部转换为网页详情地址并保留已有查询参数。
-无有效 `xsec_token` 的链接仍可能无法取得目标笔记；识别出作品 ID 不等于采集成功。
-公众号 `http://mp.weixin.qq.com/...` 在内部使用 HTTPS 请求，调用方无需修改原始 URL。
-当公众号页面明确下发正数的精选评论总数时，即使没有阅读量或点赞数，也会返回评论计数，
-其余字段为 `null`；页面未下发计数或仅有零值占位时不会推断评论数为 0。
-精选评论计数不代表全部投稿留言数。仅返回一个有效互动字段也算成功。
-
-上述能力描述针对当前已实现的获取路径。网页失败不代表 App 游客路径不可行；
-App 签名、设备会话与微信客户端方案的实测进展见 [App 路径研究](docs/APP_INTERACTION_RESEARCH_2026-09-20.md)。
-2026-09-20 续测仍未从样例中的这三个平台原始 URL 取得互动字段；一次无账号浏览器取得了
-原始公众号正文及评论参数，但评论接口仍返回 `no session`，后续正文复测也未稳定成功。
-9 月 21 日已部署小红书统计归属校验及代理静态资源恢复修复；当时候选版本回归
-为 372 passed、22 skipped。该版本还支持公众号新版页脚中的赞、推荐、
-收藏等计数，并区分空值与真实零值；这项解析修复不代表原始样例已能取得上游计数。
-App 与网页联合分析的实测结果及限制见上述研究记录的续测部分。
-2026-10-11 的抖音修复自动建立代理绑定的匿名访客会话，补齐 UIFID 与 Web 签名；
-临时失败最多尝试两次，明确的 Argus 拒绝不重试，批量任务持续拒绝时提前停止。
-具体故障证据、恢复验证及原批次补采结果见 [事故报告](docs/incident-2026-10-10-douyin.md)。
-后续验证已能无账号读取原始公众号的公开合集及其文章链接，并取得一篇原始文章正文；
-8 个不同公众号样例的扩展信息、合集条目仍未提供单篇互动计数。网页游客调用小红书
-App 详情/评论路径也仍无数据，尚未形成新的生产采集路径。
-
-小红书匿名游客属于首批公开评论能力；页面要求登录后会停止，不会伪造深分页。微博已经验证
-能够获取第二页，但更深页可能触发 `ok=-100`、登录跳转或风控，因此不能承诺全部。
-
-哔哩哔哩页面的评论总数可能包含评论下的回复数量，所以一级评论行数少于 `total_comments`
-不一定表示漏页。哔哩哔哩直播不在业务范围内，`live.bilibili.com` 会在请求上游前被拒绝。
-
-## 对外接口
-
-服务提供异步批量任务、同步兼容批量和两个单项接口：
+## 接口
 
 ```text
-POST /api/v1/jobs
-GET  /api/v1/jobs/{job_id}
-GET  /api/v1/jobs/{job_id}/results
-POST /api/v1/collect
-GET  /api/v1/interactions?url=<URL>&media_name=<MEDIA>
-GET  /api/v1/comments?url=<URL>&media_name=<MEDIA>
-GET  /api/v1/comments?url=<URL>&media_name=<MEDIA>&page=1
+POST /api/v1/jobs                         提交大批量任务
+GET  /api/v1/jobs/{job_id}                 查询进度
+GET  /api/v1/jobs/{job_id}/results         按 cursor 读取结果
+POST /api/v1/collect                      同步小批量兼容入口
+GET  /api/v1/interactions                 单篇互动量
+GET  /api/v1/comments                     一级评论
+GET  /api/v1/health                       服务状态与注册平台
 ```
 
-另有健康检查：
-
-```text
-GET /api/v1/health
-```
-
-完整的请求参数、字段定义、错误响应和调用示例见 [API 接口文档](docs/API.md)。服务启动后也
-可以访问 `/docs`、`/redoc` 或 `/openapi.json` 查看 FastAPI 自动生成的接口定义。
-
-互动量与评论是两个独立业务请求，分别执行并分别缓存。一个代理 IP 可以在有效期内承载多个
-HTTP 请求；复用同一个 IP 不等于把互动量和评论合并成一次上游请求。
-
-内部平台标识为：
-
-```text
-douyin / toutiao / wechat / wechat_channels / xiaohongshu /
-haokan / kuaishou / bilibili / weibo
-```
-
-接口也接受抖音、头条、微信、微信公众号、微信视频号、小红书、好看、快手、哔哩哔哩、
-B站和微博等中文名称。所有业务响应中的 `media_name` 统一为规范中文值：抖音、今日头条、
-微信公众号、微信视频号、小红书、好看视频、快手、哔哩哔哩、微博。
-服务会同时校验 URL 平台和 `media_name`；两者不一致时，单项接口返回 HTTP 422，批量接口
-把对应项标为 `failed` 并继续处理其他项。
-
-视频号同时接受公开 `weixin.qq.com/sph/...`、`finder-preview/pages/sph|feed`，以及业务文件中的
-`mobile/commonFinderJsApi.html?...extInfo.feedID=export/...`。最后一种链接不公开视频数据，互动量和
-评论正文都需要按 [视频号授权侧车文档](docs/WECHAT_CHANNELS_BRIDGE.md) 部署 Windows 微信客户端；
-未配置侧车时接口会明确失败，不会使用外部缓存补数。
-
-新接入的外部服务推荐调用 `POST /api/v1/jobs`。异步请求的每一项包含调用方唯一 `item_id`、
-`url`、`media_name`、`type` 和可选 `page`；提交后立即返回 `job_id`，调用方查询任务进度并按
-cursor 分页读取已完成结果。任务和结果使用项目专用 MongoDB 持久化，默认保留 24 小时。可选
-`Idempotency-Key` 防止提交重试造成重复任务，也可配置 HTTPS Webhook 接收结束通知。
-原始条目单独持久化到 `job_requests`，服务重启后自动续跑未完成条目，保留已有结果和分页顺序。
-主动取消的任务不会自动恢复；调用方可通过 `POST /api/v1/jobs/{job_id}/resume` 显式续跑中断任务。
-
-单条 90 秒执行预算在取得平台和全局采集槽位后开始，排队不占用这段预算。整批默认每 500 条
-给予 1800 秒，向上取整：2615 条允许执行 10800 秒。原始输入、任务和结果在任务结束后保留
-24 小时；续跑时重新计算保留期。部署升级前未保存原始条目的历史 MongoDB 任务需要调用方
-提供原始未完成条目重新提交。
-
-`POST /api/v1/collect` 继续同步返回，保留给已有调用和耗时可控的小批次。同步与异步接口
-默认均不限制条目总数，5925 条可一次提交；实际采集仍受 worker、平台和全局并发限制。
-同步整体等待上限为 120 秒，包含排队、重试和评论分页，超时返回 504 并提示使用异步任务。
-如需限制条目数，可将 `JOB_MAX_ITEMS` 或 `API_SYNC_MAX_ITEMS` 从 `0` 改为正整数。
-所有 HTTP 响应带 `X-Request-ID`，可用它关联持久化请求日志、参数校验失败和任务提交记录。
-
-所有批量结果统一使用规范中文媒体名，评论字段为 `comments`。项目 `status` 只使用 `success`
-或 `failed`，`complete` 单独表示是否覆盖了调用方请求的完整范围。平台没有公开的字段为
-`null`；任务结束后返回总耗时 `duration_ms` 和本任务触发新增代理 IP 的采购成本
-`cost_yuan`。
-
-### 调用示例
-
-提交异步批量任务：
+单篇请求只需 `url` 和 `media_name`。评论不传 `page` 时尝试合并当前可访问的全部一级评论；传 `page=N` 时读取指定页。每页条数由上游决定；回复仅返回数量，不展开正文。任务结果的 `item_id` 用于关联调用方原始数据。
 
 ```bash
-curl -X POST 'http://39.106.202.228:8200/api/v1/jobs' \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: business-batch-001' \
-  -d '{
-    "items": [{
-      "item_id": "row-001-comments",
-      "url": "<内容 URL>",
-      "media_name": "抖音",
-      "type": "comments"
-    }]
-  }'
-```
-
-使用响应中的 `job_id` 查询进度和结果：
-
-```bash
-curl 'http://39.106.202.228:8200/api/v1/jobs/<job_id>'
-curl 'http://39.106.202.228:8200/api/v1/jobs/<job_id>/results?limit=100'
-```
-
-结果按完成顺序返回，调用方用 `item_id` 关联原始记录，并将 `next_cursor` 原样传给下一次结果
-请求。任务结束且结果读完后，`next_cursor` 为 `null`。完整流程和响应示例见
-[API 接口文档](docs/API.md)。
-
-互动量：
-
-```bash
-curl --get 'http://39.106.202.228:8200/api/v1/interactions' \
-  --data-urlencode 'url=<内容 URL>' \
-  --data-urlencode 'media_name=抖音'
-```
-
-全部可获取的一级评论：
-
-```bash
-curl --get 'http://39.106.202.228:8200/api/v1/comments' \
-  --data-urlencode 'url=<内容 URL>' \
-  --data-urlencode 'media_name=抖音'
-```
-
-只获取一级评论第 1 页：
-
-```bash
-curl --get 'http://39.106.202.228:8200/api/v1/comments' \
-  --data-urlencode 'url=<内容 URL>' \
-  --data-urlencode 'media_name=抖音' \
+curl -G 'http://127.0.0.1:8200/api/v1/comments' \
+  --data-urlencode 'media_name=选车网' \
+  --data-urlencode 'url=https://www.chooseauto.com.cn/news/1040092.shtml' \
   --data-urlencode 'page=1'
 ```
 
-不传 `page` 时，服务从第 1 页顺序获取到当前可见末页、按评论 ID 去重后一次返回。传入
-`page=N` 时只获取第 N 页，每页最多 20 条，不包含前面页面。默认全量过程中如果深页触发
-平台风控，返回此前已经验证的数据；如果第一页就不可用则返回 HTTP 502。默认全量请求耗时
-随评论页数增加，下游需要固定延迟时应显式传入 `page`。
+- [评论接口 IO](docs/COMMENTS_API_IO.md)：可交给调用方的入参、出参和错误示例。
+- [完整 API](docs/API.md)、[快速调用](docs/API_QUICKSTART.md)：批量、分页、幂等、结果语义。
+- [作者作品 API](docs/AUTHOR_CONTENT_API.md)：与互动/评论不同的业务入口，支持范围独立。
+- 运行中的 `/docs`、`/openapi.json` 提供接口定义。参数错误返回 422；上游无法提供可用数据时返回 502；批量逐项保留失败原因。
 
-### 响应语义
+## 会话和代理
 
-两个单项接口都返回规范中文 `media_name`。互动量响应：
+默认 `STRICT_ANONYMOUS_MODE=true`、`PROXY_MODE=required`。普通目标请求复用项目代理池及租约，没有代理时明确失败。微信公众号与视频号的匿名评论能力受限，配置其他渠道的账号不能消除它们的会话要求。
 
-```json
-{
-  "media_name": "抖音",
-  "data": {
-    "views": 100,
-    "likes": 20,
-    "comments": 5,
-    "shares": 2,
-    "favorites": 3,
-    "coins": null,
-    "danmaku": null,
-    "reposts": null,
-    "recommendations": null
-  }
-}
-```
+小红书保留已有真实账号和专用会话进程，固定使用本机出口 IP，不使用代理池。调用方仍只传 URL，访问参数恢复在服务内部进行，不要求调用方提交作者信息。已有登录不保证每个裸 URL 都能恢复：缺少可核验线索、作品不可见、参数失效时会明确报错。当前部署为账号单并发、每次上游请求结束后至少间隔 15 秒；本轮没有扩大这部分流量，也没有重新登录或替换账号。
 
-评论响应：
+普通平台可以同时执行，但还受全局、平台共享协议、代理和浏览器容量限制。当前部署保留全局 8、代理池 8、单 IP 并发 1、普通发布方并发 1。已验证提高单 IP/平台并发会降低本轮样本成功率，因此没有直接放大线上值。调度改进使慢平台限速等待不会占满整批 worker；同一出版方的多个别名共用上游预算。详见 [执行流程](docs/PLATFORM_FLOWS.md) 与 [成本和并发](docs/COST_AND_CAPACITY.md)。
 
-```json
-{
-  "media_name": "抖音",
-  "comments": [
-    {
-      "comment_id": "123",
-      "author": "用户昵称",
-      "text": "一级评论正文",
-      "created_at": "2026-08-25T03:20:31Z",
-      "likes": 2,
-      "replies": 1
-    }
-  ]
-}
-```
+## 安装、运行和验证
 
-采集来源、覆盖状态、重试次数和能力说明仍保留在内部结果与日志中，不再要求下游消费。
-参数或 URL 不合法返回 HTTP 422；没有任何可用数据、平台拦截或协议失败返回 HTTP 502。
-
-## 安装和启动
-
-项目不使用 Python 3.8。安装和运行统一使用 `MyAgent`：
+使用 Python 3.11+；当前机器统一使用 `MyAgent` 环境。
 
 ```bash
-cd /home/txy/Agent_first/Creator_Engagement_Project
 conda run -n MyAgent python -m pip install '.[browser,test]'
-```
-
-创建本地配置：
-
-```bash
 mkdir -p .local/env
 cp .env.example .local/env/.env
+conda run -n MyAgent uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8200
 ```
 
-启动 API：
+已有部署不要覆盖 `.local/env/.env`。配置字段与默认值以 [.env.example](.env.example) 和 [config.py](app/core/config.py) 为准，生产差异及重启步骤见 [部署说明](DEPLOYMENT.md)。
 
 ```bash
-conda run -n MyAgent uvicorn app.api.app:create_app \
-  --factory --host 0.0.0.0 --port 8200
-```
-
-`0.0.0.0` 是服务端监听地址，调用方不能把它当作目标地址。当前公网调用地址为
-`http://39.106.202.228:8200`，同一内网也可以使用 `http://10.0.0.45:8200`。TCP 8200 已
-实测可从公网访问；当前接口没有业务鉴权，建议在云安全组中只允许下游服务器的来源 IP。
-
-也可以直接使用 CLI：
-
-```bash
+conda run -n MyAgent python -m pytest -q
 conda run -n MyAgent creator-engagement interactions '<内容 URL>' bilibili
 conda run -n MyAgent creator-engagement comments '<内容 URL>' 哔哩哔哩 --page 1
 ```
 
-CLI 与 API 使用相同的强制代理配置；不提供绕过代理的直连参数。
+自动化用例验证字段归属、空值、分页、会话、缓存、调度和持久化；实网采集需单独检查业务结果，HTTP 200 不等于成功。最新测试结果见 [测试报告](docs/TEST_REPORT.md)。诊断脚本关闭外部状态告警，原始响应和含会话材料只放 `.local/analysis/`。
 
-## 配置、代理和稳定性
+## 代码与文档入口
 
-运行配置读取自 `.local/env/.env`，完整模板见 `.env.example`。当前主要配置：
+| 位置 | 职责 |
+|---|---|
+| `app/api/` | 参数校验、响应格式、任务与健康接口 |
+| `app/models/` | API 与内部结果模型 |
+| `app/services/engagement_service.py` | 并发、限速、缓存、重复请求合并 |
+| `app/services/job_service.py` | 批任务调度、超时、取消/恢复、结果持久化 |
+| `app/repositories/` | MongoDB/SQLite 存储 |
+| `app/crawlers/engagement.py` | 平台执行、重试、熔断、评论遍历和兜底 |
+| `app/crawlers/platforms/` | [逐来源实现清单](docs/PLATFORM_SUPPORT.md) |
+| `app/crawlers/http_client.py`、`proxy_provider.py` | HTTP 请求、代理租约、复用与故障处理 |
+| `app/crawlers/xiaohongshu_session.py`、`xiaohongshu_url_resolver.py` | 已有账号会话和 URL 内部恢复 |
+| `app/manually_execute_script/` | 运维/诊断 CLI，不作为新采集协议的放置目录 |
+| `tests/` | 自动化回归 |
+| `docs/` | [文档索引](docs/INDEX.md)、当前规范与带日期的历史证据 |
 
-| 配置项 | 默认值 | 作用 |
-|---|---:|---|
-| `STRICT_ANONYMOUS_MODE` | `true` | 禁止复用账号 Cookie、凭据、侧车和历史账号 Profile |
-| `XIAOHONGSHU_SESSION_MODE` | `disabled` | `cookie` 读取静态 Secret；`stored` 动态读取本地已保存的小红书登录态 |
-| `XIAOHONGSHU_COOKIE` | 空 | `cookie` 模式使用的小红书 Secret，必须包含非空 `a1` 和 `web_session` |
-| `WECHAT_CHANNELS_BRIDGE_URL` | 空 | 授权视频号侧车地址；客户端 `feedID` 评论正文需要配置 |
-| `WECHAT_CHANNELS_BRIDGE_TOKEN` | 空 | 视频号侧车鉴权令牌 |
-| `PROXY_MODE` | `required` | 所有目标平台采集流量强制使用代理；无可用代理时明确失败，禁止本机直连 |
-| `PROXY_51_API_URL` | 空 | 51 代理供应接口 |
-| `PROXY_POOL_SIZE` | `8` | 代理池目标数量 |
-| `PROXY_MAX_CONCURRENCY` | `1` | 单个代理的最大并发 |
-| `JOB_MAX_CONCURRENCY` | `2` | 同时运行的异步批量任务数 |
-| `JOB_ITEM_MAX_CONCURRENCY` | `16` | 每个任务最多保持的活跃项目 worker 数 |
-| `JOB_ITEM_TIMEOUT_SECONDS` | `90` | 单个异步项目的协议排队和执行上限；熔断冷却发生在计时之外 |
-| `JOB_TIMEOUT_SECONDS` | `1800` | 每个时限分组的执行秒数；0 关闭整批时限 |
-| `JOB_TIMEOUT_BATCH_SIZE` | `500` | 按总条目数向上取整分组，整批时限为分组数乘基准秒数，最多 24 小时 |
-| `REQUEST_CONNECT_TIMEOUT_SECONDS` | `5` | 单次连接建立上限，不改变整个 HTTP 请求的 20 秒上限 |
-| `API_SYNC_TIMEOUT_SECONDS` | `120` | 同步采集 API 总时限，包含排队、重试和分页，超时返回 504 |
-| `API_SYNC_MAX_ITEMS` | `0` | 同步 `/collect` 条目上限，0 表示不限制；大批量建议使用 `/jobs` |
-| `JOB_RESULT_TTL_SECONDS` | `86400` | 已结束异步任务和结果的保留秒数 |
-| `JOB_STORE_BACKEND` | `mongodb` | 任务存储；可显式切为 `sqlite` 回滚 |
-| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB 连接串，只应存放在本地部署配置中 |
-| `MONGO_DB_NAME` | `creator_engagement` | 本项目专用 MongoDB 库名 |
-| `JOB_DB_PATH` | `.local/jobs/jobs.sqlite3` | 使用 `sqlite` 回滚后端时的文件路径 |
-| `JOB_MAX_ITEMS` | `0` | 单个异步任务的可选条目上限，0 表示不限制 |
-| `JOB_RESULT_MAX_BYTES` | `8388608` | 单条异步结果的序列化大小上限（8 MiB） |
-| `JOB_WEBHOOK_ALLOWED_HOSTS` | 空 | 允许接收任务通知的 HTTPS 域名，多个值用逗号分隔 |
-| `JOB_WEBHOOK_TIMEOUT_SECONDS` | `10` | 单次 Webhook 请求超时 |
-| `JOB_WEBHOOK_MAX_ATTEMPTS` | `3` | Webhook 最大尝试次数 |
-| `RELIABILITY_MODE` | `enterprise` | 启用协议重试、语义失败换 IP 和平台保护 |
-| `PROTOCOL_MAX_ATTEMPTS` | `3` | 企业模式最大协议尝试次数 |
-| `TOUTIAO_PROTOCOL_MAX_ATTEMPTS` | `1` | 头条 SSR 能力探测次数；避免确定性空结果重复换 IP |
-| `DOUYIN_PROTOCOL_MAX_ATTEMPTS` | `2` | 抖音临时失败最多尝试两次；明确的 Argus 签名拒绝不重试 |
-| `COLLECTION_MAX_CONCURRENCY` | `8` | 全局采集并发 |
-| `DOUYIN_MAX_CONCURRENCY` | `4` | 抖音平台并发；由 2/4/6 档真实请求对照确定 |
-| `BROWSER_FALLBACK_ENABLED` | `true` | 协议不可用时允许浏览器兜底 |
-| `BROWSER_MAX_CONCURRENCY` | `3` | 浏览器最大并发；每个并发槽使用独立持久化 Profile |
-| `BROWSER_MAX_ATTEMPTS` | `3` | 兜底空结果或阻断时换 IP 再试的次数 |
-| `BROWSER_GEOIP_ENABLED` | `false` | 是否额外查询代理 GeoIP；默认关闭以避免外部探测超时 |
-| `ENGAGEMENT_CACHE_TTL_SECONDS` | `120` | 成功结果缓存时间 |
-| `ENGAGEMENT_FAILURE_CACHE_TTL_SECONDS` | `15` | 临时失败短缓存时间，抑制瞬时重试风暴且允许快速重新采集 |
-| `ENGAGEMENT_CACHE_MAX_ENTRIES` | `1000` | 最大缓存项数 |
-| `ENGAGEMENT_CACHE_MAX_BYTES` | `67108864` | 进程内结果缓存总字节上限（64 MiB） |
-| `CIRCUIT_FAILURE_THRESHOLD` | `24` | 同一平台连续临时失败多少次后触发熔断；相当于抖音并发 4 连续六轮失败 |
-| `CIRCUIT_COOLDOWN_SECONDS` | `20` | 上游熔断冷却秒数 |
-
-代理池支持批量补池、IP TTL、单 IP 并发限制、失败淘汰和供应商 API 限流。一次业务调用内部的
-预热和数据请求可以共用代理租约，但每个 HTTP 调用仍分别计入上游请求量。
-
-默认企业模式最多进行 3 次协议尝试，头条互动 SSR 探测根据实测单独限制为 1 次。协议请求和
-浏览器兜底都使用代理池租约；无可用代理时直接失败，不会回退服务器本机 IP。删除、仅作者可见、
-无查看权限等
-永久状态立即停止。微博视频 `fid` 会先通过公开组件接口映射为真实 MID。HTTP 200 空包、验证码
-或缺少目标字段不会被当作成功；连续临时失败会触发短时平台熔断。熔断期间项目等待冷却后再做
-真实请求；异步任务的冷却等待不占用单项目协议执行超时，也不会把排队中的批量项目直接标记为
-失败。相同接口、相同 URL、相同页码的并发请求会合并，成功或
-有效部分结果和删除、无权限等确定性不可用状态缓存 120 秒；临时失败短缓存 15 秒，防止瞬时重试
-风暴又不会长时间固化可恢复故障。
-
-微博桌面正文和视频使用 `visitor.passport.weibo.cn` 建立匿名访客会话，再在同一代理租约中请求
-公开详情接口。访客 Cookie 只保存在当前进程内存中，不写入日志或磁盘；此链路避免代理供应商
-对 `passport.weibo.com` 的 HTTPS CONNECT 限制，同时仍禁止服务器本机 IP 访问目标平台。
-
-浏览器兜底默认限制为单并发。严格匿名模式下，浏览器和游客状态写入：
-
-```text
-.local/browser-profiles/anonymous/<platform>
-.local/platform-sessions/anonymous/<platform>.json
-```
-
-公众号和微信视频号评论不会通过历史账号 Profile 或浏览器登录绕过严格匿名边界。小红书可由
-浏览器自动建立游客状态并模拟滚动读取首批公开评论；不会自动登录。显式配置的账号 Cookie
-只发送给 `edith.xiaohongshu.com` 评论接口，且不会出现在日志、错误原因或 API 响应中。抖音签名、
-哔哩哔哩 WBI 密钥以及快手短期游客状态均在运行时生成，不应硬编码到源码或日志。
-
-视频号客户端 `feedID` 链接的互动量和评论正文都需要把 `STRICT_ANONYMOUS_MODE` 设为 `false`
-并配置授权侧车。没有授权客户端时，主服务返回明确失败；主服务不接收微信密码、扫码结果或
-Cookie，也不查询其他项目的数据服务。具体客户端路径见
-[视频号授权侧车文档](docs/WECHAT_CHANNELS_BRIDGE.md)。
-
-启用小红书评论深分页：
-
-```dotenv
-XIAOHONGSHU_SESSION_MODE="cookie"
-XIAOHONGSHU_COOKIE="a1=<设备会话>; web_session=<账号会话>; ..."
-```
-
-不想反复复制 Cookie 时，可在可见浏览器中完成一次登录并保存会话。无图形界面的 Linux
-服务器可加 `--headless`，在 VS Code 打开 `.local/analysis/xhs-login-qr.png` 扫码确认；
-命令会刷新页面核验账号状态后自动保存：
-
-```bash
-conda run -n MyAgent creator-engagement-login xiaohongshu
-conda run -n MyAgent creator-engagement-login xiaohongshu --headless
-conda run -n MyAgent creator-engagement-login xiaohongshu --headless --check-only
-```
-
-随后在 `.local/env/.env` 设置 `XIAOHONGSHU_SESSION_MODE="stored"` 并重启 API。服务会在每次
-评论请求时重新读取 `.local/platform-sessions/xiaohongshu.json` 中未到期、且适用于小红书评论
-域名的 Cookie；更新该文件无需重启。该文件及浏览器 Profile 位于 Git 忽略的 `.local/` 下，
-必须限制其他用户读取。`--check-only` 可用已有浏览器资料目录核验并续存登录态，失效时立即
-退出，不要求扫码。保存会话避免每次采集重新登录；平台使会话失效或要求安全验证时，仍需重新
-授权，不能保证永久登录。服务会在评论请求中报告失效，不把缺失评论当作零条。
-当前 Linux 服务器已配置每小时第 15 分钟运行一次无扫码续存检查；结果记录在
-`.local/analysis/xhs-session-health.json`，`status=valid` 表示当次核验通过，
-`reauthorization_required` 表示需要重新扫码。定时检查不能覆盖平台主动撤销登录。
-小红书采集会优先复用同一条有效代理租约；当前代理最长约 3 分钟，过期或请求失败后仍会换 IP。
-服务器扫码登录的浏览器与 API 代理出口目前也不一致，因此不能据此承诺账号长期不掉线。
-
-业务文件 `.local/top20_platform_data.json` 中的小红书 589 行（588 个不同笔记）全部是无
-`xsec_token` 的 `/discovery/item/{id}` 链接。当前互动、评论和任务 API 均直接接受原始 URL；
-服务根据来源文件中的作者 ID 精确解析账号，或根据作者名检索候选账号，再通过目标笔记 ID
-核验归属，取得 token 后采集。结果缓存 30 分钟。作者资料缺失、作品不可见或登录失效时返回
-明确失败，不能保证全部历史链接都可恢复。已用授权账号验证原始链接的互动与评论。
-线上小批任务曾完成 4/4 项；在代理亲和改动前扩大到 20 项后仅 5 项成功，随后浏览器核验
-确认登录态失效。代理亲和改动尚未在重新授权后的线上批次验证。
-当前不能把这批 588 个笔记视为已经稳定覆盖，重跑需先恢复授权并验证账号与代理的稳定性。
-也可提前执行批处理命令：
-
-```bash
-conda run -n MyAgent python -m app.manually_execute_script.backfill_xiaohongshu_urls
-```
-
-命令把补齐的 URL 写到 `.local/top20_platform_data_xhs_enriched.json`，不改原文件，
-处理进度和失败原因写到同目录的 `-status.json`。初次可加 `--max-authors 5` 小批验证；
-重复运行会跳过已完成作者。文件中 32 行缺少作者 ID，运行时只在目标笔记确实出现在同名
-账号的作品列表时才采信，不能仅凭昵称认定归属。
-
-## 项目结构
-
-```text
-app/api/                         HTTP 路由和参数校验
-app/core/                        配置与日志
-app/models/engagement.py         统一响应模型
-app/services/engagement_service.py
-                                 缓存、并发、代理和业务服务
-app/services/job_service.py       异步任务调度、持久化、分页和 Webhook
-app/repositories/                 MongoDB/SQLite 任务存储适配器
-app/crawlers/engagement.py       URL 校验、平台路由和浏览器兜底
-app/crawlers/comment_capabilities.py
-                                 九个平台一级评论能力定义
-app/crawlers/platforms/          每个平台独立协议实现
-app/crawlers/browser_fallback.py Camoufox 浏览器兜底
-app/crawlers/proxy_provider.py   代理池和限流
-tests/                           自动化测试
-docs/                            流程、协议、成本和测试报告
-```
-
-平台文件相互独立：
-
-```text
-douyin.py / toutiao.py / wechat.py / wechat_channels.py /
-xiaohongshu.py / haokan.py / kuaishou.py / bilibili.py / weibo.py
-```
-
-## 验证
-
-当前全量自动化结果：
-
-```text
-250 passed, 3 skipped
-ruff check app tests: All checks passed
-```
-
-开启隔离集合的 MongoDB 集成测试时，`CREATOR_RUN_MONGO_TESTS=1 pytest -q` 为 253 passed。
-
-本地复验：
-
-```bash
-conda run -n MyAgent pytest -q
-conda run -n MyAgent ruff check app tests
-conda run -n MyAgent python -m compileall -q app tests
-```
-
-## 详细文档
-
-- [API 接口文档](docs/API.md)
-- [九个平台独立执行流程](docs/PLATFORM_FLOWS.md)
-- [协议能力矩阵](docs/PROTOCOL_MATRIX.md)
-- [浏览器兜底边界](docs/BROWSER_FALLBACK.md)
-- [成本、容量与服务器保护](docs/COST_AND_CAPACITY.md)
-- [HTML 成本单](docs/ENGAGEMENT_COST_SHEET.html)
-- [真实测试报告](docs/TEST_REPORT.md)
-
-历史账号、公众号 Cookie、官方自有号和微信客户端侧车相关文档仅用于兼容代码维护；默认严格
-匿名部署不会启用这些能力，也不应把它们计入当前生产成功率。
-
-## 作者 UID 内容采集
-
-新增 `/api/v1/authors/works` 单页接口和 `/api/v1/authors/jobs` 历史遍历任务，接收 `author_id`、`media_name`，支持单个对象或数组批量提交、同批作者去重，返回视频公开文案/链接和文章正文。支持抖音、快手、微博、B站、小红书、今日头条，兼容新浪博客；作者任务按“列表发现 + 多代理并发详情”执行，不限制作品总数，失败详情可以独立续跑。支持范围、分页及覆盖限制见 [作者内容 API](docs/AUTHOR_CONTENT_API.md)。
-
-作者采集默认 `AUTHOR_GUEST_ONLY=true`：忽略全部作者账号 Cookie、历史浏览器登录状态和 localStorage，只使用当前代理下自动建立的访客会话。列表临时失败后从持久化游标自动重试，等待时释放并发资源，状态提供 `phase=retry_wait`、`retry_count` 和 `next_retry_at`。不设置代理消耗总额或作品总数上限；单次任务执行窗口为 24 小时，超时保留结果并允许续跑。六个平台的完整历史采集尚未全部通过无账号实测；B 站部署后的两位作者任务已分别保存 180/143 条视频，323 条详情全部完成。见 [自动 Cookie 版本验收](docs/AUTHOR_AUTO_SESSION_2026-09-19.md)，此前结果见 [v6 访客验收](docs/AUTHOR_GUEST_2026-09-19.md)。
-
-需要运行 App/Frida 等高开销诊断时，用 `python -m app.manually_execute_script.run_limited_analysis -- COMMAND ...` 启动。它对整个分析进程树默认设置 5,000,000,000 字节内存上限、禁止 swap、最多 10 个 CPU 核，并在 API 健康状态或主机余量异常时停止实验；常驻 8200 服务不受该命令的 cgroup 影响。轻量下载或静态分析可用 `--memory-mb 512` 下调额度（十进制 MB，范围 128–5000）；启动检查按所选额度额外保留 2 GiB 主机内存，不能通过该参数提高 5 GB 硬上限。
+历史报告保留原日期；当前平台范围统一以平台清单和运行中的健康接口为准。
