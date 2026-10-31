@@ -1404,7 +1404,7 @@ def test_weibo_filtered_comments_are_a_confirmed_empty_public_page() -> None:
             '{"sub":"guest-sub","subp":"guest-subp"}});'
         )),
         FakeResponse(payload={
-            "idstr": "5336877450135446",
+            "idstr": "5337024926322614",
             "mblogid": "RfxbCqwNE",
             "comments_count": 1,
         }),

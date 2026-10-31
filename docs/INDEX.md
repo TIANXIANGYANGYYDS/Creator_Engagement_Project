@@ -9,6 +9,7 @@
 | 历史 20k 前 80 与最近 2000 条缺口 | [覆盖与待办](PLATFORM_BACKLOG.md) |
 | 调度、缓存、代理、会话 | [执行流程](PLATFORM_FLOWS.md)、[协议边界](PROTOCOL_MATRIX.md) |
 | 最新修复和实网验收 | [2026-10-31 扩展验收](PLATFORM_EXPANSION_2026-10-31.md) |
+| 最新评论诊断与修复 | [2026-11-01 微博 / B 站修复及外部请求复核](INCIDENT_2026-11-01_COMMENTS.md) |
 | 并发/IP 成本 | [成本和容量](COST_AND_CAPACITY.md) |
 | 本地测试 | [测试报告](TEST_REPORT.md) |
 | 部署和配置 | [部署说明](../DEPLOYMENT.md)、[配置模板](../.env.example) |

@@ -26,12 +26,17 @@ REPLY_WBI_URL = "https://api.bilibili.com/x/v2/reply/wbi/main"
 REPLY_LEGACY_URL = "https://api.bilibili.com/x/v2/reply"
 VIDEO_VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
 ARTICLE_VIEWINFO_URL = "https://api.bilibili.com/x/article/viewinfo"
+OPUS_DETAIL_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/detail"
 WBI_MIXIN_KEY_ENC_TAB = (
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
     27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
     37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
     22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 )
+
+
+class BilibiliUnavailableError(PlatformCrawlerError):
+    """The upstream explicitly identifies a non-public target."""
 
 
 async def fetch(
@@ -96,11 +101,19 @@ async def fetch_video(
             params={"bvid": work_id} if work_id.startswith("BV") else {"aid": work_id},
         )
         data = view.get("data") or {}
+        if view.get("code") == 62012:
+            raise BilibiliUnavailableError("B 站稿件仅 UP 主自己可见（62012）")
         if view.get("code") in {-101, -352, -412, -509}:
             raise PlatformBlockedError(f"bilibili view returned code {view['code']}")
         if view.get("code") != 0 or not data:
-            raise PlatformCrawlerError("bilibili view payload is unavailable")
+            raise PlatformCrawlerError(
+                f"bilibili view payload is unavailable (code={view.get('code')})"
+            )
         actual_id = str(data.get("bvid") or work_id)
+        if (work_id.startswith("BV") and actual_id != work_id) or (
+            not work_id.startswith("BV") and str(data.get("aid")) != work_id
+        ):
+            raise PlatformCrawlerError("bilibili view contains no matching video")
         stat = data.get("stat") or {}
         stats = (
             EngagementStats(
@@ -134,7 +147,10 @@ async def fetch_video(
                 comment_resume_cursor(comments_payload) if cursor is not None else None
             )
             if not include_stats:
-                stats = EngagementStats(comments=comment_count(comments_payload))
+                total = comment_count(comments_payload)
+                stats = EngagementStats(
+                    comments=total if total is not None else to_int(stat.get("reply"))
+                )
         return EngagementResult(
             platform="bilibili",
             canonical_url=f"https://www.bilibili.com/video/{actual_id}",
@@ -153,6 +169,10 @@ async def fetch_video(
             next_cursor=cursor,
             resume_cursor=resume_cursor,
         )
+    except BilibiliUnavailableError as exc:
+        result = result_error("bilibili", url, work_id, "unsupported", exc)
+        result.retryable = False
+        return result
     except PlatformBlockedError as exc:
         return result_error("bilibili", url, work_id, "blocked", exc)
     except Exception as exc:
@@ -241,16 +261,7 @@ async def fetch_opus(
 ) -> EngagementResult:
     try:
         canonical_url = f"https://www.bilibili.com/opus/{opus_id}"
-        response = await crawler._get_response(
-            canonical_url,
-            headers={
-                "Accept": "text/html,application/xhtml+xml",
-                "Referer": "https://www.bilibili.com/",
-            },
-            discard_cookies=True,
-        )
-        state = parse_opus_initial_state(str(getattr(response, "text", "") or ""))
-        detail = state.get("detail") or {}
+        detail, detail_source = await fetch_opus_detail(crawler, canonical_url, opus_id)
         if str(detail.get("id_str") or "") != opus_id:
             raise PlatformCrawlerError("bilibili opus page contains no matching detail")
 
@@ -258,7 +269,7 @@ async def fetch_opus(
         comments: list[EngagementComment] = []
         cursor: str | None = None
         resume_cursor: str | None = None
-        sources = ["opus __INITIAL_STATE__"]
+        sources = [detail_source]
         if include_comments:
             basic = detail.get("basic") or {}
             comment_oid = str(
@@ -279,7 +290,10 @@ async def fetch_opus(
             comments, cursor = parse_comments(payload)
             resume_cursor = comment_resume_cursor(payload) if cursor is not None else None
             if not include_stats:
-                stats = EngagementStats(comments=comment_count(payload))
+                total = comment_count(payload)
+                stats = EngagementStats(
+                    comments=total if total is not None else parse_opus_stats(detail).comments
+                )
             sources.append(comment_source)
 
         return EngagementResult(
@@ -298,10 +312,56 @@ async def fetch_opus(
             next_cursor=cursor,
             resume_cursor=resume_cursor,
         )
+    except BilibiliUnavailableError as exc:
+        result = result_error("bilibili", url, opus_id, "unsupported", exc)
+        result.retryable = False
+        return result
     except PlatformBlockedError as exc:
         return result_error("bilibili", url, opus_id, "blocked", exc)
     except Exception as exc:
         return result_error("bilibili", url, opus_id, "failed", exc)
+
+
+async def fetch_opus_detail(
+    crawler: PlatformCrawlerContext, canonical_url: str, opus_id: str,
+) -> tuple[dict[str, Any], str]:
+    try:
+        response = await crawler._get_response(
+            canonical_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "Referer": "https://www.bilibili.com/",
+            },
+            discard_cookies=True,
+        )
+        state = parse_opus_initial_state(str(getattr(response, "text", "") or ""))
+    except PlatformCrawlerError:
+        # An HTTP 404/challenge page does not prove the target is unavailable.
+        # Ask the official detail API with a guest device on this same lease.
+        headers = {"Referer": canonical_url, "Cookie": ""}
+        spi = await crawler._get_json(
+            "https://api.bilibili.com/x/frontend/finger/spi", headers=headers,
+        )
+        device = spi.get("data") or {}
+        if spi.get("code") != 0 or not device.get("b_3"):
+            raise PlatformCrawlerError("B 站访客设备会话初始化失败")
+        headers["Cookie"] = "; ".join(
+            f"{name}={device[field]}"
+            for name, field in (("buvid3", "b_3"), ("buvid4", "b_4"))
+            if device.get(field)
+        )
+        payload = await crawler._get_json(
+            OPUS_DETAIL_URL, params={"id": opus_id}, headers=headers,
+        )
+        code = payload.get("code")
+        if code == 4101152:
+            raise BilibiliUnavailableError("B 站动态不可见（4101152）")
+        if code in {-101, -352, -412, -509}:
+            raise PlatformBlockedError(f"bilibili opus detail returned code {code}")
+        if code != 0 or not isinstance(payload.get("data"), dict):
+            raise PlatformCrawlerError(f"bilibili opus detail returned code {code}")
+        return payload["data"].get("item") or {}, "x/polymer/web-dynamic/v1/opus/detail"
+    return state.get("detail") or {}, "opus __INITIAL_STATE__"
 
 
 def parse_article_stats(data: dict[str, Any]) -> EngagementStats:
@@ -430,7 +490,11 @@ async def fetch_comments(
 
 
 def parse_comments(payload: dict[str, Any]) -> tuple[list[EngagementComment], str | None]:
-    data = payload.get("data") or {}
+    data = payload.get("data")
+    if not isinstance(data, dict) or "replies" not in data or (
+        data["replies"] is not None and not isinstance(data["replies"], list)
+    ):
+        raise PlatformCrawlerError("bilibili reply payload contains no comment list")
     result: list[EngagementComment] = []
     for item in data.get("replies") or []:
         member = item.get("member") or {}

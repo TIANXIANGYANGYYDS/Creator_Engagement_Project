@@ -295,4 +295,4 @@ async def _fetch_all_comments_with_status(
         if result.next_page <= page:
             raise HTTPException(status_code=502, detail="评论分页游标没有向后推进")
         page = result.next_page
-        cursor = result.next_cursor if result.platform != "weibo" else None
+        cursor = result.next_cursor

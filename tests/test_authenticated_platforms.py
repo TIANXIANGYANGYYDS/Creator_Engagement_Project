@@ -1131,10 +1131,6 @@ def test_wechat_official_api_refreshes_an_expired_supplied_token() -> None:
 def test_weibo_falls_back_to_anonymous_numbered_page() -> None:
     client = DualFakeClient(gets=[
         FakeResponse({
-            "ok": 1,
-            "data": {"max_id": 99, "data": [{"id": 1, "text": "热门首屏"}]},
-        }),
-        FakeResponse({
             "ok": -100,
             "url": "https://passport.weibo.com/sso/signin",
         }),
@@ -1160,8 +1156,8 @@ def test_weibo_falls_back_to_anonymous_numbered_page() -> None:
     assert result.comments[0].text == "[手指比心]"
     assert result.total_comments == 336
     assert result.next_page == 3
-    assert client.get_calls[2][0].endswith("/api/comments/show")
-    assert client.get_calls[2][1]["params"]["page"] == 2
+    assert client.get_calls[1][0].endswith("/api/comments/show")
+    assert client.get_calls[1][1]["params"]["page"] == 2
 
 
 def test_platform_session_store_reads_playwright_state(tmp_path) -> None:

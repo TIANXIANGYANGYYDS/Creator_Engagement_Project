@@ -84,7 +84,7 @@ async def fetch(
             if not any(value is not None for value in stats.model_dump().values()):
                 raise PlatformCrawlerError("微博目标详情未返回有效互动数值")
         elif include_comments and public_target is not None:
-            _, resolved_work_id, source = await fetch_public_stats(
+            data, resolved_work_id, source = await fetch_public_stats(
                 crawler,
                 url,
                 work_id,
@@ -92,6 +92,7 @@ async def fetch(
             )
             headers.update(crawler._weibo_visitor_headers())
             sources.append(source)
+            stats = EngagementStats(comments=to_int(data.get("comments_count")))
         if include_comments:
             if public_target is not None and public_target[0] == "article":
                 await crawler._ensure_weibo_visitor_session(url, entry="miniblog")
@@ -101,6 +102,9 @@ async def fetch(
             request_cursor: str | None = None
             request_cursor_type = 0
             used_numbered_fallback = False
+            numbered_resume = bool(comment_cursor and comment_cursor.startswith("weibo:numbered:"))
+            if numbered_resume and comment_cursor != f"weibo:numbered:{page}":
+                raise PlatformCrawlerError("微博页码游标与请求页不匹配")
             for current_page in range(1, page + 1):
                 params: dict[str, Any] = {
                     "id": resolved_work_id,
@@ -109,12 +113,19 @@ async def fetch(
                 }
                 if request_cursor is not None:
                     params["max_id"] = request_cursor
-                comments_payload = await crawler._get_json(
+                comments_payload = {"ok": 0} if numbered_resume else await crawler._get_json(
                     "https://m.weibo.cn/comments/hotflow",
                     params=params,
                     headers=headers,
                 )
                 if not response_ok(comments_payload):
+                    if not numbered_resume and (current_page > 1 or comment_cursor is not None):
+                        # Hotflow has 20 roots/page while numbered has 10 and
+                        # a different order. Switching here skips/repeats roots.
+                        raise PlatformBlockedError(
+                            f"微博热门评论后续页不可用（ok={comments_payload.get('ok')}），"
+                            "未混用其他评论分页"
+                        )
                     hotflow_confirms_empty = response_confirms_no_visible_comments(
                         comments_payload
                     )
@@ -134,24 +145,24 @@ async def fetch(
                             confirmed_empty_public_comments = True
                             break
                         raise PlatformBlockedError(
-                            "微博热门流和匿名页码接口均要求登录或触发访问限制"
+                            "微博热门流和匿名页码接口均不可用："
+                            + str(comments_payload.get("msg") or comments_payload.get("message") or "未返回业务原因")
+                            + f"（ok={comments_payload.get('ok')}）"
                         )
                     comments, cursor = parse_numbered_comments(comments_payload, page)
                     if not include_stats:
                         comment_data = comments_payload.get("data") or {}
-                        stats = EngagementStats(
-                            comments=to_int(comment_data.get("total_number"))
-                        )
+                        total = to_int(comment_data.get("total_number"))
+                        if total is not None:
+                            stats = EngagementStats(comments=total)
                     used_numbered_fallback = True
                     break
                 comments, cursor = parse_comments(comments_payload)
                 comment_data = comments_payload.get("data") or {}
                 request_cursor_type = to_int(comment_data.get("max_id_type")) or 0
                 if not include_stats:
-                    total = to_int(
-                        comment_data.get("total_number")
-                        or comments_payload.get("total_number")
-                    )
+                    total_value = comment_data.get("total_number")
+                    total = to_int(total_value if total_value is not None else comments_payload.get("total_number"))
                     if total is not None:
                         stats = EngagementStats(comments=total)
                 if current_page == page:
@@ -185,6 +196,11 @@ async def fetch(
             stats=stats,
             comments=comments[:limit],
             next_cursor=cursor,
+            resume_cursor=(
+                f"weibo:numbered:{page + 1}"
+                if include_comments and used_numbered_fallback and cursor is not None
+                else None
+            ),
         )
         if confirmed_empty_public_comments:
             result.retryable = False
@@ -318,7 +334,11 @@ async def fetch_desktop_stats(
             raise WeiboUnavailableError(message)
         crawler._invalidate_weibo_visitor_session()
         raise PlatformBlockedError(message)
-    resolved_work_id = str(payload.get("idstr") or payload.get("mid") or work_id)
+    resolved_work_id = str(payload.get("idstr") or payload.get("mid") or "")
+    if resolved_work_id != work_id or (
+        payload.get("mblogid") and str(payload["mblogid"]) != bid
+    ):
+        raise PlatformCrawlerError("微博详情返回的 MID 与请求不匹配")
     return payload, resolved_work_id, "weibo.com/ajax/statuses/show"
 
 
@@ -378,7 +398,7 @@ def response_confirms_no_visible_comments(payload: dict[str, Any]) -> bool:
     """Return whether Weibo explicitly reports no comments visible to this session."""
 
     message = str(payload.get("msg") or payload.get("message") or "").strip()
-    return message in {"已过滤部分评论", "暂无数据"}
+    return message in {"已过滤部分评论", "暂无数据", "还没有人评论哦~快来抢沙发！"}
 
 
 def parse_comment_items(items: list[Any]) -> list[EngagementComment]:
@@ -414,7 +434,12 @@ def parse_numbered_comments(
 
 def response_ok(payload: dict[str, Any]) -> bool:
     try:
-        return int(payload.get("ok", 1)) == 1
+        data = payload.get("data")
+        return (
+            int(payload.get("ok", 0)) == 1
+            and isinstance(data, dict)
+            and isinstance(data.get("data"), list)
+        )
     except (TypeError, ValueError):
         return False
 
