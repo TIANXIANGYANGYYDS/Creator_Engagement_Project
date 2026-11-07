@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
@@ -217,7 +218,7 @@ async def fetch_detail_stats(
             return (
                 EngagementStats(),
                 "graphql visionVideoDetail status",
-                f"快手目标作品详情当前不可用（status={status}）",
+                detail_status_reason(status),
             )
         detail_reason = "快手详情响应未匹配目标 photoId"
     except PlatformCrawlerError as exc:
@@ -229,10 +230,20 @@ async def fetch_detail_stats(
         if str(photo.get("id") or "") == work_id:
             return stats_from_photo(photo), "page __APOLLO_STATE__", ""
         if status is not None and not photo:
-            detail_reason = f"快手目标作品详情当前不可用（status={status}）"
+            detail_reason = detail_status_reason(status)
     except Exception:
         pass
     return EngagementStats(), "", detail_reason
+
+
+def detail_status_reason(status: Any) -> str:
+    # Current first-party short-video UI maps VIDEO_LOSE=1040 to its
+    # "登录查看更多作品" branch when logged out, separately from invalid=21.
+    if status == 1040:
+        return "快手详情返回 status=1040，站点游客页面要求登录查看更多作品；不能据此判定作品已删除"
+    if status == 21:
+        return "快手详情返回 status=21，站点标记作品已失效"
+    return f"快手目标作品详情当前不可用（status={status}）"
 
 
 def parse_apollo_detail(html: str, work_id: str) -> tuple[dict[str, Any], Any]:
@@ -287,6 +298,7 @@ async def fetch_comment_page(
         data=json.dumps(rest_payload, separators=(",", ":")),
     )
     if rest.get("result") == 1:
+        validate_comment_page(rest)
         return rest
     graphql_payload = {
         "operationName": "commentListQuery",
@@ -306,8 +318,17 @@ async def fetch_comment_page(
         raise
     comment_list = (graphql.get("data") or {}).get("visionCommentList")
     if not isinstance(comment_list, dict):
-        raise PlatformCrawlerError("快手评论响应没有目标数据")
+        raise PlatformCrawlerError(
+            f"快手评论响应没有目标数据（REST result={rest.get('result')}）"
+        )
+    validate_comment_page(comment_list)
     return comment_list
+
+
+def validate_comment_page(payload: dict[str, Any]) -> None:
+    total = to_int(first_present(payload, "commentCountV2", "commentCount"))
+    if not isinstance(payload.get("rootCommentsV2"), list) or total is None or total < 0:
+        raise PlatformCrawlerError("快手评论接口未提供有效一级评论页或评论总数，不能认定为零评论")
 
 
 def authenticated_headers(cookie: str, referer: str) -> dict[str, str]:
@@ -346,12 +367,23 @@ def parse_comments(items: list[Any]) -> list[EngagementComment]:
 
 
 def raise_response_errors(payload: dict[str, Any]) -> None:
+    if requires_verification(payload):
+        raise PlatformBlockedError("快手接口要求验证码或会话已失效")
     errors = payload.get("errors")
     if errors:
         message = json.dumps(errors, ensure_ascii=False)
-        if is_challenge_text(message):
-            raise PlatformBlockedError("快手接口要求验证码或会话已失效")
         raise PlatformCrawlerError(message)
+
+
+def requires_verification(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if is_challenge_text(json.dumps(payload.get("errors") or [], ensure_ascii=False)):
+        return True
+    data = payload.get("data")
+    return (isinstance(data, dict) and data.get("result") == 400002
+            and urlparse(str(data.get("url") or "")).hostname in {
+                "captcha.zt.kuaishou.com", "captcha-gray.zt.kuaishou.com"})
 
 
 def is_challenge_text(value: str) -> bool:

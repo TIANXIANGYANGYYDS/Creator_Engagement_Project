@@ -105,6 +105,21 @@ def test_failed_asset_keeps_normal_browser_path(monkeypatch):
     asyncio.run(run())
 
 
+def test_closed_route_is_not_continued_after_fulfill(monkeypatch):
+    calls = fake_client(monkeypatch)
+
+    class ClosedRoute(Route):
+        async def fulfill(self, **kwargs):
+            raise RuntimeError("Route is already handled!")
+
+    async def run():
+        context, route = Context(), ClosedRoute()
+        async with assets.wechat_static_resources(context, {"https": "http://proxy:80"}):
+            await context.handler(route)
+        assert not route.continued and calls[0].closed
+    asyncio.run(run())
+
+
 def test_cancellation_closes_static_session(monkeypatch):
     calls = fake_client(monkeypatch, asyncio.CancelledError())
 
@@ -125,4 +140,22 @@ def test_no_proxy_does_not_install_recovery(monkeypatch):
         async with assets.wechat_static_resources(context, None):
             assert not hasattr(context, "handler")
         assert calls == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("url,allowed", [
+    ("https://unpkg.byted-static.com/byted-ucenter/ttwid-js/1.0.1/dist/index.umd.production.js", True),
+    ("https://unpkg.byted-static.com/other/asset.js", False),
+    ("https://ttwid.bytedance.com/ttwid/union/register/", False),
+])
+def test_toutiao_recovers_only_public_visitor_script(monkeypatch, url, allowed):
+    calls = fake_client(monkeypatch)
+
+    async def run():
+        context, route = Context(), Route(url)
+        async with assets.browser_static_resources(context, {"https": "http://proxy:80"}, platform="toutiao"):
+            await context.handler(route)
+            assert bool(route.fulfilled) is allowed
+            assert route.continued is not allowed
+        assert calls[0].closed
     asyncio.run(run())

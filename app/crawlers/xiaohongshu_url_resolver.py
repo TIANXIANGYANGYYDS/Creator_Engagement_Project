@@ -1,4 +1,4 @@
-"""Recover a note's access URL from its exact author in the supplied dataset."""
+"""Resolve note access by ID, retaining verified author listings as a fallback."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from app.crawlers.authors.identity import resolve_xiaohongshu
-from app.crawlers.platforms.xiaohongshu import _get, authenticated_headers, signed_headers
+from app.crawlers.http_client import PlatformCrawlerError
+from app.crawlers.platforms.xiaohongshu import _get, authenticated_headers, signed_headers, unwrap_data
 
 
 NOTE_ID = re.compile(r"[0-9a-f]{24}")
@@ -19,6 +20,42 @@ NOTE_ID = re.compile(r"[0-9a-f]{24}")
 
 class XiaohongshuUrlResolutionError(RuntimeError):
     pass
+
+
+async def recover_note(crawler, note_id: str) -> str | None:
+    """The official note-attachment lookup returns note-scoped access tokens."""
+    get_cookie = getattr(crawler, "_platform_cookie", None)
+    cookie = get_cookie("xiaohongshu") if callable(get_cookie) else ""
+    if not cookie:
+        return None
+    if not NOTE_ID.fullmatch(note_id):
+        raise XiaohongshuUrlResolutionError("小红书笔记 ID 格式无效")
+    endpoint = "/api/sns/agentspark/web/note/detail"
+    body = {"note_ids": [note_id]}
+    headers = authenticated_headers(cookie, "https://www.xiaohongshu.com/")
+    headers.update(signed_headers(endpoint, cookie, payload=body))
+    headers["Content-Type"] = "application/json"
+    payload = await crawler._post_json(
+        "https://edith.xiaohongshu.com" + endpoint, headers=headers,
+        data=json.dumps(body, ensure_ascii=False, separators=(",", ":")),
+    )
+    data = unwrap_data(payload)
+    if payload.get("success") is not True:
+        raise PlatformCrawlerError("小红书笔记访问参数查询未返回有效业务状态")
+    rows = data.get("content_detail_list")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise PlatformCrawlerError("小红书笔记访问参数查询缺少有效结果列表")
+    matches = [row for row in rows if row.get("id") == note_id]
+    if len(matches) > 1:
+        raise PlatformCrawlerError("小红书笔记访问参数查询返回重复目标")
+    if not matches:
+        return None
+    token = matches[0].get("xsec_token")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    return f"https://www.xiaohongshu.com/explore/{note_id}?" + urlencode(
+        {"xsec_token": token, "xsec_source": "pc_dots"}
+    )
 
 
 async def recover_author(crawler, account: str, targets: set[str], max_pages: int) -> dict[str, str]:
@@ -215,10 +252,42 @@ class XiaohongshuUrlResolver:
         if self.source_client is not None:
             await asyncio.to_thread(self.source_client.close)
 
+    def _save_url(self, note_id: str, url: str, **metadata) -> str:
+        self.cache[note_id] = {**metadata, "url": url, "saved_at": time.time()}
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.cache_path.with_name(self.cache_path.name + ".tmp")
+        temporary.write_text(json.dumps(self.cache, ensure_ascii=False), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(self.cache_path)
+        return url
+
     async def resolve(self, crawler, url: str, note_id: str) -> str:
         if parse_qs(urlsplit(url).query).get("xsec_token"):
             return url
         async with self._lock:
+            # The access URL belongs to the note. A valid cached URL must not
+            # require author metadata or a healthy metadata database to use it.
+            entry = self.cache.get(note_id)
+            if isinstance(entry, dict):
+                try:
+                    cached = urlsplit(str(entry.get("url") or ""))
+                except ValueError:
+                    cached = urlsplit("")
+                saved_at = entry.get("saved_at")
+                if (
+                    isinstance(saved_at, (int, float))
+                    and 0 <= time.time() - saved_at < 1800
+                    and cached.scheme == "https"
+                    and cached.hostname in {"www.xiaohongshu.com", "xiaohongshu.com"}
+                    and not cached.username and not cached.password
+                    and cached.netloc in {"www.xiaohongshu.com", "xiaohongshu.com"}
+                    and cached.path.rstrip("/") in {f"/explore/{note_id}", f"/discovery/item/{note_id}"}
+                    and parse_qs(cached.query).get("xsec_token")
+                ):
+                    return entry["url"]
+            resolved = await recover_note(crawler, note_id)
+            if resolved:
+                return self._save_url(note_id, resolved, source="agentspark_note_detail")
             if note_id not in self.authors and note_id not in self.names and note_id not in self.conflicts:
                 # New batches can publish their internal lookup metadata after
                 # this worker starts. Keep the public request URL-only.
@@ -242,14 +311,6 @@ class XiaohongshuUrlResolver:
             missing = self._not_found.get((identity, note_id))
             if missing:
                 raise XiaohongshuUrlResolutionError(missing[1])
-            entry = self.cache.get(note_id) or {}
-            if (
-                entry.get("author") == identity
-                and time.time() - entry.get("saved_at", 0) < 1800
-                and note_id == urlsplit(str(entry.get("url") or "")).path.rsplit("/", 1)[-1]
-                and parse_qs(urlsplit(str(entry.get("url") or "")).query).get("xsec_token")
-            ):
-                return entry["url"]
             try:
                 found = (
                     await recover_author(crawler, account, {note_id}, self.max_pages)
@@ -261,10 +322,4 @@ class XiaohongshuUrlResolver:
                 if str(exc) in {"达到作者分页上限，目标笔记未找到", "已核对作者列表，目标笔记当前不可见"}:
                     self._not_found[(identity, note_id)] = (time.monotonic() + 120, str(exc))
                 raise
-            self.cache[note_id] = {"author": identity, "url": found[note_id], "saved_at": time.time()}
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.cache_path.with_name(self.cache_path.name + ".tmp")
-            temporary.write_text(json.dumps(self.cache, ensure_ascii=False), encoding="utf-8")
-            os.chmod(temporary, 0o600)
-            temporary.replace(self.cache_path)
-            return found[note_id]
+            return self._save_url(note_id, found[note_id], author=identity)

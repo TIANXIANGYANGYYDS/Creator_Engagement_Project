@@ -12,7 +12,7 @@ API 从 `.local/releases/20261101-033649-all-85-platforms/source` 的提交快�
 
 ## 2026-10-31 当前部署参数
 
-保留 `COLLECTION_MAX_CONCURRENCY=8`、`PROXY_POOL_SIZE=8`、`PROXY_MAX_CONCURRENCY=1`、`BROWSER_MAX_CONCURRENCY=3`、`JOB_ITEM_MAX_CONCURRENCY=16`。新增 `PUBLIC_PLATFORM_MAX_CONCURRENCY=1`（可设 1–4），它只控制普通发布方，同协议的多个来源共享配额。当前实测不支持提高单 IP/发布方并发，比较结果见 [本轮验收](docs/PLATFORM_EXPANSION_2026-10-31.md)。
+保留 `COLLECTION_MAX_CONCURRENCY=8`、`PROXY_POOL_SIZE=8`、`PROXY_MAX_CONCURRENCY=1`、`BROWSER_MAX_CONCURRENCY=3`、`JOB_ITEM_MAX_CONCURRENCY=16`。新增 `PUBLIC_PLATFORM_MAX_CONCURRENCY=1`（可设 1–4），它只控制普通发布方，同协议的多个来源共享配额。当前实测不支持提高单 IP/发布方并发，比较结果见 [成本与容量](docs/COST_AND_CAPACITY.md)。
 
 小红书保持 `XIAOHONGSHU_SESSION_MODE=stored`、`XIAOHONGSHU_REQUEST_INTERVAL_SECONDS=15`，已有专用会话进程通过本机 IP 请求，不使用代理池。API 更新不得重新登录、替换 Profile 或重启 `xhs-session-owner`。账号的每次上游请求受独立串行及间隔约束。
 

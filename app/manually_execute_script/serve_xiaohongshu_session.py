@@ -11,11 +11,12 @@ from pathlib import Path
 import time
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
 from app.core.config import get_settings
-from app.crawlers.http_client import PlatformCrawlerError
+from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
 from app.crawlers.platform_session import PlatformSessionStore
 from app.crawlers.xiaohongshu_session import XiaohongshuSessionOwner
 
@@ -112,7 +113,10 @@ def create_app(settings, *, login=False):
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except PlatformCrawlerError as exc:
-            raise HTTPException(503, str(exc)) from exc
+            return JSONResponse(status_code=503, content={
+                "detail": str(exc),
+                "error_type": "blocked" if isinstance(exc, PlatformBlockedError) else "request_failed",
+            })
 
     return app
 

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from time import monotonic
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.dependencies import get_engagement_service
 from app.api.reliability import SyncCollectionRoute
@@ -58,6 +58,7 @@ MEDIA_NAMES_ZH.update({key: value[0] for key, value in EXTENDED_SOURCES.items()}
 
 @router.get("/interactions", response_model=InteractionDataResponse)
 async def get_interactions(
+    response: Response,
     url: str = Query(min_length=1),
     media_name: str = Query(min_length=1),
     service: EngagementService = Depends(get_engagement_service),
@@ -73,6 +74,8 @@ async def get_interactions(
     _require_usable_result(result)
     if not any(value is not None for value in result.stats.model_dump().values()):
         raise HTTPException(status_code=502, detail=result.reason or "互动数据不可用")
+    response.headers["X-Engagement-Coverage"] = result.coverage
+    response.headers["X-Engagement-Known-Fields"] = ",".join(result.stats.model_dump(exclude_none=True))
     return InteractionDataResponse(
         media_name=MEDIA_NAMES_ZH[result.platform],
         data=result.stats,
@@ -81,6 +84,7 @@ async def get_interactions(
 
 @router.get("/comments", response_model=CommentDataResponse)
 async def get_comments(
+    response: Response,
     url: str = Query(min_length=1),
     media_name: str = Query(min_length=1),
     page: int | None = Query(default=None, ge=1),
@@ -96,15 +100,19 @@ async def get_comments(
                 page,
             )
             _require_usable_result(result)
+            response.headers["X-Comments-Scope"] = "page"
+            response.headers["X-Comments-Complete"] = str(result.comments_complete).lower()
             return CommentDataResponse(
                 media_name=MEDIA_NAMES_ZH[result.platform],
                 comments=result.comments,
             )
-        comments, _, _ = await _fetch_all_comments_with_status(
+        comments, _, is_complete = await _fetch_all_comments_with_status(
             service,
             url,
             canonical_media_name,
         )
+        response.headers["X-Comments-Scope"] = "all_public_pages"
+        response.headers["X-Comments-Complete"] = str(is_complete).lower()
         return CommentDataResponse(
             media_name=canonical_media_name,
             comments=comments,

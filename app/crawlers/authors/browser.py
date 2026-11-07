@@ -55,7 +55,13 @@ class BrowserTransport:
         await self.semaphore.acquire()
         self._acquired = True
         try:
+            ensure_lifetime = getattr(self.client, "ensure_proxy_lifetime", None)
+            if callable(ensure_lifetime):
+                await ensure_lifetime(70, exclusive=True)
             mapping = await self.client.active_proxy_mapping()
+            mark_started = getattr(self.client, "mark_browser_started", None)
+            if callable(mark_started):
+                mark_started()
             self.manager = AsyncCamoufox(
                 headless=self.headless,
                 os="windows",

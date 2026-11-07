@@ -12,10 +12,11 @@ from urllib.parse import urlsplit
 from app.core.config import PROJECT_ROOT, Settings
 from app.crawlers.browser_fallback import BrowserFallback, BrowserFallbackSettings
 from app.crawlers.engagement import EngagementCrawler
+from app.crawlers.comment_capabilities import comment_capabilities
 from app.crawlers.douyin_visitor import DouyinVisitorSessions
 from app.crawlers.platform_session import PlatformSessionStore
 from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolver
-from app.crawlers.platforms.registry import normalize_media_name
+from app.crawlers.platforms.registry import normalize_media_name, validate_media_url
 from app.crawlers.platforms.source_catalog import EXTENDED_SOURCES, traffic_platform
 from app.crawlers.proxy_provider import (
     AsyncDailiProxyPool,
@@ -34,6 +35,11 @@ from app.services.status_alerts import StatusAlerts
 
 CachedResult = InteractionResult | CommentPageResult
 CacheKey = tuple[str, str, str, int, str | None]
+
+DISABLED_CHANNELS = {
+    "wechat": "微信公众号渠道已停用，暂不提供互动和评论数据",
+    "wechat_channels": "微信视频号渠道已停用，暂不提供互动和评论数据",
+}
 
 
 @dataclass(frozen=True)
@@ -192,6 +198,8 @@ class EngagementService:
                 pool_size=settings.proxy_pool_size,
                 max_concurrency_per_proxy=settings.proxy_max_concurrency,
                 api_url=settings.proxy_51_api_url,
+                lease_optimization_enabled=settings.proxy_lease_optimization_enabled,
+                refill_batch_size=settings.proxy_refill_batch_size,
             )
         strict_anonymous = settings.strict_anonymous_mode
         xiaohongshu_cookie = ""
@@ -392,10 +400,28 @@ class EngagementService:
             platform, _ = identify_url(url)
         except ValueError:
             platform = "unknown"
+        if platform in DISABLED_CHANNELS:
+            if comment_limit <= 0:
+                raise ValueError("comment_limit must be greater than zero")
+            return self._disabled_channel_result(url, platform)
         with self.status_alerts.observe(platform, "engagement"):
             result = await self._fetch(url, comment_limit=comment_limit)
         self.status_alerts.result(result, "engagement")
         return result
+
+    @staticmethod
+    def _disabled_channel_result(url: str, platform: str) -> EngagementResult:
+        platform, work_id = validate_media_url(url, platform)
+        return EngagementResult(
+            platform=platform,
+            canonical_url=url,
+            work_id=work_id,
+            coverage="unsupported",
+            reason=DISABLED_CHANNELS[platform],
+            source="channel_policy",
+            protocol_attempts=0,
+            retryable=False,
+        )
 
     async def _fetch(self, url: str, *, comment_limit: int = 20) -> EngagementResult:
         async with self._collection_semaphore:
@@ -433,6 +459,8 @@ class EngagementService:
         """Apply platform circuit backpressure before an async item starts timing."""
 
         platform = normalize_media_name(media_name)
+        if platform in DISABLED_CHANNELS:
+            return
         await self.crawler._wait_for_circuit_cooldown(platform)
 
     @asynccontextmanager
@@ -443,6 +471,9 @@ class EngagementService:
         except ValueError:
             # Let the collector produce the same invalid-media response as
             # synchronous collection; no network capacity is needed for it.
+            yield
+            return
+        if platform in DISABLED_CHANNELS:
             yield
             return
         await self.wait_for_platform_ready(media_name)
@@ -464,6 +495,10 @@ class EngagementService:
 
     async def fetch_interactions(self, url: str, media_name: str) -> InteractionResult:
         platform = normalize_media_name(media_name)
+        if platform in DISABLED_CHANNELS:
+            return InteractionResult.model_validate(
+                self._disabled_channel_result(url, platform).model_dump()
+            )
 
         async def collect() -> CachedResult:
             async with self._proxy_affinity(platform):
@@ -487,6 +522,13 @@ class EngagementService:
         if page <= 0:
             raise ValueError("page must be greater than zero")
         platform = normalize_media_name(media_name)
+        if platform in DISABLED_CHANNELS:
+            return CommentPageResult.model_validate({
+                **self._disabled_channel_result(url, platform).model_dump(),
+                "page": page,
+                "comments_complete": False,
+                "capabilities": comment_capabilities(platform),
+            })
 
         async def collect() -> CachedResult:
             async with self._proxy_affinity(platform):

@@ -94,6 +94,33 @@ class IncompleteCommentService(FakeService):
         )
 
 
+def test_single_get_reports_partial_fields_and_incomplete_comment_walk():
+    class LaterPageBlocked(FakeService):
+        async def fetch_comments(self, url, media_name, page, *, cursor=None):
+            result = await super().fetch_comments(url, media_name, page, cursor=cursor)
+            if page == 2:
+                result.coverage = "blocked"
+                result.reason = "后续页需要登录"
+                result.comments = []
+            return result
+
+    app = create_app()
+    app.dependency_overrides[get_engagement_service] = lambda: LaterPageBlocked()
+    params = {"url": "https://www.toutiao.com/article/123/", "media_name": "头条"}
+    with TestClient(app) as client:
+        interactions = client.get("/api/v1/interactions", params=params)
+        comments = client.get("/api/v1/comments", params=params)
+        page = client.get("/api/v1/comments", params={**params, "page": 1})
+    assert interactions.headers["X-Engagement-Coverage"] == "partial"
+    assert interactions.headers["X-Engagement-Known-Fields"] == "comments"
+    assert interactions.json()["data"]["likes"] is None
+    assert comments.status_code == 200 and len(comments.json()["comments"]) == 1
+    assert comments.headers["X-Comments-Complete"] == "false"
+    assert comments.headers["X-Comments-Scope"] == "all_public_pages"
+    assert page.headers["X-Comments-Complete"] == "true"
+    assert page.headers["X-Comments-Scope"] == "page"
+
+
 def test_health_interactions_and_comments_routes(monkeypatch) -> None:
     from app.api.routers import health
     from app.core.config import Settings

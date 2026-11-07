@@ -2,17 +2,162 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from app.crawlers.engagement import EngagementCrawler
 from app.crawlers.platforms import PLATFORM_HANDLERS
-from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolver, recover_named_author
+from app.crawlers.http_client import PlatformBlockedError, PlatformCrawlerError
+from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolver, recover_named_author, recover_note
 from app.models.engagement import EngagementResult, EngagementStats
 
 
 NOTE = "6aad6b8c0000000028002d0a"
 RAW = f"https://www.xiaohongshu.com/discovery/item/{NOTE}"
+
+
+def test_note_id_lookup_reaches_handler_without_author_and_reuses_cache(tmp_path, monkeypatch):
+    class UnavailableSource:
+        def find(self, *args):
+            pytest.fail("ID lookup must not need author metadata")
+
+    monkeypatch.setattr("app.crawlers.xiaohongshu_url_resolver.signed_headers", lambda *a, **k: {})
+    cache = tmp_path / "cache.json"
+    resolver = XiaohongshuUrlResolver(tmp_path / "absent.json", cache,
+                                     source_collection=UnavailableSource())
+    crawler = EngagementCrawler(client=object(), xiaohongshu_url_resolver=resolver)
+    monkeypatch.setattr(crawler, "_platform_cookie", lambda _: "a1=device; web_session=account")
+    requests = []
+    token = "signed+/value=="
+
+    async def post(url, **kwargs):
+        requests.append(url)
+        assert url == "https://edith.xiaohongshu.com/api/sns/agentspark/web/note/detail"
+        assert json.loads(kwargs["data"]) == {"note_ids": [NOTE]}
+        await asyncio.sleep(0)
+        return {"success": True, "code": 0, "data": {"content_detail_list": [
+            {"id": "2" * 24, "xsec_token": "wrong-note"},
+            {"id": NOTE, "xsec_token": token},
+        ]}}
+
+    async def handler(crawler, url, work_id, limit, **kwargs):
+        assert work_id == NOTE
+        assert urlsplit(url).path == f"/explore/{NOTE}"
+        assert parse_qs(urlsplit(url).query) == {"xsec_token": [token], "xsec_source": ["pc_dots"]}
+        return EngagementResult(platform="xiaohongshu", canonical_url=url, work_id=work_id,
+                                coverage="partial", stats=EngagementStats(likes=7))
+
+    monkeypatch.setattr(crawler, "_post_json", post)
+    monkeypatch.setitem(PLATFORM_HANDLERS, "xiaohongshu", handler)
+
+    async def run():
+        first, second = await asyncio.gather(
+            crawler.fetch_interactions(RAW, "xiaohongshu"),
+            crawler.fetch_interactions(RAW, "xiaohongshu"),
+        )
+        assert first.stats.likes == second.stats.likes == 7
+
+    asyncio.run(run())
+    assert len(requests) == 1
+    saved = json.loads(cache.read_text())[NOTE]
+    assert saved["source"] == "agentspark_note_detail"
+    assert parse_qs(urlsplit(saved["url"]).query)["xsec_token"] == [token]
+    assert cache.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("rows", [
+    [], [{"id": "2" * 24, "xsec_token": "wrong-note"}],
+    [{"id": NOTE}], [{"id": NOTE, "xsec_token": " "}],
+    [{"id": NOTE, "xsec_token": 123}],
+])
+def test_note_id_lookup_never_accepts_missing_or_wrong_note_token(rows, monkeypatch):
+    monkeypatch.setattr("app.crawlers.xiaohongshu_url_resolver.signed_headers", lambda *a, **k: {})
+
+    class Crawler:
+        def _platform_cookie(self, platform):
+            return "a1=device; web_session=account"
+
+        async def _post_json(self, *args, **kwargs):
+            return {"success": True, "code": 0, "data": {"content_detail_list": rows}}
+
+    assert asyncio.run(recover_note(Crawler(), NOTE)) is None
+
+
+@pytest.mark.parametrize("payload,error", [
+    ({"success": False, "code": -100}, PlatformBlockedError),
+    ({"success": False, "code": 461}, PlatformBlockedError),
+    ({"success": False, "code": -1, "msg": "unavailable"}, PlatformCrawlerError),
+    ({"data": {"content_detail_list": []}}, PlatformCrawlerError),
+    ({"success": True, "data": []}, PlatformCrawlerError),
+    ({"success": True, "data": {"content_detail_list": [None]}}, PlatformCrawlerError),
+    ({"success": True, "data": {"content_detail_list": [
+        {"id": NOTE, "xsec_token": "one"}, {"id": NOTE, "xsec_token": "two"},
+    ]}}, PlatformCrawlerError),
+])
+def test_note_id_lookup_errors_do_not_query_authors_or_poison_cache(tmp_path, monkeypatch, payload, error):
+    monkeypatch.setattr("app.crawlers.xiaohongshu_url_resolver.signed_headers", lambda *a, **k: {})
+    calls = []
+
+    class Crawler:
+        def _platform_cookie(self, platform):
+            return "a1=device; web_session=account"
+
+        async def _post_json(self, *args, **kwargs):
+            calls.append(1)
+            return payload
+
+    class UnavailableSource:
+        def find(self, *args):
+            pytest.fail("lookup failure must propagate without author requests")
+
+    cache = tmp_path / "cache.json"
+    resolver = XiaohongshuUrlResolver(tmp_path / "absent.json", cache,
+                                     source_collection=UnavailableSource())
+
+    async def run():
+        for _ in range(2):
+            with pytest.raises(error):
+                await resolver.resolve(Crawler(), RAW, NOTE)
+
+    asyncio.run(run())
+    assert len(calls) == 2 and not cache.exists() and not resolver._not_found
+
+
+def test_valid_note_cache_needs_no_author_or_source_database(tmp_path):
+    class UnavailableSource:
+        def find(self, *args):
+            pytest.fail("cached note must not query author metadata")
+
+    cache = tmp_path / "cache.json"
+    resolved = RAW + "?xsec_token=verified"
+    cache.write_text(json.dumps({NOTE: {"url": resolved, "saved_at": time.time(), "author": "old-source"}}))
+    resolver = XiaohongshuUrlResolver(tmp_path / "absent.json", cache, source_collection=UnavailableSource())
+    assert asyncio.run(resolver.resolve(object(), RAW, NOTE)) == resolved
+
+
+@pytest.mark.parametrize("entry", [
+    {"url": RAW + "?xsec_token=expired", "saved_at": 1},
+    {"url": RAW + "?xsec_token=future", "saved_at": 10**12},
+    {"url": RAW + "?xsec_token=bad-time", "saved_at": "now"},
+    {"url": RAW.replace(NOTE, "2" * 24) + "?xsec_token=wrong-note"},
+    {"url": RAW.replace(".com/", ".com.evil.test/") + "?xsec_token=bad-host"},
+    {"url": RAW.replace("https://", "http://") + "?xsec_token=bad-scheme"},
+    {"url": RAW.replace("https://", "https://user:pass@") + "?xsec_token=credentials"},
+    {"url": RAW},
+    {"url": "https://[invalid"},
+    "malformed-entry",
+])
+def test_invalid_note_cache_cannot_bypass_context_recovery(tmp_path, entry):
+    from app.crawlers.xiaohongshu_url_resolver import XiaohongshuUrlResolutionError
+    if isinstance(entry, dict):
+        entry = {"saved_at": time.time(), **entry}
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({NOTE: entry}))
+    resolver = XiaohongshuUrlResolver(tmp_path / "absent.json", cache)
+    with pytest.raises(XiaohongshuUrlResolutionError):
+        asyncio.run(resolver.resolve(object(), RAW, NOTE))
 
 
 def test_production_raw_data_resolves_original_url_using_exact_profile(tmp_path, monkeypatch):

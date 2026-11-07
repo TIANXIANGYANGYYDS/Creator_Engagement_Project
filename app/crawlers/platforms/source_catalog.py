@@ -6,6 +6,7 @@ import re
 
 # Shared publishers remain separate source names in the public API.
 EXTENDED_SOURCES = {
+    'guancha': ('风闻', ('user.guancha.cn',)),
     'yzwb': ('紫牛新闻', ('wap.yzwb.net', 'm.yangtse.com', 'm.yzwb.net')),
     'guanhai': ('观海新闻', ('m.guanhai.com.cn', 'www.guanhai.com.cn')),
     'ichaoqi': ('潮起网', ('www.ichaoqi.com',)),
@@ -92,12 +93,19 @@ def source_id(platform: str, url: str) -> str:
         raise ValueError("media_name 与内容 URL 的平台不匹配")
     query = parse_qs(parsed.query)
     query.update(parse_qs(parsed.fragment.partition("?")[2]))
+    if platform == "guancha":
+        value = (query.get("id") or [""])[0]
+        return value if parsed.path in {"/main/content", "/wap/content"} and value.isdigit() else ""
     if platform == "yzwb" and parsed.path == "/news_details.html":
         value = (query.get("id") or [""])[0]
         return value if value.isdigit() else ""
     if platform == "ijiwei" and parsed.hostname == "www.laoyaoba.com":
-        value = (query.get("news_id") or [""])[0]
-        return value if parsed.path == "/html/share/news" and value.isdigit() else ""
+        if parsed.path == "/html/share/news":
+            value = (query.get("news_id") or [""])[0]
+            return value if value.isdigit() else ""
+        share = re.fullmatch(r"/html/share/news/(\d+)", parsed.path)
+        if share:
+            return share[1]
     extra_patterns = {
         "yzwb": r"/wap/news/(\d+)\.html",
         "guanhai": r"/p/(\d+)\.html",

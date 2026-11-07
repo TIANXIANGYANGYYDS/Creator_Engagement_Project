@@ -27,26 +27,39 @@ def assigned_json(text: str, name: str) -> dict:
 def nuxt_literal_state(html: str) -> dict:
     """Decode Nuxt's literal-only IIFE serialization without executing JavaScript.
 
-    Only JSON arguments, object keys and references to those arguments are
-    accepted. Calls, expressions and arbitrary page scripts are rejected.
+    Only JSON arguments, literal properties on argument objects, object keys
+    and argument references are accepted. No JavaScript is executed.
     """
     soup = BeautifulSoup(html, "html.parser")
     script = next((node.string for node in soup.select("script")
         if node.string and node.string.strip().startswith("window.__NUXT__=")), "")
     if len(script) > 3_000_000:
         raise PlatformCrawlerError("Nuxt 状态超过解析大小限制")
-    match = re.fullmatch(r"window\.__NUXT__=\(function\(([^)]*)\)\{return (.*)\}\((.*)\)\);?", script.strip(), re.S)
+    match = re.fullmatch(r"window\.__NUXT__=\(function\(([^)]*)\)\{(.*?)return (.*)\}\((.*)\)\);?", script.strip(), re.S)
     if not match:
         raise PlatformCrawlerError("页面未提供可解码的 Nuxt 字面量状态")
     try:
         names = match[1].split(",")
-        values = json.loads("[" + match[3] + "]")
+        values = json.loads("[" + match[4] + "]")
         if len(names) != len(values) or len(set(names)) != len(names):
             raise ValueError
         bindings = dict(zip(names, values))
+        # Nuxt can initialize shared objects before returning the state.
+        # Accept only direct properties with JSON values, never calls or code.
+        prefix = match[2].strip()
+        while prefix:
+            assignment = re.match(r"([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*=\s*", prefix)
+            if not assignment or not isinstance(bindings.get(assignment[1]), dict):
+                raise ValueError
+            value, length = json.JSONDecoder().raw_decode(prefix[assignment.end():])
+            tail = prefix[assignment.end() + length:].lstrip()
+            if not tail.startswith(";"):
+                raise ValueError
+            bindings[assignment[1]][assignment[2]] = value
+            prefix = tail[1:].lstrip()
         token = re.compile(r'"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[A-Za-z_$][\w$]*|[{}\[\],:]')
         colon = re.compile(r"\s*:")
-        source, output, end = match[2], [], 0
+        source, output, end = match[3], [], 0
         for item in token.finditer(source):
             if source[end:item.start()].strip():
                 raise ValueError

@@ -301,6 +301,7 @@ class EngagementCrawler:
             include_stats=include_stats,
             include_comments=include_comments,
         ):
+            enrich_stats = bool(getattr(result, "needs_browser_stats", False))
             browser_result = await self._run_browser_fallback(
                 url,
                 platform,
@@ -309,10 +310,27 @@ class EngagementCrawler:
                 limit=limit,
                 include_stats=include_stats,
                 include_comments=include_comments,
+                enrich_stats=enrich_stats,
             )
             if browser_result is not None:
-                browser_result.protocol_attempts = result.protocol_attempts
-                result = browser_result
+                if enrich_stats:
+                    # Optional enrichment must not discard validated protocol
+                    # fields when the browser is blocked or navigates away.
+                    if (browser_result.coverage in {"complete", "partial"}
+                            and browser_result.platform == result.platform
+                            and browser_result.work_id == result.work_id):
+                        fields = browser_result.stats.model_dump(exclude_none=True)
+                        if any(key != "comments" for key in fields):
+                            result.stats = result.stats.model_copy(update=fields)
+                            result.source += " + " + browser_result.source
+                            result.reason = browser_result.reason
+                        elif getattr(browser_result, "stats_block_reason", None):
+                            result.reason += "；" + browser_result.stats_block_reason
+                    elif browser_result.reason:
+                        result.reason += "；统计补充未完成：" + browser_result.reason
+                else:
+                    browser_result.protocol_attempts = result.protocol_attempts
+                    result = browser_result
         self._record_circuit_outcome(result)
         return result
 
@@ -377,7 +395,27 @@ class EngagementCrawler:
             platform,
             self.max_protocol_attempts,
         )
-        for attempt in range(1, max_attempts + 1):
+        # A dead proxy must not exhaust Weibo's guest-flow attempts, or send a
+        # Toutiao comment request straight into a much costlier browser wall.
+        # Only explicit transient failures get two extra exits. The extra work
+        # must fit within 25 seconds from the start of this protocol operation.
+        recovery_enabled = (
+            platform in {"weibo", "toutiao"}
+            and getattr(self.client, "proxy_mode", "direct") == "required"
+        )
+        recovery_deadline = monotonic() + 25
+        total_attempts = max_attempts + (2 if recovery_enabled else 0)
+        for attempt in range(1, total_attempts + 1):
+            recovery_remaining = None
+            if attempt > max_attempts:
+                transient_errors = {"transport_error"}
+                if platform == "toutiao":
+                    transient_errors.add("risk_limited")
+                recovery_remaining = recovery_deadline - monotonic()
+                if (result is None or result._status_error not in transient_errors
+                        or recovery_remaining <= 0):
+                    assert result is not None
+                    return result
             lease_scope = getattr(self.client, "lease_scope", None)
             direct_scope = getattr(self.client, "direct_scope", None)
             isolated_session_scope = getattr(
@@ -392,16 +430,24 @@ class EngagementCrawler:
             )
 
             async def invoke_handler() -> EngagementResult:
-                return await handler(
-                    self,
-                    url,
-                    work_id,
-                    limit,
-                    page=page,
-                    comment_cursor=comment_cursor,
-                    include_stats=include_stats,
-                    include_comments=include_comments,
-                )
+                budget = asyncio.timeout(recovery_remaining)
+                try:
+                    async with budget:
+                        return await handler(
+                            self,
+                            url,
+                            work_id,
+                            limit,
+                            page=page,
+                            comment_cursor=comment_cursor,
+                            include_stats=include_stats,
+                            include_comments=include_comments,
+                        )
+                except TimeoutError:
+                    if not budget.expired():
+                        raise
+                    return result_error(platform, url, work_id, "failed",
+                                        "代理恢复超时：额外换出口已达到 25 秒协议恢复预算")
 
             async def invoke_with_transport_scope() -> EngagementResult:
                 if platform == "douyin" and callable(isolated_session_scope):
@@ -410,7 +456,9 @@ class EngagementCrawler:
                 return await invoke_handler()
 
             if callable(lease_scope):
-                async with lease_scope():
+                collection_scope = getattr(self.client, "collection_lease_scope", None)
+                scope = collection_scope(platform) if callable(collection_scope) else lease_scope()
+                async with scope:
                     if use_stable_direct_egress:
                         async with direct_scope():
                             result = await invoke_with_transport_scope()
@@ -421,8 +469,11 @@ class EngagementCrawler:
                         include_stats=include_stats,
                         include_comments=include_comments,
                     ):
+                        record_failure = getattr(self.client, "record_collection_failure", None)
                         invalidate = getattr(self.client, "invalidate_active_lease", None)
-                        if callable(invalidate):
+                        if callable(record_failure):
+                            record_failure(result.coverage, result.reason)
+                        elif callable(invalidate):
                             invalidate(
                                 f"semantic collection failure: {result.coverage}: {result.reason}"
                             )
@@ -445,10 +496,17 @@ class EngagementCrawler:
                 # A fixed direct exit cannot recover from the note-page wall.
                 # Retrying is useful only when the next attempt can rotate IP.
                 return result
-            if not should_retry or attempt == max_attempts:
+            if not should_retry or attempt == total_attempts:
                 return result
+            if attempt >= max_attempts:
+                transient_errors = {"transport_error"}
+                if platform == "toutiao":
+                    transient_errors.add("risk_limited")
+                if (result._status_error not in transient_errors
+                        or monotonic() >= recovery_deadline):
+                    return result
 
-            delay = self._retry_delay(
+            delay = 0.0 if attempt >= max_attempts else self._retry_delay(
                 platform,
                 attempt,
                 include_stats=include_stats,
@@ -459,7 +517,7 @@ class EngagementCrawler:
                 platform,
                 work_id,
                 attempt,
-                max_attempts,
+                total_attempts,
                 delay,
                 result.coverage,
                 result.reason,
@@ -576,6 +634,8 @@ class EngagementCrawler:
             return False
         if result.coverage in {"unsupported", "blocked", "failed"}:
             return True
+        if include_stats and getattr(result, "needs_browser_stats", False):
+            return True
         if include_stats and not any(
             value is not None for value in result.stats.model_dump().values()
         ):
@@ -599,21 +659,40 @@ class EngagementCrawler:
         limit: int,
         include_stats: bool,
         include_comments: bool,
+        enrich_stats: bool = False,
     ) -> EngagementResult | None:
         if self.browser_fallback is None:
             return None
         result: EngagementResult | None = None
-        for attempt in range(1, self.max_browser_attempts + 1):
+        # Leave room for protocol work and response serialization within the
+        # existing 90/120-second item/request deadlines. A page challenge must
+        # not turn three browser attempts into an unbounded wait.
+        browser_seconds = 25 if enrich_stats else 60
+        browser_deadline = monotonic() + browser_seconds if platform in {"toutiao", "kuaishou"} else None
+        attempts = 1 if enrich_stats else self.max_browser_attempts
+        for attempt in range(1, attempts + 1):
+            remaining = None if browser_deadline is None else browser_deadline - monotonic()
+            if remaining is not None and remaining <= 0:
+                return result
+            budget = asyncio.timeout(remaining)
             try:
-                result = await self.browser_fallback.fetch(
-                    url,
-                    platform,
-                    work_id,
-                    page=page,
-                    limit=limit,
-                    include_stats=include_stats,
-                    include_comments=include_comments,
-                )
+                async with budget:
+                    result = await self.browser_fallback.fetch(
+                        url,
+                        platform,
+                        work_id,
+                        page=page,
+                        limit=limit,
+                        include_stats=include_stats,
+                        include_comments=include_comments,
+                    )
+            except TimeoutError as exc:
+                if budget.expired():
+                    platform_label = "快手" if platform == "kuaishou" else "头条"
+                    return result_error(platform, url, work_id, "failed",
+                                        f"{platform_label}浏览器恢复超时：{browser_seconds} 秒内未取得可验证目标数据")
+                result = result_error(platform, url, work_id, "failed",
+                                      f"浏览器兜底调用失败: TimeoutError: {exc}")
             except Exception as exc:
                 result = result_error(
                     platform,
@@ -622,6 +701,8 @@ class EngagementCrawler:
                     "failed",
                     f"浏览器兜底调用失败: {type(exc).__name__}: {exc}",
                 )
+            if getattr(result, "retryable", None) is False:
+                return result
             stats_ok = not include_stats or any(
                 value is not None for value in result.stats.model_dump().values()
             )
@@ -636,7 +717,7 @@ class EngagementCrawler:
                 and comments_ok
             ):
                 return result
-            if attempt < self.max_browser_attempts:
+            if attempt < attempts:
                 logger.warning(
                     "browser_retry platform=%s work_id=%s attempt=%s/%s coverage=%s reason=%s",
                     platform,
@@ -891,7 +972,10 @@ class EngagementCrawler:
         if configured:
             return configured
         if self.session_store is not None:
-            stored = self.session_store.cookie_header(platform).strip()
+            stored = (
+                self.session_store.cookie_header_for_url(platform, "https://www.kuaishou.com/graphql")
+                if platform == "kuaishou" else self.session_store.cookie_header(platform)
+            ).strip()
             if stored:
                 return stored
         return self.cookies.strip() if platform == "douyin" else ""

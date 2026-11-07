@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -18,6 +18,15 @@ from app.models.engagement import EngagementComment, EngagementResult, Engagemen
 
 
 COMMENT_URL = "https://www.toutiao.com/article/v4/tab_comments/"
+UNVERIFIED_TARGET_REASON = "头条未返回可验证的评论计数，不能将不存在的作品判为零评论"
+
+
+class ToutiaoUnverifiedTargetError(PlatformCrawlerError):
+    pass
+
+
+class ToutiaoInvalidRequestError(PlatformCrawlerError):
+    pass
 
 
 async def fetch(
@@ -31,6 +40,7 @@ async def fetch(
     include_stats: bool,
     include_comments: bool,
 ) -> EngagementResult:
+    unavailable = None
     try:
         share_response = None
         if is_toutiao_share_url(url):
@@ -58,6 +68,11 @@ async def fetch(
                         "Referer": f"https://www.toutiao.com/article/{work_id}/",
                     },
                     force_direct=True,
+                    allow_statuses={404},
+                )
+                unavailable = unavailable_article(
+                    str(getattr(article_response, "text", "") or ""), work_id,
+                    str(getattr(article_response, "url", "")),
                 )
                 stats = parse_stats(str(getattr(article_response, "text", "") or ""), work_id)
                 if _has_stats(stats):
@@ -76,7 +91,7 @@ async def fetch(
                 reason = "文章页面统计不可用，仅取得经目标 ID 核验的评论数；阅读/点赞等缺失字段保留 null"
             sources.append("article/v4/tab_comments (verified group_id)")
         if not include_comments:
-            return EngagementResult(
+            result = EngagementResult(
                 platform="toutiao",
                 canonical_url=f"https://www.toutiao.com/article/{work_id}/",
                 work_id=work_id,
@@ -85,6 +100,11 @@ async def fetch(
                 source=" + ".join(sources) or "article SSR",
                 stats=stats,
             )
+            # A verified comment count does not mean article counters were
+            # obtained. Let the browser resolve missing SSR once, without
+            # retrying the same comment-only protocol response.
+            result.needs_browser_stats = not unavailable and "article SSR itemCounter" not in sources
+            return result
 
         return EngagementResult(
             platform="toutiao",
@@ -97,10 +117,34 @@ async def fetch(
             comments=comments[:limit],
             next_cursor=following,
         )
+    except ToutiaoInvalidRequestError as exc:
+        result = result_error("toutiao", url, work_id, "unsupported", exc)
+        result.retryable = False
+        return result
+    except ToutiaoUnverifiedTargetError as exc:
+        if unavailable and page == 1:
+            return unavailable
+        return result_error("toutiao", url, work_id, "failed", exc)
     except PlatformBlockedError as exc:
         return result_error("toutiao", url, work_id, "blocked", exc)
     except Exception as exc:
         return result_error("toutiao", url, work_id, "failed", exc)
+
+
+def unavailable_article(text: str, work_id: str, response_url: str) -> EngagementResult | None:
+    """Require the site's error-page structure on the exact target document."""
+    parsed = urlsplit(response_url)
+    if (parsed.hostname != "www.toutiao.com"
+            or parsed.path.rstrip("/") != f"/article/{work_id}"):
+        return None
+    soup = BeautifulSoup(text, "html.parser")
+    notice = soup.select_one(".error-content > .error-tips")
+    if notice is None or notice.get_text(strip=True) != "抱歉，你访问的内容不存在":
+        return None
+    result = result_error("toutiao", response_url, work_id, "unsupported",
+                          "头条目标文章页面明确提示内容不存在，当前公开不可查")
+    result.retryable = False
+    return result
 
 
 async def fetch_comment_page(crawler, work_id, limit, *, page, comment_cursor):
@@ -126,6 +170,10 @@ async def fetch_comment_page(crawler, work_id, limit, *, page, comment_cursor):
 
 
 def parse_comment_page(payload, work_id, offset):
+    if payload.get("err_no") == 1 and payload.get("message") == "params illegal":
+        raise ToutiaoInvalidRequestError(
+            "头条接口拒绝请求参数（params illegal），请核对作品链接与内容 ID"
+        )
     group = payload.get("group") or {}
     if (payload.get("err_no") != 0 or not isinstance(payload.get("data"), list)
             or payload.get("has_more") not in (True, False, 0, 1)
@@ -133,8 +181,12 @@ def parse_comment_page(payload, work_id, offset):
         raise PlatformCrawlerError("头条评论接口失败或不是目标作品")
     comments = parse_comments(payload["data"])
     total = to_int(payload.get("total_number"))
-    if total is None or total < 0 or (not comments and not group.get("user_id")):
-        raise PlatformCrawlerError("头条未返回可验证的评论计数，不能将不存在的作品判为零评论")
+    has_author = str(group.get("user_id") or "") not in {"", "0"}
+    if (not comments and not has_author and str(payload.get("total_number")) == "0"
+            and not payload["has_more"]):
+        raise ToutiaoUnverifiedTargetError(UNVERIFIED_TARGET_REASON)
+    if total is None or total < 0 or (not comments and not has_author):
+        raise PlatformCrawlerError("头条未返回有效评论计数或作者信息")
     next_offset = to_int(payload.get("offset"))
     has_more = bool(payload.get("has_more"))
     require_page(comments, has_more, offset, next_offset)

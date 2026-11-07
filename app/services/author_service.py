@@ -38,6 +38,18 @@ HANDLERS = {
 BROWSER_LISTS = {"douyin", "kuaishou", "xiaohongshu", "toutiao"}
 
 
+def _author_lease_scope(client, platform):
+    scoped = getattr(client, "collection_lease_scope", None)
+    return scoped(platform, author=True) if scoped else client.lease_scope()
+
+
+def _record_lease_failure(client, reason, exc=None):
+    if getattr(client, "lease_optimization_enabled", False):
+        client.record_collection_failure("blocked" if isinstance(exc, PlatformBlockedError) else "failed", reason)
+    else:
+        client.invalidate_active_lease(reason)
+
+
 class AuthorService:
     def __init__(
         self, service: EngagementService, *, page_timeout_seconds: float = 120,
@@ -162,7 +174,7 @@ class AuthorService:
                     async with (
                         self._slot(request.media_name),
                         client.isolated_session_scope(),
-                        client.lease_scope(),
+                        _author_lease_scope(client, request.media_name),
                     ):
                         try:
                             transport = crawler
@@ -192,8 +204,8 @@ class AuthorService:
                             return result
                         except AuthorSessionError:
                             raise
-                        except Exception:
-                            client.invalidate_active_lease("author detail unusable")
+                        except Exception as exc:
+                            _record_lease_failure(client, "author detail unusable", exc)
                             raise
                         finally:
                             if browser:
@@ -254,7 +266,7 @@ class DiscoverySession:
         if self.request.media_name == "xiaohongshu" and callable(direct):
             await self.stack.enter_async_context(direct())
         await self.stack.enter_async_context(client.isolated_session_scope())
-        await self.stack.enter_async_context(client.lease_scope())
+        await self.stack.enter_async_context(_author_lease_scope(client, self.request.media_name))
         self.crawler = self.service._crawler()
         self.crawler._author_identity_cache = self.identity_cache
         self.stack.push_async_callback(self.crawler.aclose)
@@ -264,7 +276,7 @@ class DiscoverySession:
             await acquire()
             remaining = client.active_lease_remaining_seconds()
             if remaining is not None and remaining < 40:
-                client.invalidate_active_lease("author proxy nearing expiry")
+                _record_lease_failure(client, "author proxy nearing expiry")
                 raise PlatformCrawlerError("代理剩余有效期不足，正在重新分配")
         if self.browser_mode:
             self.browser = BrowserTransport(
@@ -302,9 +314,7 @@ class DiscoverySession:
                         or monotonic() - self.started > 90
                     ):
                         if remaining is not None and remaining < 40:
-                            client.invalidate_active_lease(
-                                "author proxy nearing expiry"
-                            )
+                            _record_lease_failure(client, "author proxy nearing expiry")
                         await self.close()
                     if self.stack is None:
                         await self._open()
@@ -324,9 +334,7 @@ class DiscoverySession:
                     return result
                 except asyncio.CancelledError:
                     if self.crawler is not None:
-                        client.invalidate_active_lease(
-                            "author list interrupted or timed out"
-                        )
+                        _record_lease_failure(client, "author list interrupted or timed out")
                     raise
                 except (AuthorCursorError, AuthorIdentityError, AuthorSessionError):
                     raise
@@ -336,7 +344,7 @@ class DiscoverySession:
                         request.media_name, attempt + 1, type(exc).__name__,
                         str(exc)[:200] if isinstance(exc, PlatformCrawlerError) else "transport failure",
                     )
-                    client.invalidate_active_lease("author list unusable or blocked")
+                    _record_lease_failure(client, "author list unusable or blocked", exc)
                     await self.close()
                     if attempt == 2:
                         if isinstance(exc, PlatformCrawlerError):

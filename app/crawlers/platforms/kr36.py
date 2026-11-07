@@ -7,8 +7,6 @@ from app.models.engagement import EngagementStats
 
 
 async def collect(crawler, url, wid, limit, page, cursor, comments):
-    if comments:
-        raise PublicDataUnavailable("36氪当前仅支持目标文章的公开互动计数，评论正文接口尚未完成实网验证")
     response = await crawler._get_response(f"https://www.36kr.com/p/{wid}")
     state = assigned_json(response.text, "window.initialState").get("articleDetail") or {}
     payload = state.get("articleDetailData") or {}
@@ -20,4 +18,6 @@ async def collect(crawler, url, wid, limit, page, cursor, comments):
         favorites=to_int(counts.get("statCollect")), comments=to_int(counts.get("statComment")))
     if not any(value is not None for value in stats.model_dump().values()):
         raise PlatformCrawlerError("36氪目标文章未公开互动计数")
+    if comments and stats.comments != 0:
+        raise PublicDataUnavailable("36氪当前仅支持目标文章的公开互动计数，评论正文接口尚未完成实网验证")
     return stats, [], None, "36kr.com initialState.articleDetail"

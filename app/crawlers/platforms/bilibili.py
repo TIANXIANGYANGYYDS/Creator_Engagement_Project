@@ -27,6 +27,11 @@ REPLY_LEGACY_URL = "https://api.bilibili.com/x/v2/reply"
 VIDEO_VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
 ARTICLE_VIEWINFO_URL = "https://api.bilibili.com/x/article/viewinfo"
 OPUS_DETAIL_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/detail"
+DYNAMIC_DETAIL_URL = "https://api.bilibili.com/x/polymer/web-dynamic/desktop/v1/detail"
+DYNAMIC_FEATURES = (
+    "itemOpusStyle,opusBigCover,onlyfansVote,endFooterHidden,decorationCard,"
+    "onlyfansAssetsV2,ugcDelete,onlyfansQaCard,commentsNewVersion"
+)
 WBI_MIXIN_KEY_ENC_TAB = (
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
     27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
@@ -103,6 +108,8 @@ async def fetch_video(
         data = view.get("data") or {}
         if view.get("code") == 62012:
             raise BilibiliUnavailableError("B 站稿件仅 UP 主自己可见（62012）")
+        if view.get("code") == 62002:
+            raise BilibiliUnavailableError("B 站接口明确返回稿件不可见（62002），当前游客入口不可查")
         if view.get("code") in {-101, -352, -412, -509}:
             raise PlatformBlockedError(f"bilibili view returned code {view['code']}")
         if view.get("code") != 0 or not data:
@@ -272,11 +279,13 @@ async def fetch_opus(
         sources = [detail_source]
         if include_comments:
             basic = detail.get("basic") or {}
+            discussion = _opus_stat(detail).get("comment") or {}
             comment_oid = str(
-                basic.get("comment_id_str") or basic.get("rid_str") or ""
+                basic.get("comment_id_str") or discussion.get("comment_id")
+                or basic.get("rid_str") or ""
             )
-            reply_type = to_int(basic.get("comment_type"))
-            if not comment_oid or reply_type is None:
+            reply_type = to_int(basic.get("comment_type", discussion.get("comment_type")))
+            if not comment_oid.isdigit() or reply_type is None or reply_type <= 0:
                 raise PlatformCrawlerError("bilibili opus contains no public comment target")
             payload, comment_source = await fetch_comments(
                 crawler,
@@ -336,32 +345,58 @@ async def fetch_opus_detail(
         )
         state = parse_opus_initial_state(str(getattr(response, "text", "") or ""))
     except PlatformCrawlerError:
-        # An HTTP 404/challenge page does not prove the target is unavailable.
-        # Ask the official detail API with a guest device on this same lease.
-        headers = {"Referer": canonical_url, "Cookie": ""}
-        spi = await crawler._get_json(
-            "https://api.bilibili.com/x/frontend/finger/spi", headers=headers,
-        )
-        device = spi.get("data") or {}
-        if spi.get("code") != 0 or not device.get("b_3"):
-            raise PlatformCrawlerError("B 站访客设备会话初始化失败")
-        headers["Cookie"] = "; ".join(
-            f"{name}={device[field]}"
-            for name, field in (("buvid3", "b_3"), ("buvid4", "b_4"))
-            if device.get(field)
-        )
+        state = {}
+    detail = state.get("detail")
+    if isinstance(detail, dict) and str(detail.get("id_str")) == opus_id:
+        return detail, "opus __INITIAL_STATE__"
+    if isinstance(detail, dict) and detail.get("id_str"):
+        raise PlatformCrawlerError("bilibili opus page contains no matching detail")
+
+    # Empty SSR and challenge pages do not prove content is unavailable.
+    # Keep guest initialization and both detail requests on the current lease.
+    headers = {"Referer": canonical_url, "Cookie": ""}
+    spi = await crawler._get_json(
+        "https://api.bilibili.com/x/frontend/finger/spi", headers=headers,
+    )
+    device = spi.get("data") or {}
+    if spi.get("code") != 0 or not device.get("b_3"):
+        raise PlatformCrawlerError("B 站访客设备会话初始化失败")
+    headers["Cookie"] = "; ".join(
+        f"{name}={device[field]}"
+        for name, field in (("buvid3", "b_3"), ("buvid4", "b_4"))
+        if device.get(field)
+    )
+    payload = await crawler._get_json(OPUS_DETAIL_URL, params={"id": opus_id}, headers=headers)
+    data = _detail_data(payload)
+    source = "x/polymer/web-dynamic/v1/opus/detail"
+    fallback = data.get("fallback")
+    if not data.get("item") and isinstance(fallback, dict):
+        if fallback.get("type") != 1 or str(fallback.get("id")) != opus_id:
+            raise PlatformCrawlerError("B 站动态 fallback 类型或目标 ID 不匹配")
         payload = await crawler._get_json(
-            OPUS_DETAIL_URL, params={"id": opus_id}, headers=headers,
+            DYNAMIC_DETAIL_URL,
+            params={"id": opus_id, "timezone_offset": -480, "platform": "web",
+                    "gaia_source": "main_web", "features": DYNAMIC_FEATURES,
+                    "web_location": "333.1368"},
+            headers=headers,
         )
-        code = payload.get("code")
-        if code == 4101152:
-            raise BilibiliUnavailableError("B 站动态不可见（4101152）")
-        if code in {-101, -352, -412, -509}:
-            raise PlatformBlockedError(f"bilibili opus detail returned code {code}")
-        if code != 0 or not isinstance(payload.get("data"), dict):
-            raise PlatformCrawlerError(f"bilibili opus detail returned code {code}")
-        return payload["data"].get("item") or {}, "x/polymer/web-dynamic/v1/opus/detail"
-    return state.get("detail") or {}, "opus __INITIAL_STATE__"
+        data = _detail_data(payload)
+        source = "x/polymer/web-dynamic/desktop/v1/detail"
+    detail = data.get("item")
+    if not isinstance(detail, dict) or str(detail.get("id_str")) != opus_id:
+        raise PlatformCrawlerError("bilibili opus page contains no matching detail")
+    return detail, source
+
+
+def _detail_data(payload: dict[str, Any]) -> dict[str, Any]:
+    code = payload.get("code")
+    if code == 4101152:
+        raise BilibiliUnavailableError("B 站动态不可见（4101152）")
+    if code in {-101, -352, -412, -509}:
+        raise PlatformBlockedError(f"bilibili dynamic detail returned code {code}")
+    if code != 0 or not isinstance(payload.get("data"), dict):
+        raise PlatformCrawlerError(f"bilibili dynamic detail returned code {code}")
+    return payload["data"]
 
 
 def parse_article_stats(data: dict[str, Any]) -> EngagementStats:
@@ -390,12 +425,15 @@ def parse_opus_initial_state(text: str) -> dict[str, Any]:
     return value
 
 
-def parse_opus_stats(detail: dict[str, Any]) -> EngagementStats:
-    module_stat: dict[str, Any] = {}
+def _opus_stat(detail: dict[str, Any]) -> dict[str, Any]:
     for module in detail.get("modules") or []:
         if isinstance(module, dict) and isinstance(module.get("module_stat"), dict):
-            module_stat = module["module_stat"]
-            break
+            return module["module_stat"]
+    return {}
+
+
+def parse_opus_stats(detail: dict[str, Any]) -> EngagementStats:
+    module_stat = _opus_stat(detail)
 
     def count(key: str) -> int | None:
         value = module_stat.get(key) or {}

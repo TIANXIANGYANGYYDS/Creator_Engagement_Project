@@ -34,6 +34,30 @@ def zero_or_unavailable(stats, requested, name):
         raise PublicDataUnavailable(f"{name}公开页未提供完整的一级评论接口；不能将未知评论当作空列表")
 
 
+async def guancha(crawler, url, wid, limit, page, cursor, comments):
+    response = await crawler._get_response("https://user.guancha.cn/main/content", params={"id": wid})
+    soup = BeautifulSoup(response.text, "html.parser")
+    target = soup.select_one("#comments-container")
+    if target is None or target.get("data-id") != wid or target.get("data-type") != "2":
+        raise PlatformCrawlerError("风闻页面未返回目标文章的评论标识")
+    praise = soup.select_one(f'.tools_praise[data-id="{wid}"][data-type="2"] > span:last-child')
+    stats = EngagementStats(likes=to_int(praise.get_text(strip=True)) if praise else None)
+    payload = await crawler._get_json("https://user.guancha.cn/comment/cmt-list.json", params={
+        "codeId": wid, "codeType": 2, "pageNo": 1, "order": 1, "ff": "user"}, headers={"Referer": url})
+    if payload.get("code") != 0 or payload.get("status") not in {1, 2, 3}:
+        raise PlatformCrawlerError("风闻评论接口返回业务错误")
+    if payload["status"] == 3:
+        if comments:
+            raise PublicDataUnavailable("风闻目标文章已关闭评论")
+    else:
+        stats.comments = to_int(payload.get("count"))
+        rows = checked_list(payload.get("items"), stats.comments, first=True)
+        if stats.comments is None or (stats.comments == 0 and rows):
+            raise PlatformCrawlerError("风闻评论列表与总数缺失或矛盾")
+        zero_or_unavailable(stats, comments, "风闻")
+    return stats, [], None, "user.guancha.cn target article + comment/cmt-list.json (nonempty bodies unverified)"
+
+
 async def jike(crawler, url, wid, limit, page, cursor, comments):
     response = await crawler._get_response(url)
     data = next_data(response.text).get("props", {}).get("pageProps", {})
@@ -155,9 +179,21 @@ async def how42(crawler, url, wid, limit, page, cursor, comments):
     response = await crawler._get_response(f"https://www.42how.com/article/{wid}")
     state = nuxt_literal_state(response.text)
     item = state.get("data", [{}])[0].get("articleInfo") or {}
-    stats = article_stats(item, wid, "id", {"views": "viewCount", "likes": "likeCount"})
+    # /view is the discussion service, not article readership. Neither
+    # viewCount nor the undisplayed internal pv is a verified reading count.
+    stats = article_stats(item, wid, "id", {"likes": "likeCount"})
+    payload = await crawler._get_json("https://api.42how.com/view", params={
+        "page": 1, "pageSize": 20, "orderBy": "like", "order": "DESC",
+        "id": wid, "type": "article"}, headers={"Referer": url})
+    data = payload.get("data") or {}
+    if payload.get("code") != "00000":
+        raise PlatformCrawlerError("42号车库评论接口返回业务错误")
+    stats.comments = to_int(data.get("count"))
+    rows = checked_list(data.get("list"), stats.comments, first=True)
+    if stats.comments is None or (stats.comments == 0 and rows):
+        raise PlatformCrawlerError("42号车库评论总数缺失或与列表矛盾")
     zero_or_unavailable(stats, comments, "42号车库")
-    return stats, [], None, "42how.com target data.articleInfo (excluding recommendations)"
+    return stats, [], None, "42how.com target data.articleInfo + api.42how.com/view (nonempty bodies unverified)"
 
 
 async def ql1d(crawler, url, wid, limit, page, cursor, comments):
@@ -169,5 +205,5 @@ async def ql1d(crawler, url, wid, limit, page, cursor, comments):
     return stats, [], None, "ql1d.com target data.newsData"
 
 
-COLLECTORS = {"jike": jike, "chemm": chemm, "ijiwei": ijiwei, "jianshu": jianshu,
+COLLECTORS = {"guancha": guancha, "jike": jike, "chemm": chemm, "ijiwei": ijiwei, "jianshu": jianshu,
     "geekpark": geekpark, "tidenews": tidenews, "acfun": acfun, "how42": how42, "ql1d": ql1d}

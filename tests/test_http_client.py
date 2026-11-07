@@ -420,7 +420,7 @@ class RoutedSession(FakeSession):
         return self.outcome
 
 
-@pytest.mark.parametrize("host", ["edith.xiaohongshu.com", "res.wx.qq.com", "webapi.rednote.com"])
+@pytest.mark.parametrize("host", ["edith.xiaohongshu.com", "res.wx.qq.com", "webapi.rednote.com", "gdfp.gifshow.com"])
 def test_xhs_connect_recovery_keeps_proxy_tls_target_and_cookie_flow(monkeypatch, host):
     async def run():
         proxy = {"https": "http://127.0.0.1:8080"}

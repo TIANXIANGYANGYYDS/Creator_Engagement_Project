@@ -277,7 +277,9 @@ def test_dongchedi_rounded_proxy_id_requires_independent_target_evidence(change,
 def test_xueqiu_does_not_extract_reposted_status_counters():
     client = Client(Response(text='<html/>'), Response({'id':123,'like_count':0,'reply_count':2,
                       'retweeted_status':{'like_count':999}}),
-                    Response({'count':2,'comments':[{'id':456,'text':'评论','user':{'screen_name':'访客'},'created_at':1791553321000}]}))
+                    Response({'status_reply_count':2,'comment_tl_count':1,'next_max_id':-1,'type':2,
+                              'comments':[{'id':456,'text':'评论','root_in_reply_to_status_id':123,
+                                           'reply_count':1,'user':{'screen_name':'访客'},'created_at':1791553321000}]}))
     result = asyncio.run(EngagementCrawler(client=client).fetch_comments('https://xueqiu.com/1/123', '雪球', 1))
     assert result.total_comments == 2 and result.comments[0].author == '访客'
     assert all('www.xueqiu.com' in url for url,_ in client.calls)

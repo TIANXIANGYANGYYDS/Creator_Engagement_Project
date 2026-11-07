@@ -243,11 +243,11 @@ def test_buycar_guid_and_target_scoped_views():
 
 def test_36kr_target_counts_and_explicit_comment_limit():
     state={'articleDetail':{'articleDetailData':{'code':0,'data':{'itemId':'4019927233435522','widgetTitle':'目标'}},'articleRecommendData':{'statPraise':26,'statComment':0,'statCollect':9}}}
-    crawler=EngagementCrawler(client=Client(Response(text='window.initialState='+json.dumps(state))))
+    crawler=EngagementCrawler(client=Client(Response(text='window.initialState='+json.dumps(state)), Response(text='window.initialState='+json.dumps(state))))
     r=asyncio.run(crawler.fetch_interactions('https://www.36kr.com/p/4019927233435522','36氪'))
     assert r.coverage=='partial' and (r.stats.likes,r.stats.comments,r.stats.favorites)==(26,0,9) and r.stats.views is None
     r=asyncio.run(crawler.fetch_comments('https://www.36kr.com/p/4019927233435522','36氪',1))
-    assert r.coverage=='unsupported'
+    assert r.coverage=='partial' and r.total_comments == 0 and not r.comments
 
 
 def test_sohu_missing_comment_thread_preserves_confirmed_pv():

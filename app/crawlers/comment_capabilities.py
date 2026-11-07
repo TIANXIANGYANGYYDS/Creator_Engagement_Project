@@ -20,12 +20,12 @@ COMMENT_CAPABILITIES: dict[EngagementPlatform, CommentCapabilities] = {
     "wechat": CommentCapabilities(
         root_comments="unavailable",
         anonymous=False,
-        note="零账号模式无法稳定获得任意公众号文章评论正文。",
+        note="微信公众号渠道已停用，互动和评论请求直接返回失败。",
     ),
     "wechat_channels": CommentCapabilities(
         root_comments="unavailable",
         anonymous=False,
-        note="公开视频页只公开评论总数，不公开评论正文。",
+        note="微信视频号渠道已停用，互动和评论请求直接返回失败。",
     ),
     "xiaohongshu": CommentCapabilities(
         root_comments="first_public_page",
@@ -78,19 +78,23 @@ COMMENT_CAPABILITIES["qctt"] = CommentCapabilities(
 
 COMMENT_CAPABILITIES["kr36"] = CommentCapabilities(
     root_comments="unavailable", anonymous=True,
-    note="仅已验证公开互动计数；签名评论接口尚未通过实网业务验收。",
+    note="明确的目标文章零评论可确认空列表；非空评论接口尚未通过实网业务验收。",
 )
 COMMENT_CAPABILITIES["csdn"] = CommentCapabilities(
     root_comments="unavailable", anonymous=True,
     note="已验证目标文章公开互动计数；评论接口访问挑战尚未通过实网验收。",
 )
 
-for _platform in ("jike", "chemm", "jianshu", "dingnews", "ofweek", "growthhk", "ql1d", "ichaoqi", "yzwb"):
+for _platform in ("how42", "guancha", "jike", "chemm", "jianshu", "dingnews", "ofweek", "growthhk", "ql1d", "ichaoqi", "yzwb"):
     COMMENT_CAPABILITIES[_platform] = CommentCapabilities(
         root_comments="unavailable", anonymous=True,
         note="仅在目标文章明确显示评论数为 0 时确认空列表；非空评论正文/分页尚未完成实网验收。",
     )
-for _platform in ("tidenews", "tonghuashun", "icswb", "donews", "how42", "guanhai"):
+COMMENT_CAPABILITIES["tonghuashun"] = CommentCapabilities(
+    root_comments="unavailable", anonymous=True,
+    note="公开评论总数可用，明确零评论可确认空列表；关闭评论与未知值不计零，非空正文分页尚未实网验证。",
+)
+for _platform in ("tidenews", "icswb", "donews", "guanhai"):
     COMMENT_CAPABILITIES[_platform] = CommentCapabilities(
         root_comments="unavailable", anonymous=True,
         note="已接入目标文章公开互动字段；未取得可验证的评论正文，不能将未知评论当作零条。",

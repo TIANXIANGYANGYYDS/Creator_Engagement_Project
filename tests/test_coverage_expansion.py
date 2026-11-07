@@ -209,6 +209,8 @@ def test_nuxt_literal_parser_resolves_bindings_without_running_page_code():
 @pytest.mark.parametrize('media,url,expected', [
     ('上观', 'https://www.jfdaily.com/staticsg/res/html/web/newsDetail.html?id=123', '123'),
     ('爱集微', 'https://www.laoyaoba.com/html/share/news?news_id=123', '123'),
+    ('爱集微', 'https://www.laoyaoba.com/n/123', '123'),
+    ('爱集微', 'https://www.laoyaoba.com/html/share/news/123', '123'),
     ('同顺号', 'https://t.10jqka.com.cn/lgt/article_detail/index.html?pid=123', 'post:123'),
     ('同花顺', 'https://stock.10jqka.com.cn/hks/20261010/c123.shtml', 'news:123'),
     ('OFweek维科网', 'https://chuneng.ofweek.com/news/2026-10/ART-180226-8420-123.html', '123'),
@@ -217,6 +219,47 @@ def test_nuxt_literal_parser_resolves_bindings_without_running_page_code():
 ])
 def test_exported_alias_url_forms(media, url, expected):
     assert validate_media_url(url, media)[1] == expected
+
+
+@pytest.mark.parametrize('media,url,platform', [
+    ('汽车之家论坛', 'https://club.autohome.com.cn/bbs/thread/abcdef1234567890/123-1.html', 'autohome'),
+    ('OFweek电子工程网', 'https://ee.ofweek.com/2026-10/ART-11000-2800-123.html', 'ofweek'),
+    ('新浪网-圈子', 'https://super.sina.cn/shequn/post/detail_123.html', 'sina_community'),
+    ('新浪新闻', 'https://news.sina.cn/2026-11-01/detail-ina123abc.d.html', 'sina_news'),
+    ('新浪新闻', 'https://super.sina.cn/shequn/post/detail_123.html', 'sina_community'),
+])
+def test_export_channel_aliases_keep_exact_host_validation(media, url, platform):
+    assert validate_media_url(url, media)[0] == platform
+    from urllib.parse import urlsplit, urlunsplit
+    parsed = urlsplit(url)
+    with pytest.raises(ValueError):
+        validate_media_url(urlunsplit(parsed._replace(netloc=parsed.netloc + '.evil.test')), media)
+
+
+def test_nuxt_shared_objects_with_literal_initialization():
+    html = '<script>window.__NUXT__=(function(a,b){b.id=999;b.title="Related";return {data:[{articleInfo:{id:123,likeCount:a},related:[b]}]}}(0,{}));</script>'
+    state = nuxt_literal_state(html)
+    assert state['data'][0]['articleInfo'] == {'id': 123, 'likeCount': 0}
+    assert state['data'][0]['related'] == [{'id': 999, 'title': 'Related'}]
+    for expression in ['fetch("https://example.test")', 'unknown', 'b.id+1']:
+        with pytest.raises(PlatformCrawlerError):
+            nuxt_literal_state(html.replace('b.id=999', 'b.id=' + expression))
+
+
+@pytest.mark.parametrize('total,coverage', [(0, 'partial'), (None, 'unsupported'), (2, 'unsupported')])
+def test_kr36_comments_accept_only_verified_target_zero(total, coverage):
+    state = {'articleDetail': {'articleDetailData': {'code': 0, 'data': {'itemId': '123', 'widgetTitle': 'Target'}},
+                              'articleRecommendData': {'statPraise': 1, 'statComment': total}}}
+    html = 'window.initialState=' + json.dumps(state)
+    result = asyncio.run(EngagementCrawler(client=Client(Response(text=html))).fetch_comments(
+        'https://www.36kr.com/p/123', '36氪', 1))
+    assert result.coverage == coverage and not result.comments
+    if total == 0:
+        assert result.total_comments == 0
+    state['articleDetail']['articleDetailData']['data']['itemId'] = '999'
+    result = asyncio.run(EngagementCrawler(client=Client(Response(text='window.initialState=' + json.dumps(state)))).fetch_comments(
+        'https://www.36kr.com/p/123', '36氪', 1))
+    assert result.coverage == 'failed'
 
 
 def test_chemm_uses_displayed_magnitude_not_internal_hit_counter():

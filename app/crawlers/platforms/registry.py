@@ -15,6 +15,7 @@ WECHAT_CHANNELS_MOBILE_PATH = "/mobile/commonFinderJsApi.html"
 
 
 MEDIA_ALIASES: dict[str, EngagementPlatform] = {
+    "风闻社区": "guancha",
     "观海": "guanhai",
     "壹点": "ql1d",
     "ofweek": "ofweek",
@@ -80,6 +81,9 @@ MEDIA_ALIASES: dict[str, EngagementPlatform] = {
     "雪球": "xueqiu",
     "autohome": "autohome",
     "汽车之家": "autohome",
+    "汽车之家论坛": "autohome",
+    "ofweek电子工程网": "ofweek",
+    "新浪网-圈子": "sina_community",
     "ixigua": "ixigua",
     "西瓜视频": "ixigua",
     "qq_stock": "qq_stock",
@@ -102,6 +106,9 @@ def normalize_media_name(media_name: str) -> EngagementPlatform:
 
 def validate_media_url(url: str, media_name: str) -> tuple[EngagementPlatform, str]:
     requested_platform = normalize_media_name(media_name)
+    # Exports use this label for both Sina news articles and community posts.
+    if media_name.strip() == "新浪新闻" and urlparse(url).hostname in {"news.sina.cn", "news.sina.com.cn"}:
+        return "sina_news", source_id("sina_news", url)
     if requested_platform in EXTENDED_SOURCES:
         return requested_platform, source_id(requested_platform, url)
     detected_platform, work_id = identify_url(url)

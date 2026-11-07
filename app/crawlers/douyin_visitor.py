@@ -46,19 +46,37 @@ class DouyinVisitorSessions:
         self._lock = asyncio.Lock()
 
     async def get(self, referer: str) -> DouyinVisitor:
+        reserve = 25 if getattr(self.client, "lease_optimization_enabled", False) else 0
+        ensure_lifetime = getattr(self.client, "ensure_proxy_lifetime", None)
+        if callable(ensure_lifetime):
+            await ensure_lifetime(25, exclusive=True)
         mapping = await self.client.active_proxy_mapping()
         key = tuple(sorted((mapping or {}).items()))
         visitor = self._sessions.get(key)
-        if visitor is not None and visitor.expires_at > monotonic():
+        if visitor is not None and visitor.expires_at > monotonic() + reserve:
             return visitor
         async with self._lock:
+            # The current IP may have aged while another guest was bootstrapping.
+            # Do this before opening the browser and refresh the identity key.
+            if callable(ensure_lifetime):
+                await ensure_lifetime(25, exclusive=True)
+                mapping = await self.client.active_proxy_mapping()
+                key = tuple(sorted((mapping or {}).items()))
             now = monotonic()
             for expired in [k for k, v in self._sessions.items() if v.expires_at <= now]:
                 del self._sessions[expired]
             visitor = self._sessions.get(key)
-            if visitor is not None:
+            if visitor is not None and visitor.expires_at > now + reserve:
                 self._sessions.move_to_end(key)
                 return visitor
+            if callable(ensure_lifetime):
+                await ensure_lifetime(70, exclusive=True)
+                mapping = await self.client.active_proxy_mapping()
+                key = tuple(sorted((mapping or {}).items()))
+                visitor = self._sessions.get(key)
+                if visitor is not None and visitor.expires_at > monotonic() + reserve:
+                    self._sessions.move_to_end(key)
+                    return visitor
             visitor = await self._bootstrap(referer)
             self._sessions[key] = visitor
             while len(self._sessions) > 32:

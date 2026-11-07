@@ -35,6 +35,8 @@ class Settings(BaseSettings):
         alias="PROXY_MODE",
     )
     proxy_pool_size: int = Field(default=8, alias="PROXY_POOL_SIZE", ge=1, le=200)
+    proxy_lease_optimization_enabled: bool = Field(default=False, alias="PROXY_LEASE_OPTIMIZATION_ENABLED")
+    proxy_refill_batch_size: int = Field(default=2, alias="PROXY_REFILL_BATCH_SIZE", ge=1, le=200)
     proxy_max_concurrency: int = Field(
         default=1,
         alias="PROXY_MAX_CONCURRENCY",

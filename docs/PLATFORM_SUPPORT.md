@@ -1,18 +1,23 @@
 # 平台与采集器清单
 
-更新：2026-11-01。当前代码注册 **85 个规范来源名称**（原 61 + 本轮新增 24），包含共享协议、仅支持部分字段和评论受限的来源。原前 80 名中 **63 个可路由，17 个仍未接入**，不能等同全字段/全评论可用。详见 [覆盖与待办](PLATFORM_BACKLOG.md)、[本轮验收](PLATFORM_EXPANSION_2026-11-01.md) 和 [联合来源 CSV](PLATFORM_COVERAGE_2026-11-01.csv)。
+更新：2026-11-07。当前工作区注册 **86 个规范来源名称**（在 85 个来源上增加风闻），包含共享协议、仅支持部分字段和评论受限的来源。注册数量不能等同全字段/全评论可用。11 月 1 日的前 80 名覆盖快照见 [覆盖与待办](PLATFORM_BACKLOG.md)、[历史验收](PLATFORM_EXPANSION_2026-11-01.md) 和 [联合来源 CSV](PLATFORM_COVERAGE_2026-11-01.csv)。工作区能力不代表运行中的旧发布版本已更新。
 
-调用方继续提供 `url + media_name`；小红书无需额外提交作者或访问参数。内部恢复访问链接仍取决于已有会话、可核验线索及作品可见性，登录不保证任意裸链接都能恢复。
+调用方继续提供 `url + media_name`；小红书无需额外提交作者或访问参数。服务优先使用已有账号会话按笔记 ID 查询访问参数，无需作者线索；仍受作品可见性、会话状态和平台返回结果限制。
+
+微信公众号和微信视频号按业务要求停用采集。服务入口直接返回失败，不读取旧成功缓存、不等待采集限流、不调用协议、浏览器或会话桥；两者保留来源识别，用于返回明确的失败原因。单条接口返回 HTTP 502，批量及异步任务对应项返回 `status=failed`、`complete=false`，结果字段均为 `null`。此工作区策略需发布后生效。
 
 下表列出代码支持的字段路径，单篇未公开字段保留 `null`。评论只返回一级正文，回复仅保留数量；评论总数可能含回复。分页实现不等于已验证所有历史页。每个平台均经内容 ID、评论线程或目标页面绑定，拒绝推荐区计数及无依据的零值。
+
+2026-11-01 微博连接恢复、头条评论浏览器恢复的工作区修改及隔离验证见 [修复记录](WEIBO_TOUTIAO_RECOVERY_2026-11-01.md)。该修改尚未部署；头条真实验证码的识别/提交/服务端通过链路尚未验证，不能理解为所有验证码均已解决。
 
 | 规范媒体名 | 标识 | 实现文件 | 互动字段范围 | 评论及限制 |
 |---|---|---|---|---|
 | 知乎 | `zhihu` | [zhihu.py](../app/crawlers/platforms/zhihu.py) | 赞/评论/收藏；阅读为 null | 专栏零评论已实测；回答样本重定向到要求登录的安全验证页；非空及深页未通过实网验收 |
-| 同花顺 | `tonghuashun` | [tonghuashun.py](../app/crawlers/platforms/tonghuashun.py) | 同顺号阅读；普通财经新闻未取得可靠计数 | 评论未接通；查询 hotKey，不发送 inc=1；两类内容不能混用 |
+| 同花顺 | `tonghuashun` | [tonghuashun.py](../app/crawlers/platforms/tonghuashun.py) | 同顺号阅读/评论总数；财经新闻阅读/赞及开放时的评论总数 | 新闻编号按当前网页编码，校验 seq/encodedSeq/hotKey；不发送 inc；明确零评论可确认空列表，关闭评论保留未知，非空正文分页未验收 |
+| 风闻 | `guancha` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 目标文章赞/评论总数；阅读未知 | 支持风闻社区别名及 main/wap 内容链接；6 条零评论样本已实测，非空正文分页未验收 |
 | 即刻 | `jike` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 赞/评论/分享/转发 | 仅可确认目标明确为 0 的评论；非空正文未接通 |
 | 玩车教授 | `chemm` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 页面显示阅读/赞/评论 | 阅读 1.4w 对应约 14000，不能使用 post_hits_real；62871 样本缺少有效目标状态；仅零评论 |
-| 爱集微 | `ijiwei` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论/收藏 | newlist 一级评论协议已接入；零评论已实测，非空/深页待实测；首屏省略 after_id |
+| 爱集微 | `ijiwei` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论/收藏 | 兼容 laoyaoba.com/n/ 及分享链接；newlist 一级评论协议已接入；零评论已实测，非空/深页待实测；首屏省略 after_id |
 | 简书 | `jianshu` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论 | 首轮成功，复测部分响应缺少目标状态；仅能确认明确零评论 |
 | 极客公园 | `geekpark` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论 | 官网评论列表协议已接入；零评论已实测，非空待实测 |
 | 潮新闻 | `tidenews` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/分享/收藏 | 评论未接通；不能把前端默认空列表当零评论 |
@@ -27,19 +32,19 @@
 | 增长黑客 | `growthhk` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 阅读/赞/评论 | 只取文章徽标，不取作者累计评论；仅零评论 |
 | 第一电动网 | `d1ev` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 赞/评论；阅读为 null | 非空一级评论已实测，支持官网分页 HTML；深页待实测，过滤回复正文 |
 | 数码之家 | `mydigit` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 帖子查看/赞/回复/收藏 | 零回复可确认；非空样本正文要求登录，明确返回 blocked |
-| 42号车库 | `how42` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞 | 只解析目标 Nuxt articleInfo，不执行页面脚本；评论未接通 |
+| 42号车库 | `how42` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 赞/评论总数；阅读未知 | 安全解析 Nuxt 共享对象；viewCount 不作阅读数；官网 /view 评论接口已验证明确零评论，非空正文分页未验收 |
 | 齐鲁壹点 | `ql1d` | [article_communities.py](../app/crawlers/platforms/article_communities.py) | 阅读/赞/评论 | 只解析目标 Nuxt newsData；仅明确零评论 |
 | 潮起网 | `ichaoqi` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 显示阅读/评论 | 2.8w 是显示约数；只取文章元信息，排除热门侧栏；仅零评论 |
 | 观海新闻 | `guanhai` | [publisher_pages.py](../app/crawlers/platforms/publisher_pages.py) | 赞；阅读/评论未知 | 只使用官网显示的 digg；不把未展示 pv=0 当真实阅读；评论请求未通过 |
 | 紫牛新闻 | `yzwb` | [regional_news.py](../app/crawlers/platforms/regional_news.py) | 阅读/赞/评论 | 紫牛新闻 getDetail 校验 news_id；仅明确零评论；扬子晚报网旧门户为另一协议 |
 | 抖音 | `douyin` | [douyin.py](../app/crawlers/platforms/douyin.py) | 赞、评论、分享、收藏；未公开播放数为 null | 公开一级评论分页；可能受登录/删除/风控限制 |
-| 今日头条 | `toutiao` | [toutiao.py](../app/crawlers/platforms/toutiao.py) | 评论数；SSR 有效时补充点赞/分享等 | 公开一级评论分页；可能受登录/删除/风控限制 |
-| 微信公众号 | `wechat` | [wechat.py](../app/crawlers/platforms/wechat.py) | 页面明确公开的赞/推荐/精选评论数；阅读量不保证 | 匿名正文不可用 |
-| 微信视频号 | `wechat_channels` | [wechat_channels.py](../app/crawlers/platforms/wechat_channels.py) | 公开预览的赞/评论/转发/收藏；客户端链接受限 | 匿名正文不可用；仅公开预览计数 |
+| 今日头条 | `toutiao` | [toutiao.py](../app/crawlers/platforms/toutiao.py) | 评论数；SSR 有效时补充点赞/分享等；仅有评论数时限时尝试浏览器补充，失败保留已核验字段 | 公开一级评论分页；参数无效及目标页面与接口共同确认不存在时停止重试 |
+| 微信公众号 | `wechat` | [服务入口](../app/services/engagement_service.py) | 已停用，直接返回失败 | 不发起互动或评论采集 |
+| 微信视频号 | `wechat_channels` | [服务入口](../app/services/engagement_service.py) | 已停用，直接返回失败 | 不发起互动或评论采集 |
 | 小红书 | `xiaohongshu` | [xiaohongshu.py](../app/crawlers/platforms/xiaohongshu.py) | 阅读/赞/评/收藏/分享中实际公开字段；阅读常缺失 | 真实账号，本机 IP、无代理池；cursor，独立串行/15 秒间隔 |
 | 好看视频 | `haokan` | [haokan.py](../app/crawlers/platforms/haokan.py) | 播放/赞/评论 | 公开一级评论分页；可能受登录/删除/风控限制 |
-| 快手 | `kuaishou` | [kuaishou.py](../app/crawlers/platforms/kuaishou.py) | 播放/赞/评论中公开字段 | 公开一级评论分页；可能受登录/删除/风控限制 |
-| 哔哩哔哩 | `bilibili` | [bilibili.py](../app/crawlers/platforms/bilibili.py) | 播放/赞/评/投币/收藏/分享/弹幕，依内容类型 | 公开一级评论分页；可能受登录/删除/风控限制 |
+| 快手 | `kuaishou` | [kuaishou.py](../app/crawlers/platforms/kuaishou.py) | 播放/赞/评论中公开字段；游客 SDK 经原代理初始化，目标 ID 严格匹配 | 公开一级评论分页；详情 1040 对应游客登录提示，21 对应失效；空响应不当作零评论 |
+| 哔哩哔哩 | `bilibili` | [bilibili.py](../app/crawlers/platforms/bilibili.py) | 播放/赞/评/投币/收藏/分享/弹幕，依内容类型；动态支持 opus → desktop detail 的目标 ID 校验与游客会话 | 公开一级评论分页；动态按目标统计模块定位评论线程；可能受登录/删除/风控限制 |
 | 微博 | `weibo` | [weibo.py](../app/crawlers/platforms/weibo.py) | 赞/评/转发；微博头条文章可有阅读数 | 可分页，深页可要求登录 |
 | 新浪看点 | `sina` | [sina.py](../app/crawlers/platforms/sina.py) | 评论数 | 公开一级评论分页；可能受登录/删除/风控限制 |
 | 新浪财经头条号 | `sina_finance` | [sina.py](../app/crawlers/platforms/sina.py) | 评论数 | 公开一级评论分页；可能受登录/删除/风控限制 |
@@ -50,12 +55,12 @@
 | 今日头条微头条 | `weitoutiao` | [bytedance_publishers.py](../app/crawlers/platforms/bytedance_publishers.py) | 公开赞/评论/转发；阅读缺失为 null | 公开一级评论分页；可能受登录/删除/风控限制 |
 | 西瓜视频 | `ixigua` | [bytedance_publishers.py](../app/crawlers/platforms/bytedance_publishers.py) | 公开播放/赞/评论等 | 公开一级评论分页；可能受登录/删除/风控限制 |
 | 网易号 | `netease` | [netease.py](../app/crawlers/platforms/netease.py) | 评论数；动态分享页可补充明确的非零点赞 | 公开一级评论分页；可能受登录/删除/风控限制 |
-| 雪球 | `xueqiu` | [xueqiu.py](../app/crawlers/platforms/xueqiu.py) | 赞/评/转发；隐藏阅读数为 null | 公开一级评论分页；可能受登录/删除/风控限制 |
+| 雪球 | `xueqiu` | [xueqiu.py](../app/crawlers/platforms/xueqiu.py) | 赞/评/转发；隐藏阅读数为 null | 已切换官网 v3 评论接口；总数含回复，按目标 ID 校验一级正文并保留回复数；游标同时保留 max_id 和返回的排序类型；游客仍可能受筛选/验证限制 |
 | 汽车之家 | `autohome` | [autohome.py](../app/crawlers/platforms/autohome.py) | 文章评论；论坛阅读/回复，依内容类型 | 文章分页；论坛过滤审核/仅作者可见回复 |
 | 腾讯自选股 | `qq_stock` | [qq_stock.py](../app/crawlers/platforms/qq_stock.py) | 目标资讯公开互动字段 | 公开一级评论分页；可能受登录/删除/风控限制 |
 | CSDN | `csdn` | [csdn.py](../app/crawlers/platforms/csdn.py) | 目标阅读/赞/收藏；评论数未知 | 公开页面解析通过；实网重复 521/连接失败，评论正文未上线 |
 | 快资讯 | `kuai` | [kuai.py](../app/crawlers/platforms/kuai.py) | 评论数；其他字段为 null | 现代/旧分享 URL；零/非空根评论实测，深页待补实测 |
-| 36氪 | `kr36` | [kr36.py](../app/crawlers/platforms/kr36.py) | 赞/评论数/收藏；阅读为 null | 评论正文未上线 |
+| 36氪 | `kr36` | [kr36.py](../app/crawlers/platforms/kr36.py) | 赞/评论数/收藏；阅读为 null | 目标文章明确零评论可确认空列表；非空评论正文未接通 |
 | 选车网 | `chooseauto` | [more_car_news.py](../app/crawlers/platforms/more_car_news.py) | 阅读/赞/评论/分享/收藏 | 公开一级评论分页；可能受登录/删除/风控限制 |
 | 汽车网评 | `qcwp` | [more_car_news.py](../app/crawlers/platforms/more_car_news.py) | 阅读/评论；收藏状态不是收藏量 | 公开一级评论分页；可能受登录/删除/风控限制 |
 | 买车网 | `buycar` | [more_car_news.py](../app/crawlers/platforms/more_car_news.py) | buycar.cn 阅读/评论；maiche.com 可确认的非零赞数 | buycar.cn 零评论已实测；maiche.com 正文接口业务错误，明确受限 |

@@ -10,6 +10,7 @@ from app.crawlers.engagement import EngagementCrawler
 from app.api.routers.engagement import _fetch_all_comments_with_status
 from app.crawlers.http_client import PlatformCrawlerError
 from app.crawlers.platforms.bilibili import OPUS_DETAIL_URL, parse_comments
+from app.crawlers.platforms.bilibili import DYNAMIC_DETAIL_URL
 
 
 def response(payload=None, *, status=200, text=""):
@@ -31,6 +32,79 @@ class Client:
 class NoBrowserExpected:
     async def fetch(self, *args, **kwargs):
         pytest.fail("An explicitly unavailable target must not launch a browser")
+
+
+def dynamic_fallback_client(payload, *, fallback=None):
+    return Client(
+        response(text='window.__INITIAL_STATE__={"detail":null};'),
+        response({"code": 0, "data": {"b_3": "guest-device"}}),
+        response({"code": 0, "data": {"item": None, "fallback":
+            fallback if fallback is not None else {"type": 1, "id": "123"}}}),
+        response(payload),
+    )
+
+
+def test_bilibili_dynamic_desktop_recovers_stats_on_empty_ssr():
+    client = dynamic_fallback_client({"code": 0, "data": {"item": {
+        "id_str": "123", "modules": [{"module_stat": {
+            "like": {"count": 0}, "comment": {"count": 2},
+        }}], "orig": {"modules": [{"module_stat": {"like": {"count": 999}}}]},
+    }}})
+    crawler = EngagementCrawler(client=client, max_protocol_attempts=1,
+                                browser_fallback=NoBrowserExpected())
+    result = asyncio.run(crawler.fetch_interactions("https://t.bilibili.com/123", "B站"))
+    assert result.coverage == "partial" and result.work_id == "123"
+    assert result.stats.likes == 0 and result.stats.comments == 2
+    assert result.stats.views is None and result.stats.shares is None
+    assert client.calls[3][0] == DYNAMIC_DETAIL_URL
+    assert client.calls[3][1]["headers"]["Cookie"] == "buvid3=guest-device"
+    assert client.calls[3][1]["params"]["id"] == "123"
+
+
+def test_bilibili_dynamic_comment_thread_comes_from_target_stat_module():
+    client = dynamic_fallback_client({"code": 0, "data": {"item": {
+        "id_str": "123", "basic": {"rid_str": "456", "rtype": 8},
+        "modules": [{"module_stat": {"comment": {
+            "comment_id": "456", "comment_type": 1, "count": 1,
+        }}}],
+    }}})
+    client.responses.extend([
+        response({"code": -500}),
+        response({"code": 0, "data": {"page": {"num": 1, "size": 20, "count": 1},
+            "replies": [{"rpid_str": "789", "oid": 456, "root": 0,
+                "content": {"message": "root comment"}, "member": {"uname": "guest"},
+                "rcount": 3, "replies": [{"content": {"message": "nested reply"}}]}]}}),
+    ])
+    crawler = EngagementCrawler(client=client, max_protocol_attempts=1,
+                                browser_fallback=NoBrowserExpected())
+    result = asyncio.run(crawler.fetch_comments("https://t.bilibili.com/123", "B站", 1))
+    assert result.coverage == "partial"
+    assert [c.text for c in result.comments] == ["root comment"]
+    assert result.comments[0].replies == 3
+    assert client.calls[-1][1]["params"]["oid"] == "456"
+    assert client.calls[-1][1]["params"]["type"] == 1
+
+
+@pytest.mark.parametrize("fallback", [{"type": 1, "id": "999"}, {"type": 2, "id": "123"}])
+def test_bilibili_dynamic_rejects_unverified_fallback(fallback):
+    client = dynamic_fallback_client({}, fallback=fallback)
+    result = asyncio.run(EngagementCrawler(client=client, max_protocol_attempts=1).fetch_interactions(
+        "https://t.bilibili.com/123", "B站"))
+    assert result.coverage == "failed" and result.stats.likes is None
+    assert len(client.calls) == 3
+
+
+@pytest.mark.parametrize("payload, coverage", [
+    ({"code": -352}, "blocked"),
+    ({"code": 4101152}, "unsupported"),
+    ({"code": 0, "data": {"item": {"id_str": "999"}}}, "failed"),
+    ({"code": 0, "data": {"item": None}}, "failed"),
+])
+def test_bilibili_dynamic_rejects_blocked_unavailable_or_wrong_target(payload, coverage):
+    client = dynamic_fallback_client(payload)
+    result = asyncio.run(EngagementCrawler(client=client, max_protocol_attempts=1).fetch_interactions(
+        "https://t.bilibili.com/123", "B站"))
+    assert result.coverage == coverage and result.stats.likes is None
 
 
 def weibo_client(*comments, count=0, mid="5336588076712748"):
@@ -136,15 +210,16 @@ def test_weibo_hotflow_resume_cannot_switch_stream_after_retry():
 
 
 @pytest.mark.parametrize("operation", ["comments", "interactions"])
-def test_bilibili_private_video_stops_retries_and_browser(operation):
-    client = Client(response({"code": 62012, "message": "62012"}))
+@pytest.mark.parametrize("code,reason", [(62012, "仅 UP 主自己可见"), (62002, "稿件不可见")])
+def test_bilibili_private_video_stops_retries_and_browser(operation, code, reason):
+    client = Client(response({"code": code, "message": reason}))
     crawler = EngagementCrawler(client=client, max_protocol_attempts=3,
                                 browser_fallback=NoBrowserExpected())
     fetch = crawler.fetch_comments if operation == "comments" else crawler.fetch_interactions
     args = (1,) if operation == "comments" else ()
     result = asyncio.run(fetch("https://www.bilibili.com/video/BV1Vnxi6dEts", "B站", *args))
     assert result.coverage == "unsupported"
-    assert "62012" in result.reason and "仅 UP 主自己可见" in result.reason
+    assert str(code) in result.reason and reason in result.reason
     assert result.protocol_attempts == 1 and len(client.calls) == 1
 
 

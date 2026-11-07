@@ -126,7 +126,8 @@ def test_mobile_counters_must_belong_to_target_note():
     assert xhs.parse_mobile_stats('window.__SETUP_SERVER_STATE__={broken}', NOTE).comments is None
 
 
-def test_blank_desktop_stats_use_verified_mobile_comment_count():
+def test_blank_desktop_stats_use_verified_mobile_comment_count(monkeypatch):
+    monkeypatch.setattr(xhs, '_get', AsyncMock(return_value={}))
     desktop = json.dumps({'noteDetailMap': {NOTE: {'note': {'noteId': NOTE, 'interactInfo': {'likedCount': ''}}}}})
     class Client:
         def __init__(self): self.calls = []
@@ -145,7 +146,7 @@ def test_blank_desktop_stats_use_verified_mobile_comment_count():
     assert 'mobile SSR' in result.source
 
 
-def test_mobile_restriction_stops_without_retrying_or_inventing_zero():
+def test_counter_restriction_stops_without_retrying_or_inventing_zero():
     desktop = json.dumps({'noteDetailMap': {NOTE: {'note': {'noteId': NOTE, 'interactInfo': {'likedCount': ''}}}}})
     class Client:
         def __init__(self): self.calls = 0
@@ -158,3 +159,72 @@ def test_mobile_restriction_stops_without_retrying_or_inventing_zero():
     result = asyncio.run(crawler.fetch_interactions(URL, '小红书'))
     assert result.coverage == 'blocked' and result.stats.comments is None
     assert client.calls == 2 and result.protocol_attempts == 1
+
+
+def h5_count_data(**overrides):
+    return {'comment_count': 0, 'comment_count_l1': 0, 'comments': [],
+            'has_more': False, 'time': 1793983866170, **overrides}
+
+
+def test_h5_count_is_total_not_preview_length():
+    assert xhs.parse_h5_comment_count(h5_count_data(), NOTE) == 0
+    data = h5_count_data(comment_count=14, comment_count_l1=7, has_more=True,
+                         cursor='next', comments=[comment('one')])
+    assert xhs.parse_h5_comment_count(data, NOTE) == 14
+
+
+@pytest.mark.parametrize('data', [
+    {}, {'comment_count': 0}, h5_count_data(comment_count=''),
+    h5_count_data(comment_count=False), h5_count_data(comment_count=-1),
+    h5_count_data(comment_count_l1=1), h5_count_data(has_more=True),
+    h5_count_data(time=None), h5_count_data(comments=None),
+    h5_count_data(comment_count=1, comment_count_l1=1, comments=[comment('wrong', note_id='other')]),
+])
+def test_invalid_h5_count_remains_unknown(data):
+    assert xhs.parse_h5_comment_count(data, NOTE) is None
+
+
+@pytest.mark.parametrize('existing', [{}, {'likedCount': '5', 'collectedCount': '2'}])
+def test_missing_comment_count_uses_same_note_h5_without_inventing_likes(monkeypatch, existing):
+    desktop = json.dumps({'noteDetailMap': {NOTE: {'note': {'noteId': NOTE, 'interactInfo': existing}}}})
+    class Client:
+        async def get(self, url, **kwargs):
+            assert '/explore/' in url  # No ineffective mobile-UA navigation needed.
+            return SimpleNamespace(status_code=200, text=desktop)
+    get = AsyncMock(return_value=h5_count_data())
+    monkeypatch.setattr(xhs, '_get', get)
+    crawler = EngagementCrawler(client=Client(), platform_cookies={'xiaohongshu': 'a1=a; web_session=b'})
+    result = asyncio.run(crawler.fetch_interactions(URL, '小红书'))
+    assert result.coverage == 'partial' and result.stats.comments == 0
+    assert result.stats.likes == (5 if existing else None)
+    assert result.stats.favorites == (2 if existing else None)
+    assert result.stats.shares is None and 'h5/v1/comment/page' in result.source
+    assert get.await_count == 1
+    assert get.await_args.args[1:3] == ('/api/sns/h5/v1/comment/page',
+                                      {'note_id': NOTE, 'xsec_token': 'test', 'xsec_source': 'pc_feed'})
+
+
+def test_supplement_failure_preserves_ssr_stats_and_stops_requests(monkeypatch):
+    desktop = json.dumps({'noteDetailMap': {NOTE: {'note': {'noteId': NOTE, 'interactInfo': {'likedCount': '5'}}}}})
+    class Client:
+        async def get(self, url, **kwargs):
+            return SimpleNamespace(status_code=200, text=desktop)
+    get = AsyncMock(side_effect=PlatformBlockedError('HTTP 461'))
+    monkeypatch.setattr(xhs, '_get', get)
+    crawler = EngagementCrawler(client=Client(), platform_cookies={'xiaohongshu': 'a1=a; web_session=b'})
+    result = asyncio.run(crawler.fetch(URL))
+    assert result.coverage == 'partial' and result.stats.likes == 5
+    assert result.stats.comments is None and not result.comments_complete
+    assert not result.retryable and get.await_count == 1
+
+
+def test_present_ssr_comment_total_skips_supplement(monkeypatch):
+    desktop = json.dumps({'noteDetailMap': {NOTE: {'note': {'noteId': NOTE, 'interactInfo': {'commentCount': '3'}}}}})
+    class Client:
+        async def get(self, url, **kwargs):
+            return SimpleNamespace(status_code=200, text=desktop)
+    get = AsyncMock()
+    monkeypatch.setattr(xhs, '_get', get)
+    crawler = EngagementCrawler(client=Client(), platform_cookies={'xiaohongshu': 'a1=a; web_session=b'})
+    result = asyncio.run(crawler.fetch_interactions(URL, '小红书'))
+    assert result.stats.comments == 3 and get.await_count == 0

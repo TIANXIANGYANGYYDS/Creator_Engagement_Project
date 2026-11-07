@@ -80,6 +80,29 @@ async def fetch(
             if _has_stats(stats):
                 sources.append("note SSR noteDetailMap")
             target_exists = bool(_target_note(str(getattr(response, "text", "")), work_id))
+            if stats.comments is None and target_exists and cookie and token:
+                # The owner keeps its real browser UA, so requesting a mobile
+                # HTML path can still return desktop SSR with blank counters.
+                # H5 exposes a separate, explicit total (including real zero).
+                try:
+                    count_data = await _get(
+                        crawler, "/api/sns/h5/v1/comment/page",
+                        {"note_id": work_id, "xsec_token": token,
+                         "xsec_source": source or "pc_feed"},
+                        cookie, url,
+                    )
+                    stats.comments = parse_h5_comment_count(count_data, work_id)
+                    if stats.comments is not None:
+                        sources.append("api/sns/h5/v1/comment/page comment_count")
+                except PlatformCrawlerError as exc:
+                    if not _has_stats(stats):
+                        raise
+                    return EngagementResult(
+                        platform="xiaohongshu", canonical_url=canonical_url, work_id=work_id,
+                        coverage="partial", stats=stats, source=" + ".join(sources),
+                        reason=f"已取得公开互动量；补充评论总数失败：{exc}",
+                        comments_complete=not include_comments, retryable=False,
+                    )
             if not _has_stats(stats) and target_exists and token:
                 # The mobile share page has a separate, numeric comment total.
                 # Its explicit zero is usable even when interactInfo is blank.
@@ -242,6 +265,8 @@ async def fetch(
                 comment_error if not comments_complete else
                 "小红书会话和动态签名已生效；评论仅返回指定公开页"
                 if include_comments
+                else "小红书互动量来自公开笔记页 SSR 与移动评论总数接口"
+                if any("h5/v1/comment/page" in item for item in sources)
                 else "小红书互动量来自公开笔记页 SSR"
             ),
             source=" + ".join(sources),
@@ -421,6 +446,26 @@ def parse_stats(text: str, work_id: str) -> EngagementStats:
     if isinstance(values, dict):
         return _stats({key: to_int(value) for key, value in values.items()})
     return EngagementStats()
+
+
+def parse_h5_comment_count(data: dict[str, Any], work_id: str) -> int | None:
+    total = data.get("comment_count")
+    roots = data.get("comment_count_l1")
+    rows = data.get("comments")
+    has_more = data.get("has_more")
+    fetched_at = data.get("time")
+    if (
+        type(total) is int and total >= 0
+        and type(roots) is int and 0 <= roots <= total
+        and type(fetched_at) is int and fetched_at > 0
+        and isinstance(rows, list) and len(rows) <= roots
+        and all(isinstance(row, dict) and row.get("note_id") == work_id for row in rows)
+        and isinstance(has_more, bool)
+        and (not has_more or (rows and data.get("cursor")))
+        and (total != 0 or (not rows and not has_more))
+    ):
+        return total
+    return None
 
 
 def parse_mobile_stats(text: str, work_id: str) -> EngagementStats:

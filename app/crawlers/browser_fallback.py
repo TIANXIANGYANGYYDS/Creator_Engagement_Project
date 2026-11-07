@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from app.crawlers.proxy_provider import ProxyUnavailableError
-from app.crawlers.wechat_browser_resources import wechat_static_resources
+from app.crawlers.proxy_policy import ProxyFailure, collection_requirements
+from app.crawlers.wechat_browser_resources import browser_static_resources
+from app.crawlers.kuaishou_browser_resources import kuaishou_guest_transport
 from app.models.engagement import (
     EngagementComment,
     EngagementPlatform,
@@ -80,7 +83,12 @@ class BrowserFallback:
             for slot in range(self.settings.max_concurrency):
                 slots.put_nowait(slot)
             self._profile_slots[platform] = slots
-        async with self._semaphore:
+        admission = (
+            self.proxy_provider.requirements_scope(collection_requirements(platform, browser=True))
+            if getattr(self.proxy_provider, "lease_optimization_enabled", False)
+            else nullcontext()
+        )
+        async with self._semaphore, admission:
             profile_slot = await slots.get()
             try:
                 return await self._fetch_locked(
@@ -110,6 +118,7 @@ class BrowserFallback:
     ) -> EngagementResult:
         proxy_mapping = None
         lease_ok = False
+        result = None
         try:
             account_direct = platform == "xiaohongshu"
             if self.proxy_required and self.proxy_provider is None and not account_direct:
@@ -151,9 +160,10 @@ class BrowserFallback:
                     "browser.cache.disk.enable": False,
                     "browser.cache.disk_cache_ssl": False,
                 },
-            ) as context, wechat_static_resources(
-                context, proxy_mapping if platform == "wechat" else None,
-                self.settings.timeout_seconds,
+            ) as context, browser_static_resources(
+                context, proxy_mapping, self.settings.timeout_seconds, platform=platform,
+            ), kuaishou_guest_transport(
+                context, proxy_mapping if platform == "kuaishou" else None,
             ):
                 await self._prepare_proxy_bound_guest_state(
                     context,
@@ -262,7 +272,14 @@ class BrowserFallback:
                     else getattr(self.proxy_provider, "on_failure_for", None)
                 )
                 if callback is not None:
-                    value = callback(proxy_mapping, RuntimeError("browser fallback failed")) if not lease_ok else callback(proxy_mapping)
+                    failure = RuntimeError("browser fallback failed")
+                    if getattr(self.proxy_provider, "lease_optimization_enabled", False):
+                        failure = ProxyFailure(
+                            "browser fallback failed",
+                            kind="platform" if result is not None and result.coverage == "blocked" else "task",
+                            platform=platform,
+                        )
+                    value = callback(proxy_mapping, failure) if not lease_ok else callback(proxy_mapping)
                     if asyncio.iscoroutine(value):
                         await value
 
@@ -333,7 +350,9 @@ class BrowserFallback:
         *,
         include_comments: bool = True,
     ) -> None:
-        if not include_comments:
+        if not include_comments or platform == "toutiao":
+            # Toutiao pages also label the publish/login controls "评论".
+            # Read the requested public page via BrowserPageContext instead.
             return
         # Open the comment panel before scrolling.  Several desktop pages keep
         # comments in an inner modal, so scrolling only ``window`` never emits
@@ -391,8 +410,12 @@ class BrowserFallback:
         value = await page_obj.evaluate(
             """
             async ({workId, requestedPage, includeComments}) => {
+              if (location.hostname !== "www.kuaishou.com") {
+                return {reached: false, detailError: "目标页面未加载到 www.kuaishou.com"};
+              }
               const apolloState = globalThis.__APOLLO_STATE__ || {};
-              const cachedPhoto = apolloState[`VisionVideoDetailPhoto:${workId}`] || null;
+              const cache = apolloState.defaultClient || apolloState;
+              const cachedPhoto = cache[`VisionVideoDetailPhoto:${workId}`] || null;
               const apolloPhoto = cachedPhoto ? {
                 id: cachedPhoto.id,
                 viewCount: cachedPhoto.viewCount,
@@ -401,6 +424,19 @@ class BrowserFallback:
                 commentCount: cachedPhoto.commentCount,
                 shareCount: cachedPhoto.shareCount,
               } : null;
+              async function requestJson(path, body) {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 8000);
+                try {
+                  const response = await fetch(path, {
+                    method: "POST", credentials: "include",
+                    headers: {"content-type": "application/json"},
+                    body: JSON.stringify(body), signal: controller.signal,
+                  });
+                  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                  return await response.json();
+                } finally { clearTimeout(timer); }
+              }
               const query = `query visionVideoDetail($photoId: String) {
                 visionVideoDetail(photoId: $photoId) {
                   status
@@ -408,32 +444,32 @@ class BrowserFallback:
                 }
               }`;
               let detailPayload = null;
+              let detailError = null;
               try {
-                const detailResponse = await fetch("/graphql", {
-                  method: "POST",
-                  credentials: "include",
-                  headers: {"content-type": "application/json"},
-                  body: JSON.stringify({
+                if (!apolloPhoto || apolloPhoto.viewCount == null ||
+                    (apolloPhoto.realLikeCount == null && apolloPhoto.likeCount == null)) {
+                  detailPayload = await requestJson("/graphql", {
                     operationName: "visionVideoDetail",
                     variables: {photoId: workId},
                     query,
-                  }),
-                });
-                detailPayload = await detailResponse.json();
-              } catch (_) {}
+                  });
+                }
+              } catch (error) { detailError = error.name + ": " + error.message; }
               let cursor = "";
               const seenCommentIds = new Set();
               const targetPage = includeComments ? requestedPage : 1;
               for (let currentPage = 1; currentPage <= targetPage; currentPage += 1) {
-                const response = await fetch("/rest/v/photo/comment/list", {
-                  method: "POST",
-                  credentials: "include",
-                  headers: {"content-type": "application/json"},
-                  body: JSON.stringify({photoId: workId, pcursor: cursor}),
-                });
-                const commentPage = await response.json();
-                if (!response.ok || commentPage.result !== 1) {
-                  return {apolloPhoto, detailPayload, commentPage, reached: false};
+                let commentPage = null;
+                try {
+                  commentPage = await requestJson("/rest/v/photo/comment/list", {
+                    photoId: workId, pcursor: cursor,
+                  });
+                } catch (error) {
+                  return {apolloPhoto, detailPayload, detailError, reached: false,
+                          commentError: error.name + ": " + error.message};
+                }
+                if (commentPage.result !== 1 || !Array.isArray(commentPage.rootCommentsV2)) {
+                  return {apolloPhoto, detailPayload, detailError, commentPage, reached: false};
                 }
                 if (currentPage === targetPage) {
                   if (Array.isArray(commentPage.rootCommentsV2)) {
@@ -441,14 +477,14 @@ class BrowserFallback:
                       (comment) => !seenCommentIds.has(String(comment.commentId || ""))
                     );
                   }
-                  return {apolloPhoto, detailPayload, commentPage, reached: true};
+                  return {apolloPhoto, detailPayload, detailError, commentPage, reached: true};
                 }
                 for (const comment of commentPage.rootCommentsV2 || []) {
                   seenCommentIds.add(String(comment.commentId || ""));
                 }
                 const next = commentPage.pcursorV2 || commentPage.pcursor || "";
                 if (!next || next === "0" || next === "no_more") {
-                  return {apolloPhoto, detailPayload, commentPage: null, reached: false};
+                  return {apolloPhoto, detailPayload, detailError, commentPage: null, reached: false};
                 }
                 cursor = String(next);
               }
@@ -486,11 +522,12 @@ class BrowserFallback:
                 return EngagementResult(platform=platform, canonical_url=url, work_id=work_id,
                     coverage="blocked", reason=str(exc))
             url = str(page_obj.url)
-        if shared_toutiao or platform in {"weitoutiao", "xueqiu", "sohu"}:
+        if shared_toutiao or platform in {"toutiao", "weitoutiao", "xueqiu", "sohu"}:
             from app.crawlers.platforms import PLATFORM_HANDLERS
             from app.crawlers.platforms.browser_page_context import BrowserPageContext
             target = _browser_target_url(url, platform, work_id)
             target_html = None
+            unavailable = None
             if platform in {"toutiao", "weitoutiao"}:
                 # Hydration removes RENDER_DATA from the live DOM. Preserve the
                 # original target document already captured by this browser.
@@ -501,15 +538,53 @@ class BrowserFallback:
                         text = await response.text()
                     except Exception:
                         continue
-                    if 'RENDER_DATA' in text:
+                    if 'RENDER_DATA' in text or 'error-content' in text:
                         target_html = text
                         break
+                if platform == "toutiao":
+                    from app.crawlers.platforms.toutiao import unavailable_article
+
+                    # Check the target document/DOM, never recommendation text
+                    # or the comments endpoint's ambiguous empty response.
+                    unavailable = unavailable_article(
+                        target_html or await page_obj.content(), work_id,
+                        target if target_html else str(page_obj.url),
+                    )
             result = await PLATFORM_HANDLERS[platform](
                 BrowserPageContext(page_obj, target, target_html), url, work_id, limit,
                 page=page, comment_cursor=None, include_stats=include_stats,
                 include_comments=include_comments,
             )
             result.source = "browser: " + result.source
+            if platform == "toutiao" and include_stats:
+                final = urlparse(str(page_obj.url))
+                if final.hostname == "sso.toutiao.com" and final.path.startswith("/login"):
+                    result.reason = "头条目标详情跳转到登录页；" + result.reason
+                    result.stats_block_reason = "头条目标详情跳转到登录页，当前游客会话不能读取页面统计"
+                elif unavailable and result.coverage in {"complete", "partial"}:
+                    result.reason = "头条目标详情页提示内容不存在；保留仍可验证的评论接口数据"
+                    result.stats_block_reason = "头条目标详情页提示内容不存在，公开评论接口仍有数据"
+            if unavailable:
+                from app.crawlers.platforms.toutiao import UNVERIFIED_TARGET_REASON
+
+                # /article/ can be unavailable for an otherwise valid video
+                # ID. Only the matching anonymous-empty API result plus this
+                # page can establish that the requested comments are absent.
+                if page == 1 and result.coverage == "failed" and result.reason == UNVERIFIED_TARGET_REASON:
+                    unavailable.source = "browser: target error page + unverified comment group"
+                    return unavailable
+            if platform == "toutiao" and result.coverage in {"failed", "blocked"}:
+                try:
+                    body = await page_obj.locator("body").inner_text(timeout=1000)
+                except Exception:
+                    body = ""
+                challenge = _challenge_reason(body)
+                if challenge:
+                    from app.core.status_errors import status_error
+
+                    result.coverage = "blocked"
+                    result.reason = challenge + "；同一浏览器会话的目标评论接口仍不可用"
+                    result._status_error = status_error(challenge)
             return result
         stats = EngagementStats()
         comments: list[EngagementComment] = []
@@ -522,6 +597,7 @@ class BrowserFallback:
         except Exception:
             pass
 
+        guest: dict[str, Any] = {}
         if platform == "kuaishou":
             try:
                 guest = await self._kuaishou_guest_payload(
@@ -546,9 +622,9 @@ class BrowserFallback:
                     next_available = guest_next
                 if source:
                     sources.append(source)
-            except Exception:
+            except Exception as exc:
                 # Captured network responses below remain a valid fallback.
-                pass
+                guest["detailError"] = type(exc).__name__ + ": " + str(exc).partition("\n")[0][:300]
 
         for response in responses:
             response_url = str(getattr(response, "url", ""))
@@ -587,7 +663,12 @@ class BrowserFallback:
             elif platform == "wechat":
                 stats, comments, total_comments, source = _parse_wechat(response_url, text, payload, stats, comments)
             elif platform == "kuaishou":
-                stats, comments, total_comments, source = _parse_kuaishou(response_url, payload, work_id, stats, comments)
+                request_body = getattr(getattr(response, "request", None), "post_data", None)
+                stats, comments, total_comments, source = _parse_kuaishou(
+                    response_url, payload, work_id, stats, comments,
+                    request_body=request_body,
+                    include_comments=page == 1 and not guest.get("reached"),
+                )
             elif platform == "bilibili":
                 stats, comments, total_comments, source = _parse_bilibili(
                     response_url,
@@ -613,11 +694,19 @@ class BrowserFallback:
         useful_stats = any(value is not None for value in stats.model_dump().values())
         useful_comments = bool(comments)
         challenge = _challenge_reason(body_text)
+        if platform == "kuaishou":
+            from app.crawlers.platforms.kuaishou import requires_verification
+
+            guest_responses = [guest.get("detailPayload"), guest.get("commentPage")]
+            if any(requires_verification(payload) for payload in guest_responses):
+                challenge = "快手目标接口明确要求验证码，游客验证尚未通过"
         if xhs_guest_page_blocked:
             coverage = "unsupported"
             reason = "小红书游客态仅开放首屏评论；页码大于 1 需要调用方自己的有效平台会话"
         elif not useful_stats and not useful_comments:
-            coverage = "blocked" if challenge else "unsupported"
+            coverage = "blocked" if challenge else (
+                "failed" if guest.get("detailError") or guest.get("commentError") else "unsupported"
+            )
             reason = challenge or "浏览器已生成会话，但页面未捕获目标公开互动或评论响应"
         else:
             coverage = "partial"
@@ -627,9 +716,18 @@ class BrowserFallback:
             )
         if include_stats and not useful_stats:
             reason += "；互动字段未返回"
-        if include_comments and not useful_comments:
+        if include_comments and not useful_comments and stats.comments == 0:
+            reason += "；目标接口确认评论数为 0"
+        elif include_comments and not useful_comments:
             reason += "；评论字段未返回"
-        return EngagementResult(
+        if platform == "kuaishou" and include_comments and not useful_comments and stats.comments != 0:
+            coverage = "failed" if coverage == "partial" else coverage
+            reason += "；未取得所请求的一级评论页，不能视为公开末页"
+        if platform == "kuaishou" and guest.get("commentError"):
+            reason += "；评论接口请求失败（" + str(guest["commentError"]) + "）"
+        if platform == "kuaishou" and guest.get("detailError"):
+            reason += "；详情接口请求失败（" + str(guest["detailError"]) + "）"
+        result = EngagementResult(
             platform=platform,
             canonical_url=url,
             work_id=work_id,
@@ -644,6 +742,17 @@ class BrowserFallback:
                 else None
             ),
         )
+        if platform == "kuaishou":
+            from app.crawlers.platforms.kuaishou import detail_status_reason
+
+            detail = ((guest.get("detailPayload") or {}).get("data") or {}).get("visionVideoDetail") or {}
+            status = detail.get("status")
+            if status in {1040, 21} and not detail.get("photo") and stats.views is None and stats.likes is None:
+                result.stats_block_reason = detail_status_reason(status)
+                result.reason = result.stats_block_reason + "；" + result.reason
+                if not include_comments or guest.get("reached"):
+                    result.retryable = False
+        return result
 
 
 def _playwright_proxy(proxies: dict[str, str] | None) -> dict[str, str] | None:
@@ -658,7 +767,7 @@ def _should_reload_page(
     result: EngagementResult,
 ) -> bool:
     """Retry deferred pages, except Kuaishou where an explicit guest API already ran."""
-    if platform == "kuaishou":
+    if platform == "kuaishou" or getattr(result, "retryable", None) is False:
         return False
     return (
         result.coverage in {"unsupported", "blocked"}
@@ -894,18 +1003,38 @@ def _parse_wechat(url: str, text: str, payload: Any, stats: EngagementStats, com
     return (EngagementStats(**values), comments, values.get("comments"), "mp article SSR") if any(value is not None for value in values.values()) else (stats, comments, stats.comments, "")
 
 
-def _parse_kuaishou(url: str, payload: Any, work_id: str, stats: EngagementStats, comments: list[EngagementComment]):
+def _parse_kuaishou(
+    url: str, payload: Any, work_id: str, stats: EngagementStats,
+    comments: list[EngagementComment], *, request_body: str | None = None,
+    include_comments: bool = True,
+):
     if not isinstance(payload, dict):
         return stats, comments, stats.comments, ""
-    if "visionCommentList" in url or "comment" in url.lower():
-        parsed = _walk_comments(payload)
-        return stats, parsed, _number(_find_key(payload, {"commentCount", "comment_count", "total"})), "Kuaishou comments"
-    if "visionShortVideoReco" in url or "visionVideoDetail" in url:
-        if work_id not in json.dumps(payload, ensure_ascii=False):
-            return stats, comments, stats.comments, ""
-        values = _stats_from_mapping(payload)
-        return EngagementStats(**values), comments, values.get("comments"), "graphql detail"
-    return stats, comments, stats.comments, ""
+    try:
+        request = json.loads(request_body or "{}")
+    except (TypeError, ValueError):
+        request = {}
+    request = request if isinstance(request, dict) else {}
+    variables = request.get("variables")
+    requested_id = request.get("photoId") or (variables.get("photoId") if isinstance(variables, dict) else None)
+    if requested_id is not None and str(requested_id) != work_id:
+        return stats, comments, stats.comments, ""
+    guest = {"detailPayload": payload}
+    requested_cursor = request.get("pcursor") or (variables.get("pcursor") if isinstance(variables, dict) else None)
+    if include_comments and str(requested_id) == work_id and requested_cursor in {None, "", "0"}:
+        if urlparse(url).path == "/rest/v/photo/comment/list":
+            guest["commentPage"] = payload
+        elif request.get("operationName") == "commentListQuery":
+            page = (payload.get("data") or {}).get("visionCommentList")
+            if isinstance(page, dict):
+                guest["commentPage"] = {**page, "result": 1}
+    parsed, roots, total, _, source = _parse_kuaishou_guest(guest, work_id)
+    fields = parsed.model_dump(exclude_none=True)
+    if fields:
+        stats = stats.model_copy(update=fields)
+    if "commentPage" in guest and total is not None:
+        comments = roots
+    return stats, comments, stats.comments, source
 
 
 def _parse_kuaishou_guest(
@@ -913,6 +1042,8 @@ def _parse_kuaishou_guest(
     work_id: str,
 ) -> tuple[EngagementStats, list[EngagementComment], int | None, bool | None, str]:
     apollo = payload.get("apolloState") or {}
+    if isinstance(apollo, dict) and isinstance(apollo.get("defaultClient"), dict):
+        apollo = apollo["defaultClient"]
     photo_value = payload.get("apolloPhoto")
     photo: dict[str, Any] = photo_value if isinstance(photo_value, dict) else {}
     if isinstance(apollo, dict):
@@ -933,8 +1064,10 @@ def _parse_kuaishou_guest(
     if isinstance(detail_payload, dict):
         detail = (detail_payload.get("data") or {}).get("visionVideoDetail") or {}
         candidate = detail.get("photo") or {}
-        if isinstance(candidate, dict) and str(candidate.get("id") or "") == work_id:
-            photo = candidate
+        if (detail.get("status") in {None, 1}
+                and isinstance(candidate, dict) and str(candidate.get("id") or "") == work_id):
+            photo = {**(photo if str(photo.get("id") or "") == work_id else {}),
+                     **{key: value for key, value in candidate.items() if value is not None}}
 
     stats = EngagementStats()
     if str(photo.get("id") or "") == work_id:
@@ -949,8 +1082,11 @@ def _parse_kuaishou_guest(
     comments: list[EngagementComment] = []
     total = stats.comments
     next_available: bool | None = None
-    if isinstance(comment_page, dict) and comment_page.get("result") == 1:
-        comments = _walk_comments(comment_page.get("rootCommentsV2") or [])
+    if (isinstance(comment_page, dict) and comment_page.get("result") == 1
+            and isinstance(comment_page.get("rootCommentsV2"), list)):
+        from app.crawlers.platforms.kuaishou import parse_comments
+
+        comments = parse_comments(comment_page["rootCommentsV2"])
         total = _number(_first_value(comment_page, "commentCountV2", "commentCount"))
         cursor = _first_value(comment_page, "pcursorV2", "pcursor")
         next_available = cursor not in {None, "", "0", "no_more"}

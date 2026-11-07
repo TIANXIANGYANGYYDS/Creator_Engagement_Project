@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import inspect
 from ipaddress import ip_address
 import logging
@@ -18,6 +18,7 @@ from curl_cffi import CurlInfo, CurlOpt, ffi, lib, requests as curl_requests
 from curl_cffi.requests.exceptions import ProxyError
 
 from app.crawlers.proxy_provider import AsyncProxyProvider, ProxyUnavailableError
+from app.crawlers.proxy_policy import ProxyFailure, ProxyRequirements, collection_requirements
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 RESOLVED_PROXY_HOSTS = frozenset({
     "edith.xiaohongshu.com", "res.wx.qq.com", "webapi.rednote.com",
     "i.news.qq.com",
+    "gdfp.gifshow.com",
 })
 
 
@@ -48,6 +50,9 @@ class _ProxyLeaseState:
     acquired: bool = False
     failed: bool = False
     failure_reason: str = ""
+    failure_kind: str | None = None
+    requirements: ProxyRequirements = field(default_factory=ProxyRequirements)
+    requests_started: bool = False
 
 
 @runtime_checkable
@@ -112,6 +117,7 @@ class CurlAsyncHttpClient:
         self._session = session or default_session_factory()
         self.proxy_provider = proxy_provider
         self.proxy_mode = proxy_mode
+        self.request_timeout_seconds = timeout_seconds
         self._xiaohongshu_session_socket = xiaohongshu_session_socket
         self._dns_timeout = min(3.0, connect_timeout_seconds, timeout_seconds)
         self._lease_state: ContextVar[_ProxyLeaseState | None] = ContextVar(
@@ -175,6 +181,12 @@ class CurlAsyncHttpClient:
         token = self._lease_state.set(state)
         try:
             yield
+        except asyncio.CancelledError:
+            if self.lease_optimization_enabled and not state.failed:
+                state.failed = True
+                state.failure_kind = "task"
+                state.failure_reason = "collection cancelled"
+            raise
         finally:
             self._lease_state.reset(token)
             if state.acquired and state.proxies is not None:
@@ -184,12 +196,75 @@ class CurlAsyncHttpClient:
                     if state.failed
                     else None
                 )
+                if state.failed and self.lease_optimization_enabled and state.failure_kind:
+                    error = ProxyFailure(state.failure_reason or "collection lease failed",
+                                         kind=state.failure_kind, platform=state.requirements.platform)
                 await self._notify_proxy(
                     callback,
                     "on_failure" if state.failed else "on_success",
                     state.proxies,
                     error,
                 )
+
+    @property
+    def lease_optimization_enabled(self) -> bool:
+        return bool(getattr(self.proxy_provider, "lease_optimization_enabled", False))
+
+    @asynccontextmanager
+    async def collection_lease_scope(self, platform: str, *, author: bool = False) -> AsyncIterator[None]:
+        if not self.lease_optimization_enabled:
+            async with self.lease_scope():
+                yield
+            return
+        requirement = collection_requirements(platform, author=author)
+        async with (self.proxy_provider.requirements_scope(requirement), self.lease_scope(),
+                    self.isolated_session_scope()):
+            self._lease_state.get().requirements = requirement
+            yield
+
+    async def ensure_proxy_lifetime(self, seconds: float, *, exclusive: bool = False) -> None:
+        """Upgrade an unused lease after queueing; never move a live identity mid-flow."""
+        if not self.lease_optimization_enabled or self._account_direct.get():
+            return
+        state = self._lease_state.get()
+        if state is None:
+            return
+        requirement = replace(state.requirements, min_remaining_seconds=max(
+            seconds, state.requirements.min_remaining_seconds), exclusive=exclusive or state.requirements.exclusive)
+        remaining = self.active_lease_remaining_seconds()
+        needs_upgrade = exclusive and not state.requirements.exclusive
+        state.requirements = requirement
+        if not state.acquired:
+            return
+        if remaining is None or (remaining >= seconds and not needs_upgrade):
+            return
+        if state.requests_started:
+            state.failed = True
+            state.failure_kind = "task"
+            state.failure_reason = "proxy lifetime insufficient for next step"
+            raise PlatformCrawlerError("代理剩余寿命不足，需从会话边界重试")
+        # A queue wait consumed the unused lease. Return it before reacquiring;
+        # other short jobs may still use it. This is not a business attempt.
+        mapping = state.proxies
+        state.acquired = False
+        state.proxies = None
+        await self._notify_proxy("on_success_for", "on_success", mapping)
+
+    def mark_browser_started(self) -> None:
+        state = self._lease_state.get()
+        if state is not None:
+            state.requests_started = True
+
+    def record_collection_failure(self, coverage: str, reason: str) -> None:
+        if not self.lease_optimization_enabled:
+            self.invalidate_active_lease(f"semantic collection failure: {coverage}: {reason}")
+            return
+        state = self._lease_state.get()
+        if state is None or state.failed:
+            return
+        state.failed = True
+        state.failure_kind = "platform" if coverage == "blocked" else "task"
+        state.failure_reason = f"collection failure: {coverage}: {reason}"
 
     def invalidate_active_lease(self, reason: str) -> None:
         """Discard the current proxy after a semantic block or unusable payload."""
@@ -215,7 +290,7 @@ class CurlAsyncHttpClient:
         if state is None:
             raise RuntimeError("active_proxy_mapping requires lease_scope")
         if not state.acquired:
-            state.proxies = await self._acquire_proxy()
+            state.proxies = await self._acquire_proxy(state.requirements)
             state.acquired = True
         return state.proxies
 
@@ -297,12 +372,17 @@ class CurlAsyncHttpClient:
             if force_direct:
                 proxies = None
             elif lease_state is not None:
+                if self.lease_optimization_enabled:
+                    await self.ensure_proxy_lifetime(self.request_timeout_seconds + 5)
                 if not lease_state.acquired:
-                    lease_state.proxies = await self._acquire_proxy()
+                    lease_state.proxies = await self._acquire_proxy(lease_state.requirements)
                     lease_state.acquired = True
                 proxies = lease_state.proxies
             else:
-                proxies = await self._acquire_proxy()
+                proxies = await self._acquire_proxy(ProxyRequirements(
+                    platform=urlsplit(url).hostname or "",
+                    min_remaining_seconds=self.request_timeout_seconds + 5,
+                ))
             proxy_url = (proxies or {}).get("https") or (proxies or {}).get("http")
             if self.proxy_mode == "required" and not proxy_url and not account_direct:
                 error = ProxyUnavailableError(
@@ -323,6 +403,8 @@ class CurlAsyncHttpClient:
             target = urlsplit(url)
             endpoint = f"{target.hostname}{target.path}"
             try:
+                if lease_state is not None:
+                    lease_state.requests_started = True
                 session = self._isolated_session.get() or self._session
                 request = getattr(session, "request", None)
                 if request is not None:
@@ -371,8 +453,11 @@ class CurlAsyncHttpClient:
                 last_error = exc
                 if lease_state is not None:
                     lease_state.failed = True
+                    lease_state.failure_kind = "transport"
+                    lease_state.failure_reason = f"transport failure: {type(exc).__name__}"
                 else:
-                    await self._notify_proxy("on_failure_for", "on_failure", proxies, exc)
+                    failure = ProxyFailure(type(exc).__name__, kind="transport") if self.lease_optimization_enabled else exc
+                    await self._notify_proxy("on_failure_for", "on_failure", proxies, failure)
                 if attempt + 1 < attempts:
                     continue
                 raise
@@ -385,12 +470,16 @@ class CurlAsyncHttpClient:
             if status in {403, 407, 412, 418, 429, 432, 471} or status >= 500:
                 if lease_state is not None:
                     lease_state.failed = True
+                    lease_state.failure_kind = "transport" if status == 407 else "platform"
+                    lease_state.failure_reason = f"upstream HTTP {status}"
                 else:
                     await self._notify_proxy(
                         "on_failure_for",
                         "on_failure",
                         proxies,
-                        RuntimeError(f"proxy request returned HTTP {status}"),
+                        (ProxyFailure(f"upstream HTTP {status}", kind="transport" if status == 407 else "platform",
+                                      platform=target.hostname or "") if self.lease_optimization_enabled
+                         else RuntimeError(f"proxy request returned HTTP {status}")),
                     )
             elif lease_state is None:
                 await self._notify_proxy("on_success_for", "on_success", proxies)
@@ -451,14 +540,20 @@ class CurlAsyncHttpClient:
             finally:
                 lib.curl_slist_free_all(route)
 
-    async def _acquire_proxy(self) -> dict[str, str] | None:
+    async def _acquire_proxy(self, requirements: ProxyRequirements | None = None) -> dict[str, str] | None:
         if self.proxy_mode == "direct":
             return None
         if self.proxy_provider is None:
             if self.proxy_mode == "required":
                 raise ProxyUnavailableError("代理模式为 required，但没有配置代理提供器")
             return None
-        proxies = await self.proxy_provider.get_requests_proxies()
+        if self.lease_optimization_enabled:
+            async with self.proxy_provider.requirements_scope(requirements or ProxyRequirements(
+                min_remaining_seconds=self.request_timeout_seconds + 5,
+            )):
+                proxies = await self.proxy_provider.get_requests_proxies()
+        else:
+            proxies = await self.proxy_provider.get_requests_proxies()
         if proxies is None and self.proxy_mode == "required":
             raise ProxyUnavailableError("未获取到代理，禁止本机直连请求")
         return proxies

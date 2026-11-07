@@ -14,12 +14,19 @@ class BrowserPageContext:
     async def _get_response(self, url, *, params=None, headers=None, **kwargs):
         if url.split("?", 1)[0].rstrip("/") == self.target_url.split("?", 1)[0].rstrip("/") and not params:
             text = self.target_html if self.target_html is not None else await self.page.content()
-            return SimpleNamespace(text=text, status_code=200, url=self.page.url)
+            return SimpleNamespace(text=text, status_code=200,
+                                   url=self.target_url if self.target_html is not None else self.page.url)
         request_url = url + (("&" if "?" in url else "?") + urlencode(params) if params else "")
         if urlsplit(url).netloc == urlsplit(self.page.url).netloc:
             data = await self.page.evaluate("""async (url) => {
-                const response = await fetch(url, {credentials: 'include'});
-                return {status: response.status, text: await response.text()};
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 15000);
+                try {
+                    const response = await fetch(url, {
+                        credentials: 'include', signal: controller.signal
+                    });
+                    return {status: response.status, text: await response.text()};
+                } finally { clearTimeout(timer); }
             }""", request_url)
             status, text = data["status"], data["text"]
         else:

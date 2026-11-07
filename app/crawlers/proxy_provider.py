@@ -4,15 +4,17 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 import logging
+import random
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 import requests
 from app.core.config import Settings
+from app.crawlers.proxy_policy import ProxyFailure, ProxyRequirements
 
 
 logger = logging.getLogger(__name__)
@@ -523,6 +525,10 @@ class _ProxyPoolSlot:
     expire_at: float  #: 槽位停止分配新请求的单调时钟截止点。
     in_flight: int = 0  #: 当前已租出但尚未收到成功或失败通知的请求数。
     draining: bool = False  #: 是否已过期或失败、只等待在途请求释放后删除。
+    exclusive: bool = False
+    cooldown_until: float = 0
+    platform_cooldowns: dict[str, float] = field(default_factory=dict)
+    transport_errors: int = 0
 
 
 @dataclass
@@ -539,6 +545,13 @@ class ProxyPoolStats:
     success_count: int = 0  #: 调用方归还的成功代理租约累计次数。
     failure_count: int = 0  #: 调用方归还的失败代理租约累计次数。
     max_in_flight: int = 0  #: 池内所有槽位同时在途请求数的历史峰值。
+    max_per_ip_in_flight: int = 0
+    lifetime_rejections: int = 0
+    ineligible_replacements: int = 0
+    transport_cooldowns: int = 0
+    platform_cooldowns: int = 0
+    task_failures: int = 0
+    min_remaining_at_lease: float | None = None
 
 
 @dataclass
@@ -565,12 +578,18 @@ class AsyncDailiProxyPool(DailiProxyProvider):
         refresh_before_seconds: int = 10,
         rate_limiter: Optional[AsyncRequestRateLimiter] = None,
         api_url: str | None = None,
+        lease_optimization_enabled: bool = False,
+        refill_batch_size: int = 2,
     ) -> None:
         """校验池容量和单代理并发上限，并初始化空槽位集合与统计指标。"""
         if pool_size <= 0 or pool_size > 200:
             raise ValueError("pool_size 必须在 1 到 200 之间")
         if max_concurrency_per_proxy <= 0:
             raise ValueError("max_concurrency_per_proxy 必须大于 0")
+        if lease_optimization_enabled and max_concurrency_per_proxy > 20:
+            raise ValueError("优化模式单 IP 租约并发不能超过供应商上限 20")
+        if refill_batch_size <= 0:
+            raise ValueError("refill_batch_size 必须大于 0")
         super().__init__(
             minutes,
             count=pool_size,
@@ -580,6 +599,8 @@ class AsyncDailiProxyPool(DailiProxyProvider):
         )
         self.pool_size = pool_size  #: 期望保持的非排空代理槽位数量。
         self.max_concurrency_per_proxy = max_concurrency_per_proxy  #: 单个代理允许同时租出的最大请求数。
+        self.lease_optimization_enabled = lease_optimization_enabled
+        self.refill_batch_size = refill_batch_size
         self._client = httpx.AsyncClient(timeout=timeout, trust_env=False)  #: 批量获取端点的异步 HTTP 客户端。
         self._condition_instance: Optional[asyncio.Condition] = None  #: 延迟绑定当前事件循环的池状态条件变量。
         self._rate_limiter = rate_limiter or AsyncRequestRateLimiter()  #: 当前池实例的异步供应商 API 限流器。
@@ -594,6 +615,22 @@ class AsyncDailiProxyPool(DailiProxyProvider):
             "creator_engagement_proxy_affinity", default=None,
         )
         self._affinity_slots: dict[str, tuple[str, int]] = {}
+        self._requirements: ContextVar[ProxyRequirements] = ContextVar(
+            "proxy_requirements", default=ProxyRequirements(),
+        )
+        self._retired_until: dict[tuple[str, int], float] = {}
+
+    @asynccontextmanager
+    async def requirements_scope(self, requirements: ProxyRequirements) -> AsyncIterator[None]:
+        if requirements.min_remaining_seconds < 0 or requirements.min_remaining_seconds >= (
+            self.minutes * 60 - self.refresh_before_seconds - 5
+        ):
+            raise ValueError("代理寿命预算超出可分配范围")
+        token = self._requirements.set(requirements)
+        try:
+            yield
+        finally:
+            self._requirements.reset(token)
 
     @property
     def _condition(self) -> asyncio.Condition:
@@ -646,6 +683,19 @@ class AsyncDailiProxyPool(DailiProxyProvider):
             for slot in self._slots
             if not (slot.draining and slot.in_flight == 0)
         ]
+        self._retired_until = {key: until for key, until in self._retired_until.items() if until > now}
+
+    def _eligible(self, slot: _ProxyPoolSlot) -> bool:
+        if not self.lease_optimization_enabled:
+            return True
+        requirement = self._requirements.get()
+        now = time.monotonic()
+        if slot.expire_at - now < requirement.min_remaining_seconds:
+            self.stats.lifetime_rejections += 1
+            return False
+        return (not slot.exclusive and (not requirement.exclusive or slot.in_flight == 0)
+                and slot.cooldown_until <= now
+                and slot.platform_cooldowns.get(requirement.platform, 0) <= now)
 
     def _select_available_slot(self) -> Optional[_ProxyPoolSlot]:
         """选择负载最低且截止时间最早的可分配槽位，没有则返回 ``None``。"""
@@ -655,6 +705,7 @@ class AsyncDailiProxyPool(DailiProxyProvider):
             for slot in self._slots
             if not slot.draining
             and slot.in_flight < self.max_concurrency_per_proxy
+            and self._eligible(slot)
         ]
         if not candidates:
             return None
@@ -670,6 +721,20 @@ class AsyncDailiProxyPool(DailiProxyProvider):
                 selected.endpoint.host, selected.endpoint.port,
             )
         return selected
+
+    def _replace_ineligible_idle_slot(self) -> None:
+        # A physically full pool may have no lease that can finish this job.
+        # Replace only one idle slot; never cancel another borrower's request.
+        idle = [slot for slot in self._slots if not slot.draining and slot.in_flight == 0
+                and not self._eligible(slot)]
+        if idle:
+            slot = min(idle, key=lambda item: item.expire_at)
+            slot.draining = True
+            self._retired_until[(slot.endpoint.host, slot.endpoint.port)] = max(
+                slot.expire_at + self.refresh_before_seconds, time.monotonic() + 30,
+            )
+            self.stats.ineligible_replacements += 1
+            self._mark_expired_and_cleanup()
 
     async def _fetch_proxy_endpoints_async(
         self,
@@ -715,6 +780,14 @@ class AsyncDailiProxyPool(DailiProxyProvider):
                 slot = self._select_available_slot()
                 if slot is not None:
                     slot.in_flight += 1
+                    if self.lease_optimization_enabled:
+                        slot.exclusive = self._requirements.get().exclusive
+                        remaining = max(0, slot.expire_at - time.monotonic())
+                        previous = self.stats.min_remaining_at_lease
+                        self.stats.min_remaining_at_lease = min(previous, remaining) if previous is not None else remaining
+                        self.stats.max_per_ip_in_flight = max(self.stats.max_per_ip_in_flight, slot.in_flight)
+                        logger.debug("proxy_lease_assigned platform=%s remaining_seconds=%.1f in_flight=%s",
+                                     self._requirements.get().platform, remaining, slot.in_flight)
                     self.stats.lease_count += 1
                     self.stats.max_in_flight = max(
                         self.stats.max_in_flight,
@@ -723,14 +796,20 @@ class AsyncDailiProxyPool(DailiProxyProvider):
                     return slot.proxies
 
                 active_count = sum(not slot.draining for slot in self._slots)
+                if self.lease_optimization_enabled and not self._fetching and active_count >= self.pool_size:
+                    self._replace_ineligible_idle_slot()
+                    active_count = sum(not slot.draining for slot in self._slots)
                 if not self._fetching and active_count < self.pool_size:
                     self._fetching = True
                     fetch_count = self.pool_size - active_count
+                    if self.lease_optimization_enabled:
+                        fetch_count = min(fetch_count, self.refill_batch_size)
                 else:
                     await self._condition.wait()
                     continue
 
             try:
+                fetch_started = time.monotonic()
                 endpoints = await self._fetch_proxy_endpoints_async(fetch_count)
                 async with self._condition:
                     existing = {
@@ -741,12 +820,19 @@ class AsyncDailiProxyPool(DailiProxyProvider):
                         identity = (endpoint.host, endpoint.port)
                         if identity in existing:
                             continue
+                        if self.lease_optimization_enabled and self._retired_until.get(identity, 0) > time.monotonic():
+                            continue
                         existing.add(identity)
+                        expire_at = self._slot_expire_at()
+                        if self.lease_optimization_enabled:
+                            # Do not grant the supplier round trip as extra IP life.
+                            expire_at = min(expire_at, fetch_started + self.minutes * 60 - self.refresh_before_seconds)
+                            expire_at -= random.uniform(0, 5)
                         self._slots.append(
                             _ProxyPoolSlot(
                                 endpoint=endpoint,
                                 proxies=self._build_proxies_from_endpoint(endpoint),
-                                expire_at=self._slot_expire_at(),
+                                expire_at=expire_at,
                             )
                         )
                         added += 1
@@ -762,6 +848,10 @@ class AsyncDailiProxyPool(DailiProxyProvider):
                             sum(not slot.draining for slot in self._slots),
                         )
                     elif self._select_available_slot() is None:
+                        return None
+                    if self.lease_optimization_enabled and added and self._select_available_slot() is None:
+                        # Even a newly returned lease cannot meet this budget.
+                        # Fail boundedly instead of buying replacements forever.
                         return None
             finally:
                 # A timed-out borrower must not leave the pool permanently
@@ -791,6 +881,10 @@ class AsyncDailiProxyPool(DailiProxyProvider):
             if slot is None:
                 return
             slot.in_flight = max(0, slot.in_flight - 1)
+            if slot.in_flight == 0:
+                slot.exclusive = False
+            if self.lease_optimization_enabled and slot.cooldown_until <= time.monotonic():
+                slot.transport_errors = max(0, slot.transport_errors - 1)
             self.stats.success_count += 1
             self._mark_expired_and_cleanup()
             self._condition.notify_all()
@@ -800,7 +894,7 @@ class AsyncDailiProxyPool(DailiProxyProvider):
         proxies: Optional[Dict[str, str]],
         exc: Exception,
     ) -> None:
-        """归还失败租约并淘汰对应端点，再唤醒等待补池或分配的协程。"""
+        """归还失败租约；实验模式按类型冷却或淘汰，再唤醒等待者。"""
         if proxies is None:
             return
         async with self._condition:
@@ -808,10 +902,31 @@ class AsyncDailiProxyPool(DailiProxyProvider):
             if slot is None:
                 return
             slot.in_flight = max(0, slot.in_flight - 1)
+            if slot.in_flight == 0:
+                slot.exclusive = False
             self.stats.failure_count += 1
+            if self.lease_optimization_enabled and isinstance(exc, ProxyFailure):
+                now = time.monotonic()
+                if exc.kind == "task":
+                    self.stats.task_failures += 1
+                elif exc.kind == "platform":
+                    slot.platform_cooldowns[exc.platform] = now + 30
+                    self.stats.platform_cooldowns += 1
+                else:
+                    slot.transport_errors += 1
+                    slot.cooldown_until = now + 15
+                    self.stats.transport_cooldowns += 1
+                if slot.transport_errors < 3:
+                    self._mark_expired_and_cleanup()
+                    self._condition.notify_all()
+                    return
             if not slot.draining:
                 slot.draining = True
                 self.stats.discarded_endpoint_count += 1
+                if self.lease_optimization_enabled:
+                    self._retired_until[(slot.endpoint.host, slot.endpoint.port)] = max(
+                        slot.expire_at + self.refresh_before_seconds, time.monotonic() + 30,
+                    )
                 logger.warning(
                     "proxy_pool_discarded endpoint=%s error=%s",
                     slot.endpoint.display(),

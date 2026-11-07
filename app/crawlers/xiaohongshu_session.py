@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import random
 import time
-from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -24,10 +24,13 @@ READ_API = {
     ("GET", "/api/sns/web/v2/user/me"),
     ("GET", "/api/sns/web/v1/user_posted"),
     ("GET", "/api/sns/web/v2/comment/page"),
+    ("GET", "/api/sns/h5/v1/comment/page"),
     ("GET", "/api/sns/web/v2/comment/sub/page"),
     ("POST", "/api/sns/web/v1/search/usersearch"),
+    ("POST", "/api/sns/agentspark/web/note/detail"),
 }
 STOP_STATES = {"reauthorization_required", "risk_limited", "transport_stopped"}
+COMMENT_PAGE = "/api/sns/web/v2/comment/page"
 
 
 def validate_read(method: str, url: str) -> None:
@@ -63,7 +66,9 @@ async def browser_request(socket: str, method: str, url: str, **kwargs):
     except httpx.HTTPError as exc:
         raise PlatformBlockedError("小红书常驻浏览器不可用，已停止请求；禁止回退代理或独立会话") from exc
     if response.status_code != 200:
-        raise PlatformBlockedError(response.json().get("detail", "小红书常驻浏览器已停止请求"))
+        error = response.json()
+        kind = PlatformCrawlerError if error.get("error_type") == "request_failed" else PlatformBlockedError
+        raise kind(error.get("detail", "小红书常驻浏览器已停止请求"))
     body = response.json()
     return httpx.Response(body["status"], text=body["text"], headers=body.get("headers"),
                           request=httpx.Request(method, body["url"]))
@@ -78,6 +83,7 @@ class XiaohongshuSessionOwner:
         self.count = 0
         self.errors = 0
         self.pending_url = ""
+        self.network_response = {}
         self.status = "starting"
         self.login_mode = False
         self.last_success = None
@@ -149,7 +155,32 @@ class XiaohongshuSessionOwner:
         # CORS can hide a rejected response from fetch(), but Playwright still
         # sees its HTTP status. Trip the stop before another queued read starts.
         if self.pending_url and response.url == self.pending_url:
+            self.network_response = {"status": response.status}
+            if response.status == 461:
+                headers = response.headers
+                self.network_response["verification_required"] = bool(
+                    headers.get("verifytype") or headers.get("verifyuuid")
+                )
+            if 300 <= response.status < 400:
+                location = response.headers.get("location", "")
+                target = urlsplit(urljoin(response.url, location))
+                # Record only the destination and numeric business code, never
+                # query strings containing tokens, credentials or return URLs.
+                self.network_response["redirect_host"] = target.hostname
+                self.network_response["redirect_path"] = target.path
+                query = dict(parse_qsl(target.query))
+                code = query.get("error_code") or query.get("code", "")
+                if code.lstrip("-").isdigit():
+                    self.network_response["redirect_code"] = code
+                if any(part in target.path.lower() for part in ("/login", "captcha", "/security")):
+                    self.set_status("risk_limited", "页面重定向要求验证")
             if response.status in {401, 403, 412, 418, 429, 432, 461, 471}:
+                # comment/page also uses 461 + 300031 for a note with missing
+                # access context. Decide after reading its JSON body. A hidden
+                # body or an explicit verification header still stops reads.
+                if (response.status == 461 and urlsplit(response.url).path == COMMENT_PAGE
+                        and not self.network_response["verification_required"]):
+                    return
                 self.set_status("risk_limited", f"HTTP {response.status}")
 
     async def login(self):
@@ -187,6 +218,9 @@ class XiaohongshuSessionOwner:
         data = payload.get("data")
         if code in {-100, -101} or (path.endswith("/user/me") and isinstance(data, dict) and data.get("guest") is True):
             self.set_status("reauthorization_required", f"登录失效，业务码 {code}")
+        elif (status == 461 and code == 300031 and path == COMMENT_PAGE
+              and not self.network_response.get("verification_required")):
+            pass  # Note-specific denial; reported by request(), not account logout/risk.
         elif status in {401, 403, 412, 418, 429, 432, 461, 471} or code in {-104, -103, -13002, 461, 471}:
             self.set_status("risk_limited", f"HTTP {status}，业务码 {code}")
         elif any(part in path.lower() for part in ("/login", "captcha", "/security")):
@@ -230,6 +264,7 @@ class XiaohongshuSessionOwner:
             if body is not None:
                 headers["Content-Type"] = "application/json"
             self.pending_url = url
+            self.network_response = {}
             started = time.monotonic()
             record = {"at": datetime.now(timezone.utc).isoformat(), "method": method,
                       "endpoint": parts.hostname + parts.path,
@@ -249,19 +284,34 @@ class XiaohongshuSessionOwner:
                 record["code"] = self.inspect(result)
                 await self.store.save_context("xiaohongshu", self.context)
                 self.check_ready()
+                if result["status"] == 461 and record["code"] == 300031:
+                    record["failure_scope"] = "note"
+                    raise PlatformBlockedError("小红书目标笔记访问被拒绝，业务码 300031；会话保持可用")
                 return result
             except PlatformBlockedError:
                 raise
             except Exception as exc:
-                self.check_ready()
-                self.errors += 1
                 record["exception_type"] = type(exc).__name__
+                if self.network_response.get("status") == 461:
+                    self.set_status("risk_limited", "HTTP 461；未取得可核验的业务响应")
+                self.check_ready()
+                if 300 <= self.network_response.get("status", 0) < 400:
+                    self.errors = 0
+                    code = self.network_response.get("redirect_code")
+                    detail = f"，页面错误码 {code}" if code else ""
+                    raise PlatformBlockedError(
+                        f"小红书当前访问链接发生 HTTP {self.network_response['status']} 重定向{detail}；"
+                        "目标内容未返回，会话保持可用"
+                    ) from None
+                self.errors += 1
                 if self.errors >= 3:
-                    self.set_status("transport_stopped", "连续 3 次网络或浏览器异常；未判定为登录失效")
+                    self.set_status("transport_stopped", "连续 3 次网络或浏览器异常；账号状态尚未验证")
+                    self.check_ready()
                 raise PlatformCrawlerError("小红书浏览器请求异常：" + type(exc).__name__) from exc
             finally:
                 self.last_end = time.monotonic()
                 self.pending_url = ""
+                record.update(self.network_response)
                 record["state"] = self.status
                 with (self.root / "requests.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
